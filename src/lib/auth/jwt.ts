@@ -3,9 +3,10 @@ import { env } from '@/lib/env';
 
 export interface TokenPayload {
   sub: string;
-  tenantId: string | null;  // null for platform users
+  tenantId: string | null;   // null for platform users
   role: string;
   type: 'tenant' | 'platform';
+  impersonatedBy?: string;   // platform userId; present only in impersonation sessions
 }
 
 interface SignedPayload extends TokenPayload {

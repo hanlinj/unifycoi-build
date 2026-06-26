@@ -102,3 +102,86 @@ describe('TenantDB query isolation', () => {
     expect(tdb.tenantId).toBe('t1');
   });
 });
+
+describe('TenantDB write helpers', () => {
+  let db: Database.Database;
+  const now = new Date().toISOString();
+
+  beforeEach(() => {
+    db = makeDb();
+    db.prepare('INSERT INTO tenants VALUES (?,?,?,?,?)').run('ta', 'Tenant A', 'active', 9000, now);
+    db.prepare('INSERT INTO tenants VALUES (?,?,?,?,?)').run('tb', 'Tenant B', 'active', 9000, now);
+  });
+  afterEach(() => { db.close(); });
+
+  test('insert() writes tenant_id automatically', () => {
+    const tdb = createTenantDb(db, 'ta');
+    tdb.insert('vendors', { id: 'v1', business_name: 'Acme', trade: 'plumbing', created_at: now });
+    const row = db.prepare('SELECT tenant_id FROM vendors WHERE id = ?').get('v1') as { tenant_id: string };
+    expect(row.tenant_id).toBe('ta');
+  });
+
+  test('insert() throws when row.tenant_id conflicts with bound tenantId', () => {
+    const tdb = createTenantDb(db, 'ta');
+    expect(() =>
+      tdb.insert('vendors', { id: 'v2', tenant_id: 'tb', business_name: 'X', trade: 'plumbing', created_at: now })
+    ).toThrow(/conflicts with bound tenantId/);
+  });
+
+  test('insert() accepts row.tenant_id when it matches bound tenantId', () => {
+    const tdb = createTenantDb(db, 'ta');
+    expect(() =>
+      tdb.insert('vendors', { id: 'v3', tenant_id: 'ta', business_name: 'Y', trade: 'electrical', created_at: now })
+    ).not.toThrow();
+  });
+
+  test('update() cannot modify a row belonging to a different tenant', () => {
+    // Seed a vendor in tenant A
+    db.prepare('INSERT INTO vendors VALUES (?,?,?,?,?,?,?,?)').run('v-a', 'ta', 'Acme Plumbing', null, null, null, 'plumbing', now);
+
+    // Tenant B's TenantDB tries to rename it by id — WHERE gets tenant_id = 'tb' injected
+    const tdbB = createTenantDb(db, 'tb');
+    tdbB.update('vendors', { business_name: 'Hacked!' }, { id: 'v-a' });
+
+    const row = db.prepare('SELECT business_name FROM vendors WHERE id = ?').get('v-a') as { business_name: string };
+    expect(row.business_name).toBe('Acme Plumbing'); // unchanged
+  });
+
+  test('update() modifies the correct tenant row and leaves the other untouched', () => {
+    db.prepare('INSERT INTO vendors VALUES (?,?,?,?,?,?,?,?)').run('v-a', 'ta', 'Acme Plumbing', null, null, null, 'plumbing', now);
+    db.prepare('INSERT INTO vendors VALUES (?,?,?,?,?,?,?,?)').run('v-b', 'tb', 'Beta Electric', null, null, null, 'electrical', now);
+
+    const tdbA = createTenantDb(db, 'ta');
+    tdbA.update('vendors', { business_name: 'Acme Updated' }, { id: 'v-a' });
+
+    const a = db.prepare('SELECT business_name FROM vendors WHERE id = ?').get('v-a') as { business_name: string };
+    const b = db.prepare('SELECT business_name FROM vendors WHERE id = ?').get('v-b') as { business_name: string };
+    expect(a.business_name).toBe('Acme Updated');
+    expect(b.business_name).toBe('Beta Electric');
+  });
+
+  test('del() cannot delete a row belonging to a different tenant', () => {
+    db.prepare('INSERT INTO vendors VALUES (?,?,?,?,?,?,?,?)').run('v-a', 'ta', 'Acme', null, null, null, 'plumbing', now);
+
+    const tdbB = createTenantDb(db, 'tb');
+    tdbB.del('vendors', { id: 'v-a' });
+
+    const row = db.prepare('SELECT id FROM vendors WHERE id = ?').get('v-a');
+    expect(row).toBeTruthy(); // still exists
+  });
+
+  test('update() throws when set is empty', () => {
+    const tdb = createTenantDb(db, 'ta');
+    expect(() => tdb.update('vendors', {}, { id: 'v-a' })).toThrow(/set object must not be empty/);
+  });
+
+  test('update() throws when where is empty', () => {
+    const tdb = createTenantDb(db, 'ta');
+    expect(() => tdb.update('vendors', { business_name: 'X' }, {})).toThrow(/where object must not be empty/);
+  });
+
+  test('del() throws when where is empty', () => {
+    const tdb = createTenantDb(db, 'ta');
+    expect(() => tdb.del('vendors', {})).toThrow(/where object must not be empty/);
+  });
+});
