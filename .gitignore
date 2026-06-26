@@ -1,0 +1,24 @@
+# Secrets — ignore the real env, KEEP the example
+.env
+.env.local
+.env.*.local
+!.env.example
+
+# Node / Next.js
+node_modules/
+.next/
+out/
+dist/
+build/
+
+# Local data (SQLite db + filesystem-adapter blobs — never commit vendor data)
+data/
+*.db
+*.sqlite
+*.sqlite3
+
+# OS / editor
+.DS_Store
+*.log
+.vscode/
+.idea/
