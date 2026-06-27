@@ -1,0 +1,4 @@
+
+# Test document fixtures (vendor PDFs not committed)
+test-fixtures/vendors/*/
+test-fixtures/*.pdf
