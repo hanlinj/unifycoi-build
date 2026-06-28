@@ -61,6 +61,7 @@ function normalizeEntityName(name: string): string {
 }
 
 function hasEntitySuffix(name: string): boolean {
+  ENTITY_SUFFIX_RE.lastIndex = 0;
   return ENTITY_SUFFIX_RE.test(name);
 }
 
