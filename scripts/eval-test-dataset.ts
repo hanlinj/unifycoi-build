@@ -27,7 +27,7 @@ process.env['SQLITE_PATH'] = ':memory:';
 process.env['STORAGE_DRIVER'] = 'filesystem';
 process.env['STORAGE_PATH'] = '/tmp/unifycoi-eval-blobs';
 
-import { extractDocument, setEngineDateOverride, checkExpirationGate } from '../src/lib/extraction/extractor';
+import { extractDocument, setEngineDateOverride, checkExpirationGate, getUsage, resetUsage } from '../src/lib/extraction/extractor';
 import { runRulesEngine } from '../src/lib/verification/engine';
 import { generateAdvisories } from '../src/lib/verification/advisories';
 import { resolveRequirements } from '../src/lib/requirements/resolver';
@@ -72,6 +72,12 @@ interface GroundTruth {
 
 // ── Result tracking ────────────────────────────────────────────────────────────
 
+// Pricing constants (USD per token) — claude-sonnet-4-6 primary, claude-opus-4-8 escalation
+const PRICE = {
+  sonnet: { in: 3.0 / 1_000_000, out: 15.0 / 1_000_000 },
+  opus:   { in: 15.0 / 1_000_000, out: 75.0 / 1_000_000 },
+};
+
 interface VendorResult {
   vendorKey: string;
   displayName: string;
@@ -82,6 +88,7 @@ interface VendorResult {
   advisoryMismatches: string[];
   error?: string;
   skipped?: boolean;
+  usage?: { calls: number; input_tokens: number; output_tokens: number; escalated: boolean };
 }
 
 // ── Main ───────────────────────────────────────────────────────────────────────
@@ -218,14 +225,17 @@ async function evalVendor(
     return result;
   }
 
-  // Extract all documents
+  // Extract all documents — track per-vendor usage
   const bundle: ExtractionBundle = {};
   let coiExtraction: ProcessedCOIExtraction | null = null;
+  let vendorEscalated = false;
 
+  resetUsage();
   try {
     for (const file of files) {
       const pdfBytes = fs.readFileSync(file.path);
-      const { payload } = await extractDocument(pdfBytes, file.docType);
+      const { payload, escalated } = await extractDocument(pdfBytes, file.docType);
+      if (escalated) vendorEscalated = true;
       if (file.docType === 'coi') {
         bundle.coi = payload as ProcessedCOIExtraction;
         coiExtraction = payload as ProcessedCOIExtraction;
@@ -240,6 +250,7 @@ async function evalVendor(
     result.actualOverall = 'ERROR';
     return result;
   }
+  result.usage = { ...getUsage(), escalated: vendorEscalated };
 
   // Check expiration gate for COI
   if (coiExtraction) {
@@ -347,6 +358,12 @@ async function main() {
 
     const icon = result.skipped ? '⏭' : result.correct && result.evalMismatches.length === 0 && result.advisoryMismatches.length === 0 ? '✓' : '✗';
     console.log(`  ${icon} Overall: expected=${result.expectedOverall} actual=${result.actualOverall}`);
+    if (result.usage) {
+      const u = result.usage;
+      // Primary (sonnet) cost vs escalation (opus) cost; escalated docs use opus for the extra pass only
+      const primaryCost = u.input_tokens * PRICE.sonnet.in + u.output_tokens * PRICE.sonnet.out;
+      console.log(`     API calls=${u.calls} in=${u.input_tokens.toLocaleString()} out=${u.output_tokens.toLocaleString()} ~$${primaryCost.toFixed(4)}${u.escalated ? ' [ESCALATED]' : ''}`);
+    }
     if (result.evalMismatches.length > 0) {
       console.log('  Evaluation mismatches:');
       result.evalMismatches.forEach((m) => console.log(`    - ${m}`));
@@ -400,6 +417,30 @@ async function main() {
   console.log(`  Eval key accuracy:     ${evalCorrect} / ${totalEvaluated} (${pct(evalCorrect, totalEvaluated)})`);
   console.log(`  Advisory accuracy:     ${advCorrect} / ${totalEvaluated} (${pct(advCorrect, totalEvaluated)})`);
   console.log(`  Fully correct:         ${fullyCorrect} / ${totalEvaluated} (${pct(fullyCorrect, totalEvaluated)})`);
+
+  // ── Per-document Vision spend breakdown ───────────────────────────────────────
+  const spendRows = nonSkipped.filter((r) => r.usage);
+  if (spendRows.length > 0) {
+    console.log('\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+    console.log('  Vision API Spend (primary model pricing; escalated=Opus 4.8 extra pass)');
+    console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+    console.log('  Vendor'.padEnd(42) + 'Calls'.padEnd(8) + 'In tok'.padEnd(10) + 'Out tok'.padEnd(10) + 'Cost (USD)');
+    console.log('  ' + '─'.repeat(78));
+    let totalIn = 0, totalOut = 0, totalCost = 0, totalCalls = 0;
+    for (const r of spendRows) {
+      const u = r.usage!;
+      const cost = u.input_tokens * PRICE.sonnet.in + u.output_tokens * PRICE.sonnet.out;
+      const esc = u.escalated ? '*' : ' ';
+      console.log(`  ${(r.displayName.slice(0, 39) + esc).padEnd(42)}${String(u.calls).padEnd(8)}${u.input_tokens.toLocaleString().padEnd(10)}${u.output_tokens.toLocaleString().padEnd(10)}$${cost.toFixed(4)}`);
+      totalIn += u.input_tokens;
+      totalOut += u.output_tokens;
+      totalCost += cost;
+      totalCalls += u.calls;
+    }
+    console.log('  ' + '─'.repeat(78));
+    console.log(`  ${'TOTAL'.padEnd(42)}${String(totalCalls).padEnd(8)}${totalIn.toLocaleString().padEnd(10)}${totalOut.toLocaleString().padEnd(10)}$${totalCost.toFixed(4)}`);
+    console.log('  (* = escalated: one extra Opus 4.8 corroboration pass on low-confidence critical fields)');
+  }
 
   // ── Mismatch report ───────────────────────────────────────────────────────────
   const mismatches = nonSkipped.filter(

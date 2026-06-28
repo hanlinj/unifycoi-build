@@ -44,6 +44,26 @@ export function toIsoDateStr(raw: string): string | null {
   return null;
 }
 
+// ── API usage accumulator (for eval/reporting; zero-overhead in prod) ─────────
+
+export interface UsageAccumulator {
+  calls: number;
+  input_tokens: number;
+  output_tokens: number;
+}
+
+let _usage: UsageAccumulator = { calls: 0, input_tokens: 0, output_tokens: 0 };
+
+export function getUsage(): Readonly<UsageAccumulator> { return { ..._usage }; }
+export function resetUsage(): void { _usage = { calls: 0, input_tokens: 0, output_tokens: 0 }; }
+
+function recordUsage(u: { input_tokens: number; output_tokens: number } | undefined): void {
+  if (!u) return;
+  _usage.calls++;
+  _usage.input_tokens += u.input_tokens;
+  _usage.output_tokens += u.output_tokens;
+}
+
 // ── Anthropic client (lazy init — avoids crashing unit tests without API key) ──
 
 let _client: Anthropic | null = null;
@@ -181,6 +201,7 @@ async function callVision(
       ],
     }],
   });
+  recordUsage(response.usage);
   const block = response.content.find((b) => b.type === 'tool_use');
   if (!block || block.type !== 'tool_use') {
     throw new Error(`Model did not call tool ${tool.name}`);
@@ -210,6 +231,7 @@ async function callCorroboration(
       ],
     }],
   });
+  recordUsage(response.usage);
   const block = response.content.find((b) => b.type === 'tool_use');
   if (!block || block.type !== 'tool_use') return {};
   const result = (block as Anthropic.ToolUseBlock).input as { verifications?: Record<string, RawField> };

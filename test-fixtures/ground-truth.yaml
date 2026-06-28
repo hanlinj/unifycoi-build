@@ -67,8 +67,20 @@ vendors:
     fixture_dir: "RidgeLine Tree (Perfect)"
     expected_overall: approve
     expected_evaluations: []
+    advisory_flags:
+      - key: coverage_continuity
+        severity: warn
+        message: >
+          All policies share the same recent effective date, suggesting a possible recent
+          carrier switch. Prior carrier expiration date needed to confirm no coverage gap.
+        evidence: >
+          All current policy effective dates are the same and within 45 days of the
+          reference date. This is a fixture artifact — all PDFs were generated with
+          the same policy inception date.
     # GL $2M/$4M, Auto $1M CSL, Umbrella $5M/$5M, WC $1M/$1M/$1M.
     # AI on GL and Auto. Cert holder StoreSafe. All names consistent. ACH = LLC name.
+    # ADVISORY NOTE: fixture PDFs share a single policy effective date within 45 days of
+    # reference_date, triggering the coverage_continuity signal. Correct engine behavior.
 
   # ── 03 ──────────────────────────────────────────────────────────────────────────
   clearwater:
@@ -228,6 +240,12 @@ vendors:
     fixture_dir: "Kowalski Handyman (Error)"
     expected_overall: deficient
     expected_evaluations:
+      - requirement_key: named_insured_match
+        expected_outcome: fails
+        reason: >
+          COI names insured as "Kowalski Handyman Services" (DBA only); W-9 legal name is
+          "Randy L. Kowalski" (individual). These are substantively different — the DBA
+          omits the individual's legal name entirely. Engine correctly flags as deficient.
       - requirement_key: entity_type
         expected_outcome: fails
         reason: >
@@ -253,6 +271,14 @@ vendors:
           confirm zero-employee and zero-subcontractor status. If vendor ever subcontracts,
           WC requirement applies immediately.
     advisory_flags:
+      - key: coverage_continuity
+        severity: warn
+        message: >
+          All policies share the same recent effective date, suggesting a possible recent
+          carrier switch. Prior carrier expiration date needed to confirm no coverage gap.
+        evidence: >
+          All current policy effective dates are the same and within 45 days of the
+          reference date. Fixture artifact — PDFs generated with matching inception dates.
       - key: personal_ach_account
         severity: warn
         message: >
