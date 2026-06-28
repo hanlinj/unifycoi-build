@@ -29,6 +29,26 @@ One row per store. Columns:
 
 A downloadable **template file** with these headers should be provided on the screen so clients send the right shape.
 
+### Header alias table (accepted column names)
+
+The parser accepts these header strings (case-insensitive). Any header not in this list is silently ignored. If a **Required** column is absent, the entire import is rejected with a clear message.
+
+| Internal field | Accepted header strings | Required |
+|---|---|---|
+| Store Name | `Store Name`, `Location Name`, `Name` | **Yes** |
+| Address | `Address`, `Street Address` | **Yes** |
+| City | `City` | Yes (row-level) |
+| State | `State` | Yes (row-level) |
+| ZIP | `ZIP`, `Zip Code`, `Postal Code` | Yes (row-level) |
+| Region | `Region`, `District`, `Region / District`, `Region/District` | No |
+| Manager First Name | `Manager First Name`, `First Name` | No |
+| Manager Last Name | `Manager Last Name`, `Last Name` | No |
+| Manager Email | `Manager Email`, `Email` | No* |
+
+> *Manager email is required at the **row level** if any manager name field is provided. The import-level check only blocks on missing Store Name or Address columns.
+
+**Rejected / ignored:** Any header string not in the accepted list above (e.g. `Phone`, `Notes`, `Store #`) is ignored — the column's data is discarded. If this causes a required field to be absent, the import is rejected. Clients should download and use the provided template to avoid accidental mismatches.
+
 > Only the **primary** store manager belongs in this sheet. Secondary/assistant managers, admins, and district managers are added separately (admins/DMs by the platform during provisioning; assistants by the client admin afterward in [[User Management]]).
 
 ## Steps (happy path)

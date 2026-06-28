@@ -43,9 +43,12 @@ export function createTenant(
     'INSERT INTO tenants (id, name, lifecycle_state, monthly_rate_cents, created_at) VALUES (?, ?, ?, ?, ?)'
   ).run(id, input.name.trim(), 'provisioning', rate, now);
 
-  // Initial billing snapshot (0 locations)
+  // Initial billing snapshot (0 locations) and requirement settings defaults
   const tdb = new TenantDB(db, id);
   tdb.insert('billing_snapshots', { id: randomUUID(), billable_locations: 0, amount_cents: 0, changed: 1, created_at: now });
+  db.prepare(
+    'INSERT OR IGNORE INTO requirement_settings (tenant_id, precedence_policy) VALUES (?, ?)'
+  ).run(id, 'strictest');
 
   logAudit(db, {
     tenantId: id,

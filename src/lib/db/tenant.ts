@@ -4,17 +4,28 @@ import type Database from 'better-sqlite3';
  * TenantDB — the only permitted gateway for reads and writes on tenant-scoped tables.
  *
  * Every method automatically injects this.tenantId so callers can never forget it.
- * Use the named helpers for all mutations:
- *   insert(table, row)            — tenant_id is always set; column order is irrelevant.
- *   update(table, set, where)     — tenant_id = ? is always appended to WHERE.
- *   del(table, where)             — same WHERE guarantee as update().
+ * Use the named helpers for ALL mutations on tenant-scoped tables:
+ *
+ *   insert(table, row)            — tenant_id is always written as this.tenantId,
+ *                                   regardless of column order in the row object.
+ *   update(table, set, where)     — tenant_id = ? is always appended to WHERE;
+ *                                   callers cannot omit it accidentally.
+ *   del(table, where)             — same WHERE guarantee; empty where throws.
+ *
+ * ⚠️  Historical trap — why the helpers exist:
+ *   The legacy run() method prepends this.tenantId as the FIRST bound parameter, so
+ *   SQL must have `tenant_id = ?` as the FIRST placeholder. This worked for SELECT and
+ *   DELETE (WHERE comes first) but broke for INSERT (if tenant_id wasn't the first
+ *   column, the id column silently received the tenant UUID → FK violation) and for
+ *   UPDATE (SET col = ? WHERE tenant_id = ? bound tenantId to the SET clause, not WHERE).
+ *   The named helpers eliminate this entirely — use them; avoid run() for writes.
  *
  * Platform-scoped tables (platform_users, tenants, requirement_templates) have no
  * tenant_id column and MUST use raw db.prepare() directly — never TenantDB.
  *
  * The low-level get() / all() methods remain for SELECT statements that cannot be
  * expressed through the named helpers (e.g. JOINs, COLLATE NOCASE). Their contract:
- * SQL must have `tenant_id = ?` as the first placeholder.
+ * SQL must have `tenant_id = ?` as the FIRST placeholder.
  */
 export class TenantDB {
   readonly tenantId: string;

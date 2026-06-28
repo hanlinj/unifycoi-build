@@ -20,8 +20,15 @@ export interface EncryptionMeta {
 
 const ALGO = 'aes-256-gcm' as const;
 
+function decodeKey(value: string): Buffer {
+  // Accept 64-char hex or 44-char base64 (both = 32 bytes)
+  return /^[0-9a-fA-F]{64}$/.test(value)
+    ? Buffer.from(value, 'hex')
+    : Buffer.from(value, 'base64');
+}
+
 function masterKek(): Buffer {
-  return Buffer.from(env.crypto.masterKek, 'hex');
+  return decodeKey(env.crypto.masterKek);
 }
 
 function wrapKey(dataKey: Buffer): string {

@@ -150,6 +150,29 @@ Comparison operators by requirement type:
 - **Entity matching** (named insured, scheduled additional insured) is normalized + fuzzy; a high-similarity-but-not-exact match is **Uncertain → human**, not an auto-pass (a wrong-entity certificate is a real risk). *(Decision to confirm: match strictness threshold.)*
 - **Roll-up:** a vendor-location passes when **every** required item there is Pass; any Deficient → deficient at that location; any Uncertain (no Deficient) → uncertain there. Overall status is **derived** per [[Status Vocabulary]] (Approved at all / *N of M* / in-pipeline leads).
 
+## Advisory flags — observations outside the requirement matrix
+
+The rules engine produces `requirement_evaluations` (Pass / Deficient / Uncertain per requirement key). Some engine-derived observations are material for human review but have no counterpart in the requirement matrix and must not affect the compliance roll-up. These are **advisory flags** — a distinct output channel emitted alongside evaluations, never instead of them.
+
+**Advisory flags do not change the overall recommendation or vendor status.** A vendor whose every requirement evaluation is Pass still receives recommendation `approve` even if the engine emits a `warn`-severity advisory. The Admin sees the advisory in the [[Vendor Record]] workbench as a separate lane and decides what to do before clicking approve.
+
+**Shape:** `{ key: string, severity: info | warn, message: string, evidence: string }`
+
+- `key` — stable, lowercase_snake identifier (e.g. `coverage_continuity`, `personal_ach_account`).
+- `severity` — `warn` when human action is likely warranted; `info` for low-stakes observations.
+- `message` — one human-readable sentence surfaced in the workbench.
+- `evidence` — the extracted field value(s) that triggered the flag, for traceability.
+
+**When the engine emits advisory flags (examples):**
+
+| Key | Trigger |
+|---|---|
+| `coverage_continuity` | Policy effective date with a new carrier implies a gap vs. the prior carrier's inferred expiration (annual cycle). The engine cannot confirm a lapse from the submitted document; it flags and defers to the Admin. |
+| `personal_ach_account` | ACH `account_holder_name` is an individual name while the vendor's W-9 `federal_tax_classification` is LLC/Corp — or vice versa, W-9 is Individual/sole proprietor and the name is personal. Surfaced as a payment-risk signal. |
+| `limits_below_preferred` | A coverage limit meets the requirement floor but falls below a configurable preferred threshold (future tuning; not v1). The requirement evaluation is Pass; the advisory notes the margin. |
+
+**Advisory flags are NOT emitted by rules-only re-evaluations** (rule-change, location-add). Those paths compare stored values against the requirement matrix only; they have no extraction pass from which to observe these patterns.
+
 ## Robustness — non-standard layouts & multi-policy certificates
 
 - **Multi-policy is native, not special-cased.** `policies` is an **array**; one COI carrying GL + auto + umbrella + workers' comp produces four policy objects. Each is matched to the requirement it satisfies by `coverage_type`; a single certificate can satisfy several requirements at once.
@@ -183,6 +206,7 @@ Everything is scoped by `tenant_id` and queried within it ([[Document Storage & 
 - **Sensitive fields** (full TIN, account/routing) are **field-level encrypted** — stored separately or as ciphertext within the payload, never in plaintext, never written to logs ([[Document Storage & Security]]).
 - **`verification_runs`** — `id, tenant_id, vendor_id, trigger (onboarding|resubmission|renewal|rule_change|location_add), engine_version, recommendation (approve|deficiencies|uncertain), created_at`.
 - **`requirement_evaluations`** — `id, tenant_id, run_id, vendor_id, location_id, requirement_key, required_value, extracted_value_ref, comparison_result, confidence_band, outcome (pass|deficient|uncertain), note`. The per-location, per-requirement grain the [[Vendor Record]] workbench renders **by document**.
+- **`engine_advisories`** — `id, tenant_id, run_id, vendor_id, key, severity (info|warn), message, evidence_json, created_at`. Advisory flags produced during a full pipeline run. Not written by rules-only re-evaluations. Does not affect the run's `recommendation` field.
 
 Extraction and engine versions are stamped so a future schema/model upgrade can selectively re-extract stored documents (the deferred re-extract-on-version-bump path) without disturbing this run's record.
 
@@ -192,6 +216,7 @@ The engine emits the events [[Audit Trail]] expects, attributed to `AI` / `syste
 
 - `document.extracted` — what was read, from which document, with **confidence** and the corroboration outcome.
 - `requirement.evaluated` — extracted vs. required, comparison result, band, and the **Pass / Deficient / Uncertain** outcome.
+- `ai.advisory` — key, severity, message, and evidence for each advisory flag emitted; logged alongside evaluations so the full picture of the run is in the audit trail.
 - `ai.recommendation` — the run's overall recommendation and the reasoning shown to the Admin at decision time.
 
 These are what make "humans remain in control" provable ([[MISSION]] #2, #4): an approval/override entry can show the **AI recommendation the human saw** when they clicked. Sensitive values are **redacted** in audit payloads.

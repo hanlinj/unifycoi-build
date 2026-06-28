@@ -7,8 +7,14 @@ import { env } from '@/lib/env';
 
 const ALGO = 'aes-256-gcm' as const;
 
+function decodeKey(value: string): Buffer {
+  return /^[0-9a-fA-F]{64}$/.test(value)
+    ? Buffer.from(value, 'hex')
+    : Buffer.from(value, 'base64');
+}
+
 function fieldKey(): Buffer {
-  return Buffer.from(env.crypto.fieldEncryptionKey, 'hex');
+  return decodeKey(env.crypto.fieldEncryptionKey);
 }
 
 export function encryptField(plaintext: string): string {

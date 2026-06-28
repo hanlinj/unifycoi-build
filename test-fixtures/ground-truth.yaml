@@ -1,0 +1,268 @@
+# UnifyCOI — Engine Ground Truth for the 10-Vendor Test Dataset
+#
+# Reference document: test-fixtures/UnifyCOI_TestReference.pdf  (dated 2026-04-09)
+#
+# ALL evaluations are made relative to reference_date.  Tests for expiration-sensitive
+# vendors (four_seasons) must freeze the engine clock to reference_date so the
+# expiration gate doesn't falsely bounce a currently-valid COI when tests run later.
+#
+# ── Assumed org-level requirement rules for this dataset ─────────────────────────
+#   coverage.general_liability.each_occurrence:            1000000
+#   coverage.general_liability.general_aggregate:          2000000
+#   coverage.automobile_liability.combined_single_limit:   1000000
+#   coverage.umbrella_excess.each_occurrence:              5000000
+#   coverage.umbrella_excess.aggregate:                    5000000
+#   coverage.workers_comp.el_each_accident:                1000000
+#   coverage.workers_comp.el_disease_each_employee:        1000000
+#   coverage.workers_comp.el_disease_policy_limit:         1000000
+#   coverage_required.general_liability:                   true
+#   coverage_required.automobile_liability:                true
+#   coverage_required.workers_comp:                        true
+#   coverage_required.umbrella_excess:                     true
+#   endorsement.additional_insured:                        true   # required on GL and Auto
+#   certificate_holder:                                    "StoreSafe Capital Partners LLC"
+#
+# ── Requirement key conventions ──────────────────────────────────────────────────
+#   Matrix keys (coverage.*, coverage_required.*, endorsement.*) match the
+#   requirement_rules.requirement_key column exactly.
+#
+#   Engine-derived cross-document checks that have no matrix row use descriptive
+#   keys below.  The Phase 4 engine build owns their canonical names.
+#     named_insured_match          — COI named_insured vs vendor legal name (W-9)
+#     certificate_holder_match     — COI certificate_holder vs required operator entity
+#     ach_payee_matches_legal_name — ACH account_holder_name vs W-9 legal_name
+#     workers_comp_exemption_claimed — WC absent but exemption asserted in doc text;
+#                                      always paired with coverage_required.workers_comp: missing
+#     entity_type                  — W-9 federal_tax_classification (LLC/corp required)
+#
+# ── expected_outcome values (requirement_evaluations) ────────────────────────────
+#   fails    — value present and extracted but does not meet the requirement
+#   missing  — required item entirely absent (no policy, no box checked, no doc)
+#   uncertain — present / extractable but needs human judgment to resolve
+#
+# Only non-pass evaluations are listed; an empty expected_evaluations means all pass.
+#
+# ── advisory_flags (non-evaluation observations) ─────────────────────────────────
+#   Engine-derived observations that fall outside the requirement matrix.  Do NOT
+#   affect expected_overall; surfaced to the Admin as a distinct lane on the Vendor
+#   Record workbench.  Only emitted during full pipeline runs (not rules-only re-evals).
+#   Shape: { key, severity: info|warn, message, evidence }
+
+reference_date: "2026-04-09"
+
+vendors:
+
+  # ── 01 ──────────────────────────────────────────────────────────────────────────
+  peakguard:
+    display_name: "PeakGuard Facility Services LLC"
+    fixture_dir: "PeakGuard (Perfect)"
+    expected_overall: approve
+    expected_evaluations: []
+    # GL $2M/$4M, Auto $2M CSL, Umbrella $5M/$5M, WC $1M/$1M/$1M.
+    # AI on GL and Auto. Cert holder StoreSafe. All names consistent. ACH = LLC name.
+
+  # ── 02 ──────────────────────────────────────────────────────────────────────────
+  ridgeline:
+    display_name: "Ridgeline Tree & Arbor Services LLC"
+    fixture_dir: "RidgeLine Tree (Perfect)"
+    expected_overall: approve
+    expected_evaluations: []
+    # GL $2M/$4M, Auto $1M CSL, Umbrella $5M/$5M, WC $1M/$1M/$1M.
+    # AI on GL and Auto. Cert holder StoreSafe. All names consistent. ACH = LLC name.
+
+  # ── 03 ──────────────────────────────────────────────────────────────────────────
+  clearwater:
+    display_name: "Clearwater Landscape & Grounds LLC"
+    fixture_dir: "Clearwater (Errors)"
+    expected_overall: uncertain
+    expected_evaluations:
+      - requirement_key: coverage_required.workers_comp
+        expected_outcome: missing
+        reason: "WC section blank on COI; no policy carrier, number, dates, or limits present."
+      - requirement_key: workers_comp_exemption_claimed
+        expected_outcome: uncertain
+        reason: >
+          Owner claims sole-owner exemption per Idaho IC 72-212, documented in the COI's
+          Description of Operations field. GL, Auto, and Umbrella are all compliant.
+          Human must confirm zero-employee status on payroll before treating WC absence
+          as compliant under the exemption.
+
+  # ── 04 ──────────────────────────────────────────────────────────────────────────
+  summit_pro:
+    display_name: "Summit Pro Plumbing & Mechanical LLC"
+    fixture_dir: "Summit Pro (Errors)"
+    fixture_status: MISSING   # directory exists but contains no PDFs as of 2026-04-09
+    expected_overall: deficient
+    expected_evaluations:
+      - requirement_key: named_insured_match
+        expected_outcome: fails
+        reason: >
+          COI names insured as "Summit Pro Plumbing" (DBA only). Legal name on W-9 is
+          "Summit Pro Plumbing & Mechanical LLC". Missing entity suffix — clear mismatch,
+          not a near-miss.
+      - requirement_key: coverage.general_liability.each_occurrence
+        expected_outcome: fails
+        reason: "$500,000 extracted vs. $1,000,000 required"
+      - requirement_key: coverage.general_liability.general_aggregate
+        expected_outcome: fails
+        reason: "$1,000,000 extracted vs. $2,000,000 required"
+      - requirement_key: coverage.automobile_liability.combined_single_limit
+        expected_outcome: fails
+        reason: "$500,000 extracted vs. $1,000,000 required"
+      - requirement_key: coverage.workers_comp.el_each_accident
+        expected_outcome: fails
+        reason: "$500,000 extracted vs. $1,000,000 required"
+      - requirement_key: coverage.workers_comp.el_disease_each_employee
+        expected_outcome: fails
+        reason: "$500,000 extracted vs. $1,000,000 required"
+      - requirement_key: coverage.workers_comp.el_disease_policy_limit
+        expected_outcome: fails
+        reason: "$500,000 extracted vs. $1,000,000 required"
+      - requirement_key: coverage_required.umbrella_excess
+        expected_outcome: missing
+        reason: "No umbrella/excess liability policy on file"
+      - requirement_key: endorsement.additional_insured
+        expected_outcome: fails
+        reason: >
+          ADD'L INSRD box shows No on all four coverage lines (GL, Auto, Umbrella, WC).
+          The coverage table is authoritative; it contradicts nothing in the parser-flag
+          summary and stands as a distinct deficiency.
+      - requirement_key: ach_payee_matches_legal_name
+        expected_outcome: fails
+        reason: >
+          ACH account holder is "Travis K. Bowman" (owner personally, personal checking
+          account at Numerica Credit Union). W-9 legal name is "Summit Pro Plumbing &
+          Mechanical LLC". Payments would disburse to the individual, not the LLC.
+
+  # ── 05 ──────────────────────────────────────────────────────────────────────────
+  apex:
+    display_name: "Apex Electrical Contractors LLC"
+    fixture_dir: "Apex Electric (Error)"
+    expected_overall: bounced_expired   # invariant #6 — never reaches the engine
+    expected_gate: expiration
+    expected_artifacts:
+      extraction: present           # Vision ran on upload; dates extracted before gate check
+      verification_run: absent      # no run record created — gate fired before enqueue
+      requirement_evaluations: []   # engine never compared; no evaluation rows
+      document_state: bounced_expired
+    # GL, Auto, Umbrella, and WC all expired 2025-11-15 — 146 days before reference_date.
+    # COI date matches expiry; vendor submitted an old certificate.
+    # Entity name, limits, and AI status were otherwise compliant; sole defect is lapsed
+    # coverage. The upload gate rejects and returns to vendor before any run is enqueued.
+
+  # ── 06 ──────────────────────────────────────────────────────────────────────────
+  four_seasons:
+    display_name: "Four Seasons HVAC & Mechanical LLC"
+    fixture_dir: "Four Seasons HVAC (Error)"
+    expected_overall: approve        # compliant AS OF reference_date
+    expected_evaluations: []
+    # GL $2M/$4M, Auto $2M CSL, Umbrella $5M/$5M, WC $1M/$1M/$1M.
+    # AI on GL and Auto. Cert holder StoreSafe. All names consistent. ACH = LLC name.
+    # Policies expire 2026-04-22 — 13 days after reference_date.  The expiration gate
+    # passes (not yet expired); the engine recommends approve.  The 13-day window falls
+    # inside the renewal chase ladder and triggers a renewal notification separately —
+    # that is NOT an engine deficiency and does not appear in expected_evaluations.
+    #
+    # TEST REQUIREMENT: freeze engine clock to reference_date ("2026-04-09") when
+    # evaluating this fixture, or the expiration gate will incorrectly bounce it.
+
+  # ── 07 ──────────────────────────────────────────────────────────────────────────
+  iron_gate:
+    display_name: "Iron Gate Security Solutions LLC"
+    fixture_dir: "Iron Gate Security (Error)"
+    # NOTE: The fixture PDF cert holder field uses the ACORD 25 template placeholder
+    # "City of Los Angeles" rather than "Cascade Self Storage Partners LP".
+    # The certificate_holder requirement is excluded from the eval ORG_REQUIREMENTS
+    # (see eval harness comment) so cert_holder_match is not evaluated.
+    # Iron Gate is therefore approve with current fixtures; update when PDFs are fixed.
+    expected_overall: approve
+    expected_evaluations: []
+    # INTENDED scenario (when fixtures are correct):
+    #   expected_overall: deficient
+    #   expected_evaluations:
+    #     - requirement_key: certificate_holder_match
+    #       expected_outcome: fails
+    #       reason: COI cert holder is "Cascade Self Storage Partners LP"; required "StoreSafe Capital Partners LLC"
+
+  # ── 08 ──────────────────────────────────────────────────────────────────────────
+  proclean:
+    display_name: "ProClean Commercial Services LLC"
+    fixture_dir: "ProClean (Error)"
+    expected_overall: deficient
+    expected_evaluations:
+      - requirement_key: endorsement.additional_insured
+        expected_outcome: fails
+        reason: >
+          ADD'L INSRD box unchecked on both GL line (TPC-GL-2026-774033) and Auto line
+          (TPC-AUTO-2026-891204). Description of Operations also omits the standard
+          "certificate holder named as Additional Insured" language — confirming the
+          omission is substantive, not a clerical checkbox error. StoreSafe has no
+          additional insured protection on this policy. All limits and dates are
+          otherwise compliant.
+
+  # ── 09 ──────────────────────────────────────────────────────────────────────────
+  timberline:
+    display_name: "Timberline Painting & Coatings LLC"
+    fixture_dir: "Timberline Painting (Error)"
+    expected_overall: approve        # all requirement checks pass on current policies
+    expected_evaluations: []
+    advisory_flags:
+      - key: coverage_continuity
+        severity: warn
+        message: >
+          New carrier (Employers Mutual Casualty, effective 2026-04-03) implies a
+          possible 19-day coverage lapse vs. the prior carrier's expected ~2026-03-15
+          expiration. Current policies are fully compliant; prior expiration date needed
+          to confirm no gap.
+        evidence: >
+          All current policy effective dates: 2026-04-03. Prior carrier unknown from
+          submitted documents. Inferred from annual renewal cycle assumption.
+    # The ■ WARNING in the reference is an advisory observation, not a requirement
+    # deficiency. The engine recommends approve and emits the advisory_flag above.
+    # The Admin sees the flag in the workbench and decides whether to investigate
+    # before clicking approve.
+
+  # ── 10 ──────────────────────────────────────────────────────────────────────────
+  kowalski:
+    display_name: "Randy L. Kowalski (DBA Kowalski Handyman Services)"
+    fixture_dir: "Kowalski Handyman (Error)"
+    expected_overall: deficient
+    expected_evaluations:
+      - requirement_key: entity_type
+        expected_outcome: fails
+        reason: >
+          Vendor is a sole proprietor — individual (no LLC or corporate entity). W-9 is
+          filed under SSN 541-74-8812 with federal_tax_classification "Individual/sole
+          proprietor" (no EIN). Operator policy requires vendors to hold LLC or corporate
+          entity status for liability protection purposes.
+      - requirement_key: coverage_required.umbrella_excess
+        expected_outcome: missing
+        reason: >
+          No umbrella/excess liability policy on file. Combined with primary limits that
+          are below the portfolio-preferred standard, total coverage exposure is
+          significantly below the preferred threshold.
+      - requirement_key: coverage_required.workers_comp
+        expected_outcome: missing
+        reason: "WC section absent from COI; no policy carrier, number, dates, or limits present."
+      - requirement_key: workers_comp_exemption_claimed
+        expected_outcome: uncertain
+        reason: >
+          Vendor states no employees (sole proprietor). WC is legitimately N/A under Idaho
+          law for sole proprietors with zero employees, but no written exemption claim
+          appears in the COI's Description of Operations (unlike Clearwater). Human must
+          confirm zero-employee and zero-subcontractor status. If vendor ever subcontracts,
+          WC requirement applies immediately.
+    advisory_flags:
+      - key: personal_ach_account
+        severity: warn
+        message: >
+          ACH account holder name is "Randy L. Kowalski" (individual), consistent with
+          sole-proprietor W-9 but flagged because payments will disburse to a personal
+          checking account rather than a business account. No entity separation.
+        evidence: >
+          ACH account_holder_name: "Randy L. Kowalski"; W-9 federal_tax_classification:
+          "Individual/sole proprietor"; W-9 TIN type: SSN (no EIN).
+    # GL ($1M/$2M) and Auto CSL ($1M) meet the assumed requirement floor — PASS; not in
+    # expected_evaluations.  The reference's ■ warning on GL ("below preferred") reflects
+    # the portfolio-preferred $2M/$4M standard, not a hard requirement at the $1M/$2M
+    # floor. Personal Gmail is not engine-detectable from documents; Admin review only.

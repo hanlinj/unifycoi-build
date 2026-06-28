@@ -3,6 +3,7 @@ import fs from 'fs';
 import path from 'path';
 import { randomUUID } from 'crypto';
 import { hashPassword } from '@/lib/auth/password';
+import type { ProcessedExtraction } from '@/lib/extraction/types';
 
 export function setupTestDb(): Database.Database {
   const db = new Database(':memory:');
@@ -107,4 +108,171 @@ export function assignUserToRegion(db: Database.Database, userId: string, region
 
 export function assignUserToLocation(db: Database.Database, userId: string, locationId: string, tenantId: string): void {
   db.prepare('INSERT OR IGNORE INTO user_locations (user_id, location_id, tenant_id) VALUES (?, ?, ?)').run(userId, locationId, tenantId);
+}
+
+export function seedRequirementSettings(
+  db: Database.Database,
+  tenantId: string,
+  overrides: Partial<{ precedence_policy: string; floor_json: string | null }> = {}
+): void {
+  db.prepare(
+    `INSERT OR REPLACE INTO requirement_settings (tenant_id, precedence_policy, floor_json)
+     VALUES (?, ?, ?)`
+  ).run(
+    tenantId,
+    overrides.precedence_policy ?? 'strictest',
+    overrides.floor_json ?? null
+  );
+}
+
+export function seedRequirementRule(
+  db: Database.Database,
+  tenantId: string,
+  actorId: string,
+  overrides: Partial<{
+    id: string;
+    scope_type: string;
+    scope_ref: string | null;
+    requirement_key: string;
+    required_value: string;
+    reason: string;
+  }> = {}
+): { id: string; requirement_key: string; required_value: string } {
+  const rule = {
+    id: overrides.id ?? randomUUID(),
+    scope_type: overrides.scope_type ?? 'org',
+    scope_ref: overrides.scope_ref ?? null,
+    requirement_key: overrides.requirement_key ?? 'coverage.general_liability.each_occurrence',
+    required_value: overrides.required_value ?? '1000000',
+    reason: overrides.reason ?? 'Test seed',
+  };
+  db.prepare(
+    `INSERT INTO requirement_rules
+       (id, tenant_id, scope_type, scope_ref, requirement_key, required_value, created_by, reason, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+  ).run(
+    rule.id, tenantId, rule.scope_type, rule.scope_ref,
+    rule.requirement_key, rule.required_value, actorId, rule.reason, new Date().toISOString()
+  );
+  return rule;
+}
+
+export function seedVendor(
+  db: Database.Database,
+  tenantId: string,
+  overrides: Partial<{ id: string; business_name: string; trade: string; contact_email: string }> = {}
+): { id: string; business_name: string; trade: string; tenantId: string } {
+  const vendor = {
+    id: overrides.id ?? randomUUID(),
+    business_name: overrides.business_name ?? `Test Vendor ${randomUUID().slice(0, 6)}`,
+    trade: overrides.trade ?? 'other',
+    contact_email: overrides.contact_email ?? null,
+    tenantId,
+  };
+  db.prepare(
+    'INSERT INTO vendors (id, tenant_id, business_name, contact_name, contact_email, contact_phone, trade, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
+  ).run(vendor.id, tenantId, vendor.business_name, null, vendor.contact_email, null, vendor.trade, new Date().toISOString());
+  return vendor;
+}
+
+export function seedVendorLocation(
+  db: Database.Database,
+  tenantId: string,
+  vendorId: string,
+  locationId: string,
+  overrides: Partial<{ id: string; status: string }> = {}
+): { id: string } {
+  const vl = {
+    id: overrides.id ?? randomUUID(),
+    status: overrides.status ?? 'onboarding',
+  };
+  db.prepare(
+    `INSERT OR IGNORE INTO vendor_locations
+       (id, tenant_id, vendor_id, location_id, status, flags_json, approved_by, approved_at, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+  ).run(vl.id, tenantId, vendorId, locationId, vl.status, null, null, null, new Date().toISOString());
+  return vl;
+}
+
+export function seedInvite(
+  db: Database.Database,
+  tenantId: string,
+  overrides: Partial<{
+    id: string; vendorId: string; inviterUserId: string; token: string;
+    purpose: string; expiresAt: string;
+  }> = {}
+): { id: string; token: string } {
+  const inv = {
+    id: overrides.id ?? randomUUID(),
+    token: overrides.token ?? randomUUID(),
+    vendorId: overrides.vendorId ?? null,
+    inviterUserId: overrides.inviterUserId ?? randomUUID(),
+    purpose: overrides.purpose ?? 'onboarding',
+    expiresAt: overrides.expiresAt ?? new Date(Date.now() + 14 * 86400000).toISOString(),
+  };
+  db.prepare(
+    `INSERT INTO invites
+       (id, tenant_id, vendor_id, inviter_user_id, token, token_expires_at, purpose, delivery_state, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+  ).run(inv.id, tenantId, inv.vendorId, inv.inviterUserId, inv.token, inv.expiresAt, inv.purpose, 'sent', new Date().toISOString());
+  return inv;
+}
+
+export function seedDocument(
+  db: Database.Database,
+  tenantId: string,
+  vendorId: string,
+  overrides: Partial<{
+    id: string; doc_type: string; storage_key: string; state: string;
+  }> = {}
+): { id: string } {
+  const doc = {
+    id: overrides.id ?? randomUUID(),
+    doc_type: overrides.doc_type ?? 'coi',
+    storage_key: overrides.storage_key ?? `tenants/${tenantId}/vendors/${vendorId}/${randomUUID()}`,
+    state: overrides.state ?? 'active',
+  };
+  db.prepare(
+    `INSERT INTO documents
+       (id, tenant_id, vendor_id, doc_type, storage_key, encryption_json, original_filename, superseded_by, state, uploaded_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+  ).run(doc.id, tenantId, vendorId, doc.doc_type, doc.storage_key, '{}', null, null, doc.state, new Date().toISOString());
+  return doc;
+}
+
+export function seedExtraction(
+  db: Database.Database,
+  tenantId: string,
+  documentId: string,
+  payload: ProcessedExtraction,
+  overrides: Partial<{ id: string; model_id: string }> = {}
+): { id: string } {
+  const ext = {
+    id: overrides.id ?? randomUUID(),
+    model_id: overrides.model_id ?? 'claude-sonnet-4-6',
+  };
+  db.prepare(
+    `INSERT INTO extractions
+       (id, tenant_id, document_id, doc_type, model_id, extraction_version, payload_json, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+  ).run(ext.id, tenantId, documentId, payload.doc_type, ext.model_id, '1', JSON.stringify(payload), new Date().toISOString());
+  return ext;
+}
+
+export function seedTemplate(
+  db: Database.Database,
+  overrides: Partial<{ id: string; name: string; payload_json: string }> = {}
+): { id: string; name: string } {
+  const tpl = {
+    id: overrides.id ?? randomUUID(),
+    name: overrides.name ?? 'Test Template',
+    payload_json: overrides.payload_json ?? JSON.stringify({
+      floor: { 'doc_required.coi': 'true' },
+      defaults: { 'doc_required.coi': 'true', 'coverage.general_liability.each_occurrence': '1000000' },
+    }),
+  };
+  db.prepare(
+    'INSERT OR IGNORE INTO requirement_templates (id, name, payload_json, created_at) VALUES (?, ?, ?, ?)'
+  ).run(tpl.id, tpl.name, tpl.payload_json, new Date().toISOString());
+  return tpl;
 }

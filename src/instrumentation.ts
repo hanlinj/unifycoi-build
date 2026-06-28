@@ -4,5 +4,8 @@
 export async function register() {
   if (process.env.NEXT_RUNTIME === 'nodejs') {
     await import('@/lib/env');
+    const { getRawDb } = await import('@/lib/db/client');
+    const { seedTemplates } = await import('@/lib/requirements/templates');
+    seedTemplates(getRawDb());
   }
 }

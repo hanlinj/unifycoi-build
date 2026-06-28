@@ -22,6 +22,16 @@ export const env = {
   sqlite: {
     path: required('SQLITE_PATH'),
   },
+  anthropic: {
+    apiKey: process.env['ANTHROPIC_API_KEY'] ?? '',
+    visionModelPrimary: process.env['VISION_MODEL_PRIMARY'] ?? 'claude-sonnet-4-6',
+    visionModelEscalation: process.env['VISION_MODEL_ESCALATION'] ?? 'claude-opus-4-8',
+    extractionSchemaVersion: process.env['EXTRACTION_SCHEMA_VERSION'] ?? '1',
+  },
+  engine: {
+    confBandHigh: parseFloat(process.env['CONF_BAND_HIGH'] ?? '0.90'),
+    confBandMed: parseFloat(process.env['CONF_BAND_MED'] ?? '0.75'),
+  },
   storage: {
     driver: validatedStorageDriver(required('STORAGE_DRIVER')),
     // S3 / Backblaze B2 — required when driver='s3'
@@ -53,12 +63,15 @@ if (env.storage.driver === 's3') {
   }
 }
 
-// Validate key lengths
-function validateHex32(name: string, value: string): void {
-  if (!/^[0-9a-fA-F]{64}$/.test(value)) {
-    throw new Error(`${name} must be a 64-character hex string (32 bytes); generate with: openssl rand -hex 32`);
+// Validate key is exactly 32 bytes when decoded.
+// Accepts either 64-char hex or 44-char base64 (both encode 32 bytes).
+function validateKey32(name: string, value: string): void {
+  const isHex = /^[0-9a-fA-F]{64}$/.test(value);
+  const isB64 = /^[A-Za-z0-9+/]{43}=?$/.test(value);
+  if (!isHex && !isB64) {
+    throw new Error(`${name} must encode 32 bytes (64-char hex or 44-char base64); generate with: openssl rand -hex 32`);
   }
 }
 
-validateHex32('MASTER_KEK', env.crypto.masterKek);
-validateHex32('FIELD_ENCRYPTION_KEY', env.crypto.fieldEncryptionKey);
+validateKey32('MASTER_KEK', env.crypto.masterKek);
+validateKey32('FIELD_ENCRYPTION_KEY', env.crypto.fieldEncryptionKey);

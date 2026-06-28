@@ -7,9 +7,11 @@
     "build": "next build",
     "start": "next start",
     "migrate": "dotenv -- tsx src/lib/db/migrate.ts",
+    "eval": "dotenv -- tsx scripts/eval-test-dataset.ts",
     "test": "jest"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.106.0",
     "@aws-sdk/client-s3": "^3.700.0",
     "better-sqlite3": "^12.11.1",
     "dotenv": "^16.4.0",
@@ -21,6 +23,7 @@
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.0 || ^12.0.0",
     "@types/jest": "^29.5.0",
+    "@types/js-yaml": "^4.0.9",
     "@types/jsonwebtoken": "^9.0.0",
     "@types/node": "^20.0.0",
     "@types/react": "^18.3.0",
