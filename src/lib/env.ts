@@ -32,6 +32,14 @@ export const env = {
     confBandHigh: parseFloat(process.env['CONF_BAND_HIGH'] ?? '0.90'),
     confBandMed: parseFloat(process.env['CONF_BAND_MED'] ?? '0.75'),
   },
+  notifications: {
+    // Hour (0–23) in the tenant's local timezone at which the daily digest is sent.
+    digestHourLocal: parseInt(process.env['DIGEST_HOUR_LOCAL'] ?? '8', 10),
+    // Worker poll interval (seconds) for the notification sender.
+    workerPollSeconds: parseInt(process.env['NOTIFICATION_WORKER_POLL_SECONDS'] ?? '60', 10),
+    // Rows stuck in 'sending' longer than this (seconds) are reclaimed to 'queued'.
+    sendingStaleSeconds: parseInt(process.env['NOTIFICATION_SENDING_STALE_SECONDS'] ?? '300', 10),
+  },
   storage: {
     driver: validatedStorageDriver(required('STORAGE_DRIVER')),
     // S3 / Backblaze B2 — required when driver='s3'

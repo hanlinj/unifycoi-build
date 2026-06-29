@@ -6,6 +6,7 @@ import type Database from 'better-sqlite3';
 import { TenantDB } from '@/lib/db/tenant';
 import { logAudit } from '@/lib/audit';
 import { generateInviteToken } from '@/lib/auth/invite-token';
+import { notifyTenantAdmins } from '@/lib/notifications/queue';
 
 const CORRECTION_INVITE_LIFETIME_MS = 14 * 24 * 60 * 60 * 1000;
 const MIN_REASONING_LENGTH = 10;
@@ -177,6 +178,20 @@ export function applyDecision(input: DecisionInput): DecisionResult {
       }
 
       updated.push(locId);
+    }
+
+    // A hard decline is a terminal decision admins should learn about immediately (it's
+    // not a fix-request the vendor can act on, so it isn't vendor-facing). One exception
+    // notification per decline, to all admins. (Recipient choice documented in the
+    // Phase 7 checkpoint — the spec catalog has no dedicated declined-vendor row.)
+    if (action === 'reject' && updated.length > 0) {
+      notifyTenantAdmins(db, tenantId, {
+        type: 'vendor_declined',
+        vendor_id: vendorId,
+        vendor_name: vendor.business_name,
+        location_ids: updated,
+        ...(reason ? { reason } : {}),
+      });
     }
 
     return { action, updated, skipped };

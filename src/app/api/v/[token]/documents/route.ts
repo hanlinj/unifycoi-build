@@ -20,6 +20,7 @@ import { TenantDB } from '@/lib/db/tenant';
 import { getBlobStore, documentKey } from '@/lib/blob';
 import { encryptForStorage } from '@/lib/crypto/envelope';
 import { logAudit } from '@/lib/audit';
+import { queueNotification } from '@/lib/notifications/queue';
 import { extractDocument, checkExpirationGate } from '@/lib/extraction/extractor';
 import { validateInviteToken, INVALID_TOKEN_MESSAGE } from '@/lib/services/vendor-token';
 import {
@@ -181,6 +182,27 @@ export async function POST(
         targetId: documentId,
         payload: { vendor_id: vendorId, expired_policies: gate.expiredPolicies },
       });
+
+      // Vendor-facing exception (immediate): the expired upload bounces back to the vendor,
+      // never to the Admin (invariant #6). They see the 422 in-session; the email is the
+      // durable nudge if they close the tab. Recipient is the vendor's contact email.
+      const vrow = tdb.get<{ contact_email: string | null }>(
+        'SELECT contact_email FROM vendors WHERE tenant_id = ? AND id = ?',
+        [vendorId]
+      );
+      if (vrow?.contact_email) {
+        queueNotification(db, tenantId, {
+          recipientType: 'vendor',
+          recipientRef: vrow.contact_email,
+          kind: 'exception',
+          payload: {
+            type: 'document_bounced_expired',
+            vendor_id: vendorId,
+            doc_type: docType,
+            expired_policies: gate.expiredPolicies,
+          },
+        });
+      }
 
       return NextResponse.json(
         {

@@ -18,6 +18,7 @@ import type Database from 'better-sqlite3';
 import { TenantDB } from '@/lib/db/tenant';
 import { logAudit } from '@/lib/audit';
 import { runRulesOnlyReeval } from '@/lib/verification/run';
+import { notifyTenantAdmins } from '@/lib/notifications/queue';
 
 interface VendorLocationRow {
   vendor_id: string;
@@ -84,6 +85,16 @@ export async function triggerRuleChangeReeval(
           run_id: result.runId,
           recommendation: result.recommendation,
         },
+      });
+
+      // Exception (immediate): a rule tightening surfaced new post-approval risk. Admins
+      // must learn now, not in the digest (Notifications_and_Communications.md catalog:
+      // "Re-evaluation flags vendor Non-Compliant" → Admin → Immediate).
+      notifyTenantAdmins(db, tenantId, {
+        type: 'non_compliant_rule_change',
+        vendor_id: vl.vendor_id,
+        changed_key: changedKey,
+        run_id: result.runId,
       });
 
       nonCompliantCount++;
