@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 
 interface VendorLocation {
   id: string;
@@ -12,12 +12,22 @@ interface VendorLocation {
 interface DecisionPanelProps {
   vendorId: string;
   locations: VendorLocation[];
-  onDecisionComplete: () => void;
+  // Requirement keys routed here by "Treat as deficient" on an uncertain finding.
+  // When non-empty, the correction drawer auto-opens with this scope pre-populated.
+  prefilledDeficientRequirements?: string[];
+  // Uncertain evaluation ids the Admin accepted via the per-row buttons. Bundled into
+  // the approve action body for backwards-compat / bulk-approve flows.
+  acceptedUncertaintyIds?: string[];
 }
 
 type DecisionAction = 'approve' | 'reject' | 'request_correction';
 
-export function DecisionPanel({ vendorId, locations, onDecisionComplete }: DecisionPanelProps) {
+export function DecisionPanel({
+  vendorId,
+  locations,
+  prefilledDeficientRequirements = [],
+  acceptedUncertaintyIds = [],
+}: DecisionPanelProps) {
   const underReview = locations.filter((l) => l.status === 'under_review');
   const [action, setAction] = useState<DecisionAction | null>(null);
   const [selectedLocIds, setSelectedLocIds] = useState<Set<string>>(
@@ -26,6 +36,14 @@ export function DecisionPanel({ vendorId, locations, onDecisionComplete }: Decis
   const [reason, setReason] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  // When the Admin routes an uncertain finding to correction, auto-open the
+  // correction drawer so the pre-populated scope is immediately visible.
+  useEffect(() => {
+    if (prefilledDeficientRequirements.length > 0) {
+      setAction('request_correction');
+    }
+  }, [prefilledDeficientRequirements.length]);
 
   if (underReview.length === 0) return null;
 
@@ -54,6 +72,12 @@ export function DecisionPanel({ vendorId, locations, onDecisionComplete }: Decis
           action,
           location_ids: action === 'request_correction' ? [] : [...selectedLocIds],
           ...(reason && { reason }),
+          ...(action === 'approve' && acceptedUncertaintyIds.length > 0
+            ? { accepted_uncertainty_ids: acceptedUncertaintyIds }
+            : {}),
+          ...(action === 'request_correction' && prefilledDeficientRequirements.length > 0
+            ? { deficient_requirements: prefilledDeficientRequirements }
+            : {}),
         }),
       });
       if (!res.ok) {
@@ -61,7 +85,9 @@ export function DecisionPanel({ vendorId, locations, onDecisionComplete }: Decis
         setError((body as { error?: string }).error ?? `Server error ${res.status}`);
         return;
       }
-      onDecisionComplete();
+      // Full page reload to show updated status. (Phase 6: adequate; router
+      // invalidation deferred — see checkpoint notes.)
+      if (typeof window !== 'undefined') window.location.reload();
     } catch {
       setError('Network error — try again');
     } finally {
@@ -118,11 +144,25 @@ export function DecisionPanel({ vendorId, locations, onDecisionComplete }: Decis
         </div>
       )}
 
-      {/* request_correction info */}
+      {/* request_correction info + pre-populated scope */}
       {action === 'request_correction' && (
-        <p style={{ margin: '0 0 12px', fontSize: 13, color: '#57606a' }}>
-          All under-review locations will return to Onboarding. A correction invite will be sent to the vendor.
-        </p>
+        <div style={{ marginBottom: 12 }}>
+          <p style={{ margin: '0 0 8px', fontSize: 13, color: '#57606a' }}>
+            All under-review locations will return to Onboarding. A correction invite will be sent to the vendor.
+          </p>
+          {prefilledDeficientRequirements.length > 0 && (
+            <div style={{ marginBottom: 8 }}>
+              <p style={{ margin: '0 0 4px', fontSize: 12, fontWeight: 600 }}>
+                Correction scope (from uncertain findings you routed here):
+              </p>
+              <ul style={{ margin: 0, paddingLeft: 18 }}>
+                {prefilledDeficientRequirements.map((rk) => (
+                  <li key={rk} style={{ fontSize: 12 }}><code>{rk}</code></li>
+                ))}
+              </ul>
+            </div>
+          )}
+        </div>
       )}
 
       {/* Optional reason */}

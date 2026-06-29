@@ -17,8 +17,13 @@ import {
   seedRequirementSettings,
 } from './helpers';
 import { TenantDB } from '@/lib/db/tenant';
-import { applyDecision, DecisionError } from '@/lib/services/decision';
+import {
+  applyDecision,
+  DecisionError,
+  acceptUncertainEvaluation,
+} from '@/lib/services/decision';
 import { addVendorToLocations, AddToLocationsError } from '@/lib/services/add-to-locations';
+import type Database from 'better-sqlite3';
 
 // ── Shared setup helpers ──────────────────────────────────────────────────────
 
@@ -31,6 +36,38 @@ function makeUnderReviewScenario() {
   seedVendorLocation(db, tenant.id, vendor.id, loc.id, { status: 'under_review' });
   seedRequirementSettings(db, tenant.id);
   return { db, tenant, admin, vendor, loc };
+}
+
+// Seed a verification_run + a single requirement_evaluation row (raw insert — no helper exists).
+function seedEvaluation(
+  db: Database.Database,
+  tenantId: string,
+  vendorId: string,
+  locationId: string,
+  overrides: Partial<{ id: string; outcome: string; requirement_key: string }> = {}
+): { runId: string; evalId: string; requirementKey: string } {
+  const runId = randomUUID();
+  const evalId = overrides.id ?? randomUUID();
+  const requirementKey = overrides.requirement_key ?? 'coverage.general_liability.each_occurrence';
+  const now = new Date().toISOString();
+
+  db.prepare(
+    `INSERT INTO verification_runs (id, tenant_id, vendor_id, trigger, engine_version, recommendation, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`
+  ).run(runId, tenantId, vendorId, 'onboarding', '1.0.0', 'uncertain', now);
+
+  db.prepare(
+    `INSERT INTO requirement_evaluations
+       (id, tenant_id, run_id, vendor_id, location_id, requirement_key, required_value,
+        extracted_value_ref, comparison_result, confidence_band, outcome, note)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+  ).run(
+    evalId, tenantId, runId, vendorId, locationId, requirementKey, '1000000',
+    'coi.limits.each_occurrence', 'indeterminate', 'low', overrides.outcome ?? 'uncertain',
+    'Near-miss entity match'
+  );
+
+  return { runId, evalId, requirementKey };
 }
 
 // ── 1. Approve: sets status + approved_by + approved_at ───────────────────────
@@ -597,6 +634,217 @@ describe('vendor record role-conditional data exposure', () => {
     expect(() =>
       db.prepare('SELECT routing_number FROM vendors LIMIT 1').all()
     ).toThrow();
+
+    db.close();
+  });
+});
+
+// ── 8. Uncertainty UX — accept an uncertain finding (MISSION #4 trust handoff) ─
+
+describe('acceptUncertainEvaluation (per-row Accept)', () => {
+  test('writes evaluation.uncertain_accepted audit event with the reasoning text', () => {
+    const { db, tenant, admin, vendor, loc } = makeUnderReviewScenario();
+    const { evalId, requirementKey } = seedEvaluation(db, tenant.id, vendor.id, loc.id);
+
+    acceptUncertainEvaluation({
+      db, tenantId: tenant.id, vendorId: vendor.id,
+      evaluationId: evalId, actorUserId: admin.id,
+      reasoning: 'Verified the named insured matches the DBA on the W-9; engine flagged a near-miss.',
+    });
+
+    const tdb = new TenantDB(db, tenant.id);
+    const event = tdb.get<{ actor_type: string; actor_id: string; event_type: string; payload_json: string }>(
+      `SELECT actor_type, actor_id, event_type, payload_json FROM audit_events
+       WHERE tenant_id = ? AND event_type = 'evaluation.uncertain_accepted' LIMIT 1`
+    );
+    expect(event).toBeDefined();
+    expect(event!.actor_type).toBe('user');
+    expect(event!.actor_id).toBe(admin.id);
+    const payload = JSON.parse(event!.payload_json);
+    expect(payload.evaluation_id).toBe(evalId);
+    expect(payload.requirement_key).toBe(requirementKey);
+    expect(payload.reasoning).toMatch(/named insured/);
+
+    db.close();
+  });
+
+  test('reasoning required — empty submission rejected (REASONING_REQUIRED)', () => {
+    const { db, tenant, admin, vendor, loc } = makeUnderReviewScenario();
+    const { evalId } = seedEvaluation(db, tenant.id, vendor.id, loc.id);
+
+    expect(() =>
+      acceptUncertainEvaluation({
+        db, tenantId: tenant.id, vendorId: vendor.id,
+        evaluationId: evalId, actorUserId: admin.id, reasoning: '',
+      })
+    ).toThrow(expect.objectContaining({ code: 'REASONING_REQUIRED' }));
+
+    db.close();
+  });
+
+  test('reasoning below minimum length rejected', () => {
+    const { db, tenant, admin, vendor, loc } = makeUnderReviewScenario();
+    const { evalId } = seedEvaluation(db, tenant.id, vendor.id, loc.id);
+
+    expect(() =>
+      acceptUncertainEvaluation({
+        db, tenantId: tenant.id, vendorId: vendor.id,
+        evaluationId: evalId, actorUserId: admin.id, reasoning: 'too short',
+      })
+    ).toThrow(expect.objectContaining({ code: 'REASONING_REQUIRED' }));
+
+    db.close();
+  });
+
+  test('whitespace-only reasoning rejected (trimmed before length check)', () => {
+    const { db, tenant, admin, vendor, loc } = makeUnderReviewScenario();
+    const { evalId } = seedEvaluation(db, tenant.id, vendor.id, loc.id);
+
+    expect(() =>
+      acceptUncertainEvaluation({
+        db, tenantId: tenant.id, vendorId: vendor.id,
+        evaluationId: evalId, actorUserId: admin.id, reasoning: '              ',
+      })
+    ).toThrow(expect.objectContaining({ code: 'REASONING_REQUIRED' }));
+
+    db.close();
+  });
+
+  test('rejected reasoning writes NO audit event', () => {
+    const { db, tenant, admin, vendor, loc } = makeUnderReviewScenario();
+    const { evalId } = seedEvaluation(db, tenant.id, vendor.id, loc.id);
+
+    try {
+      acceptUncertainEvaluation({
+        db, tenantId: tenant.id, vendorId: vendor.id,
+        evaluationId: evalId, actorUserId: admin.id, reasoning: 'x',
+      });
+    } catch { /* expected */ }
+
+    const tdb = new TenantDB(db, tenant.id);
+    const event = tdb.get<{ id: string }>(
+      `SELECT id FROM audit_events WHERE tenant_id = ? AND event_type = 'evaluation.uncertain_accepted'`
+    );
+    expect(event).toBeUndefined();
+
+    db.close();
+  });
+
+  test('cannot accept a non-uncertain evaluation (NOT_UNCERTAIN)', () => {
+    const { db, tenant, admin, vendor, loc } = makeUnderReviewScenario();
+    const { evalId } = seedEvaluation(db, tenant.id, vendor.id, loc.id, { outcome: 'deficient' });
+
+    expect(() =>
+      acceptUncertainEvaluation({
+        db, tenantId: tenant.id, vendorId: vendor.id,
+        evaluationId: evalId, actorUserId: admin.id,
+        reasoning: 'This should not be acceptable because it is deficient, not uncertain.',
+      })
+    ).toThrow(expect.objectContaining({ code: 'NOT_UNCERTAIN' }));
+
+    db.close();
+  });
+
+  test('unknown evaluation id throws NOT_FOUND', () => {
+    const { db, tenant, admin, vendor } = makeUnderReviewScenario();
+
+    expect(() =>
+      acceptUncertainEvaluation({
+        db, tenantId: tenant.id, vendorId: vendor.id,
+        evaluationId: randomUUID(), actorUserId: admin.id,
+        reasoning: 'Reasoning for an evaluation that does not exist.',
+      })
+    ).toThrow(expect.objectContaining({ code: 'NOT_FOUND' }));
+
+    db.close();
+  });
+
+  test('tenant isolation — cannot accept another tenant evaluation', () => {
+    const db = setupTestDb();
+    const tenantA = seedTenant(db);
+    const tenantB = seedTenant(db);
+    const adminA = seedTenantUser(db, tenantA.id, { role: 'admin' });
+    const vendorB = seedVendor(db, tenantB.id);
+    const locB = seedLocation(db, tenantB.id);
+    const { evalId } = seedEvaluation(db, tenantB.id, vendorB.id, locB.id);
+
+    // Admin A (tenant A) attempts to accept tenant B's evaluation → NOT_FOUND
+    expect(() =>
+      acceptUncertainEvaluation({
+        db, tenantId: tenantA.id, vendorId: vendorB.id,
+        evaluationId: evalId, actorUserId: adminA.id,
+        reasoning: 'Cross-tenant attempt that must be blocked structurally.',
+      })
+    ).toThrow(expect.objectContaining({ code: 'NOT_FOUND' }));
+
+    db.close();
+  });
+});
+
+// ── 9. Uncertainty UX — treat-as-deficient routes to correction with scope ─────
+
+describe('treat-as-deficient → request_correction with pre-populated scope', () => {
+  test('request_correction carries deficient_requirements into the vendor notification', () => {
+    const { db, tenant, admin, vendor, loc } = makeUnderReviewScenario();
+    const requirementKey = 'coverage.auto_liability.combined_single_limit';
+
+    applyDecision({
+      db, tenantId: tenant.id, vendorId: vendor.id,
+      actorUserId: admin.id, action: 'request_correction',
+      locationIds: [],
+      deficientRequirements: [requirementKey],
+    });
+
+    const tdb = new TenantDB(db, tenant.id);
+    const notif = tdb.get<{ payload_json: string }>(
+      `SELECT payload_json FROM notifications
+       WHERE tenant_id = ? AND recipient_type = 'vendor' ORDER BY created_at DESC LIMIT 1`
+    );
+    const payload = JSON.parse(notif!.payload_json);
+    expect(payload.type).toBe('correction_requested');
+    expect(payload.deficient_requirements).toContain(requirementKey);
+
+    db.close();
+  });
+
+  test('request_correction logs deficient_requirements in the audit payload', () => {
+    const { db, tenant, admin, vendor, loc } = makeUnderReviewScenario();
+    const requirementKey = 'coverage.general_liability.each_occurrence';
+
+    applyDecision({
+      db, tenantId: tenant.id, vendorId: vendor.id,
+      actorUserId: admin.id, action: 'request_correction',
+      locationIds: [],
+      deficientRequirements: [requirementKey],
+    });
+
+    const tdb = new TenantDB(db, tenant.id);
+    const event = tdb.get<{ payload_json: string }>(
+      `SELECT payload_json FROM audit_events
+       WHERE tenant_id = ? AND event_type = 'vendor.correction_requested' LIMIT 1`
+    );
+    const payload = JSON.parse(event!.payload_json);
+    expect(payload.deficient_requirements).toContain(requirementKey);
+
+    db.close();
+  });
+
+  test('request_correction without scope omits deficient_requirements (no empty key)', () => {
+    const { db, tenant, admin, vendor, loc } = makeUnderReviewScenario();
+
+    applyDecision({
+      db, tenantId: tenant.id, vendorId: vendor.id,
+      actorUserId: admin.id, action: 'request_correction',
+      locationIds: [],
+    });
+
+    const tdb = new TenantDB(db, tenant.id);
+    const event = tdb.get<{ payload_json: string }>(
+      `SELECT payload_json FROM audit_events
+       WHERE tenant_id = ? AND event_type = 'vendor.correction_requested' LIMIT 1`
+    );
+    const payload = JSON.parse(event!.payload_json);
+    expect(payload).not.toHaveProperty('deficient_requirements');
 
     db.close();
   });

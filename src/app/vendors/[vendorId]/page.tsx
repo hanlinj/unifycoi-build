@@ -5,7 +5,7 @@
 
 import { cookies, headers } from 'next/headers';
 import { redirect } from 'next/navigation';
-import { DecisionPanel } from './DecisionPanel';
+import { Workbench } from './Workbench';
 
 export const dynamic = 'force-dynamic';
 
@@ -107,16 +107,6 @@ function statusColor(s: string): string {
   return '#57606a';
 }
 
-function outcomeLabel(outcome: string): string {
-  return outcome === 'deficient' ? 'Deficient' : outcome === 'uncertain' ? 'Uncertain' : outcome;
-}
-
-function outcomeColor(outcome: string): string {
-  if (outcome === 'deficient') return '#cf222e';
-  if (outcome === 'uncertain') return '#9a6700';
-  return '#1f883d';
-}
-
 // ── Page ──────────────────────────────────────────────────────────────────────
 
 export default async function VendorRecordPage({ params }: { params: { vendorId: string } }) {
@@ -191,72 +181,9 @@ export default async function VendorRecordPage({ params }: { params: { vendorId:
         </div>
       </section>
 
-      {/* Zone 2: Review workbench — Admin only */}
-      {isAdmin && verificationRun && (
-        <section style={{ marginBottom: 32 }}>
-          <h2 style={{ fontSize: 16, fontWeight: 600, margin: '0 0 12px' }}>
-            Verification Review
-            <span style={{ fontSize: 13, fontWeight: 400, color: '#57606a', marginLeft: 8 }}>
-              Trigger: {verificationRun.trigger} · Recommendation:{' '}
-              <strong style={{ color: verificationRun.recommendation === 'approve' ? '#1f883d' : '#cf222e' }}>
-                {verificationRun.recommendation}
-              </strong>
-            </span>
-          </h2>
-
-          {verificationRun.evaluations.length === 0 ? (
-            <p style={{ color: '#57606a', fontSize: 14 }}>No deficiencies or uncertainties found.</p>
-          ) : (
-            <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
-              <thead>
-                <tr style={{ background: '#f6f8fa' }}>
-                  <th style={th}>Requirement</th>
-                  <th style={th}>Required</th>
-                  <th style={th}>Extracted</th>
-                  <th style={th}>Outcome</th>
-                  <th style={th}>Confidence</th>
-                  <th style={th}>Note</th>
-                </tr>
-              </thead>
-              <tbody>
-                {verificationRun.evaluations.map((ev) => (
-                  <tr key={ev.id} style={{ borderBottom: '1px solid #f0f0f0' }}>
-                    <td style={td}><code style={{ fontSize: 12 }}>{ev.requirement_key}</code></td>
-                    <td style={td}>{ev.required_value ?? '—'}</td>
-                    <td style={td}>{ev.extracted_value_ref ?? '—'}</td>
-                    <td style={td}>
-                      <span style={{ color: outcomeColor(ev.outcome), fontWeight: 600 }}>
-                        {outcomeLabel(ev.outcome)}
-                      </span>
-                    </td>
-                    <td style={td}>{ev.confidence_band ?? '—'}</td>
-                    <td style={td}>{ev.note ?? '—'}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          )}
-
-          {/* Advisories panel — informational, no actions */}
-          {verificationRun.advisories.length > 0 && (
-            <div style={{ marginTop: 20 }}>
-              <h3 style={{ fontSize: 14, fontWeight: 600, margin: '0 0 8px' }}>Advisories</h3>
-              {verificationRun.advisories.map((adv) => (
-                <div key={adv.id} style={{
-                  padding: '8px 12px',
-                  marginBottom: 6,
-                  borderRadius: 6,
-                  background: adv.severity === 'warn' ? '#fff8c5' : '#f6f8fa',
-                  border: `1px solid ${adv.severity === 'warn' ? '#d4a72c' : '#d0d7de'}`,
-                  fontSize: 13,
-                }}>
-                  <strong>{adv.key}</strong>: {adv.message}
-                </div>
-              ))}
-            </div>
-          )}
-        </section>
-      )}
+      {/* Zone 2: Review workbench (evaluations + uncertainty UX + decision panel) — Admin only.
+          Rendered at the bottom alongside the decision drawer via <Workbench>; the uncertainty
+          accept / treat-as-deficient handoff lives there (MISSION #4). */}
 
       {/* Zone 3: Per-location compliance */}
       <section style={{ marginBottom: 32 }}>
@@ -327,15 +254,22 @@ export default async function VendorRecordPage({ params }: { params: { vendorId:
         )}
       </section>
 
-      {/* Decision panel — Admin only, when locations are under_review */}
-      {isAdmin && (
-        <DecisionPanel
+      {/* Zone 2 workbench + decision drawer — Admin only.
+          Evaluations table (with per-row uncertainty actions) and the decision panel share
+          client state so "Treat as deficient" pre-populates the correction scope. */}
+      {isAdmin && verificationRun && (
+        <Workbench
           vendorId={vendor.id}
-          locations={locations}
-          onDecisionComplete={() => {
-            // Full page reload to show updated status
-            if (typeof window !== 'undefined') window.location.reload();
-          }}
+          trigger={verificationRun.trigger}
+          recommendation={verificationRun.recommendation}
+          evaluations={verificationRun.evaluations}
+          advisories={verificationRun.advisories}
+          locations={locations.map((l) => ({
+            id: l.id,
+            location_id: l.location_id,
+            location_name: l.location_name,
+            status: l.status,
+          }))}
         />
       )}
     </main>

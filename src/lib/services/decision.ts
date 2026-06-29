@@ -8,6 +8,7 @@ import { logAudit } from '@/lib/audit';
 import { generateInviteToken } from '@/lib/auth/invite-token';
 
 const CORRECTION_INVITE_LIFETIME_MS = 14 * 24 * 60 * 60 * 1000;
+const MIN_REASONING_LENGTH = 10;
 
 export type DecisionAction = 'approve' | 'reject' | 'request_correction';
 
@@ -20,6 +21,69 @@ export interface DecisionInput {
   locationIds: string[];        // for approve/reject; ignored for request_correction
   reason?: string | null;
   acceptedUncertaintyIds?: string[];
+  deficientRequirements?: string[];  // requirement_keys pre-scoped for request_correction
+}
+
+// ── Accept uncertain evaluation ───────────────────────────────────────────────
+
+export interface AcceptEvaluationInput {
+  db: Database.Database;
+  tenantId: string;
+  vendorId: string;
+  evaluationId: string;
+  actorUserId: string;
+  reasoning: string;  // required, minimum length enforced
+}
+
+export class AcceptEvaluationError extends Error {
+  constructor(
+    message: string,
+    public readonly code: 'NOT_FOUND' | 'NOT_UNCERTAIN' | 'REASONING_REQUIRED'
+  ) {
+    super(message);
+  }
+}
+
+export function acceptUncertainEvaluation(input: AcceptEvaluationInput): void {
+  const { db, tenantId, vendorId, evaluationId, actorUserId, reasoning } = input;
+
+  if (!reasoning || reasoning.trim().length < MIN_REASONING_LENGTH) {
+    throw new AcceptEvaluationError(
+      `Reasoning must be at least ${MIN_REASONING_LENGTH} characters`,
+      'REASONING_REQUIRED'
+    );
+  }
+
+  const tdb = new TenantDB(db, tenantId);
+
+  interface EvalRow { id: string; vendor_id: string; requirement_key: string; outcome: string }
+  const evaluation = tdb.get<EvalRow>(
+    `SELECT id, vendor_id, requirement_key, outcome FROM requirement_evaluations
+     WHERE tenant_id = ? AND id = ? AND vendor_id = ?`,
+    [evaluationId, vendorId]
+  );
+
+  if (!evaluation) throw new AcceptEvaluationError('Evaluation not found', 'NOT_FOUND');
+  if (evaluation.outcome !== 'uncertain') {
+    throw new AcceptEvaluationError(
+      `Evaluation outcome is '${evaluation.outcome}', not 'uncertain'`,
+      'NOT_UNCERTAIN'
+    );
+  }
+
+  logAudit(db, {
+    tenantId,
+    actorType: 'user',
+    actorId: actorUserId,
+    eventType: 'evaluation.uncertain_accepted',
+    targetType: 'vendor',
+    targetId: vendorId,
+    payload: {
+      evaluation_id: evaluationId,
+      requirement_key: evaluation.requirement_key,
+      reasoning: reasoning.trim(),
+    },
+  });
 }
 
 export interface DecisionResult {
@@ -40,7 +104,7 @@ export class DecisionError extends Error {
 }
 
 export function applyDecision(input: DecisionInput): DecisionResult {
-  const { db, tenantId, vendorId, actorUserId, action, locationIds, reason, acceptedUncertaintyIds } = input;
+  const { db, tenantId, vendorId, actorUserId, action, locationIds, reason, acceptedUncertaintyIds, deficientRequirements } = input;
   const tdb = new TenantDB(db, tenantId);
   const now = new Date().toISOString();
 
@@ -172,6 +236,7 @@ export function applyDecision(input: DecisionInput): DecisionResult {
         invite_path: `/v/${rawToken}`,
         expires_at: expiresAt,
         ...(reason ? { reason } : {}),
+        ...(deficientRequirements?.length ? { deficient_requirements: deficientRequirements } : {}),
       }),
       created_at: now,
     });
@@ -188,6 +253,7 @@ export function applyDecision(input: DecisionInput): DecisionResult {
       invite_id: inviteId,
       location_count: underReview.length,
       ...(reason ? { reason } : {}),
+      ...(deficientRequirements?.length ? { deficient_requirements: deficientRequirements } : {}),
     },
   });
 
