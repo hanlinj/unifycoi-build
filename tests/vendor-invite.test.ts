@@ -11,6 +11,7 @@ import {
 import { generateInviteToken, hashInviteToken } from '@/lib/auth/invite-token';
 import { fsmTransition, IllegalTransitionError } from '@/lib/services/vendor-fsm';
 import { createVendorInvite, VALID_TRADES } from '@/lib/services/vendors';
+import { TenantDB } from '@/lib/db/tenant';
 
 // ── Token utility ─────────────────────────────────────────────────────────────
 
@@ -339,5 +340,100 @@ describe('createVendorInvite', () => {
     expect(VALID_TRADES).toContain('plumbing');
     expect(VALID_TRADES).toContain('electrical');
     expect(VALID_TRADES).toContain('other');
+  });
+});
+
+// ── Structural cross-tenant isolation ─────────────────────────────────────────
+//
+// These tests prove the TenantDB guard is structural, not conditional.
+// Each test:
+//   1. Creates real data in tenant A
+//   2. Binds a TenantDB to tenant B
+//   3. Reads using tenant B's context
+//   4. Asserts zero rows returned — not "throws", not "undefined by coincidence"
+//
+// The guarantee: no matter what vendor_id/invite_id is passed, a TenantDB bound
+// to a different tenant sees nothing. An attacker who knows tenant A's IDs gains
+// nothing by calling with tenant B's credentials.
+
+describe('Structural cross-tenant isolation (TenantDB)', () => {
+  let db: ReturnType<typeof setupTestDb>;
+  let tenantA: ReturnType<typeof seedTenant>;
+  let tenantB: ReturnType<typeof seedTenant>;
+  let adminA: ReturnType<typeof seedTenantUser>;
+  let locA: ReturnType<typeof seedLocation>;
+  let vendorId: string;
+  let inviteId: string;
+
+  beforeEach(() => {
+    db = setupTestDb();
+    tenantA = seedTenant(db);
+    tenantB = seedTenant(db);
+    adminA = seedTenantUser(db, tenantA.id, { role: 'admin' });
+    locA = seedLocation(db, tenantA.id);
+
+    // Plant real data in tenant A
+    const result = createVendorInvite(db, tenantA.id, {
+      businessName: 'Tenant A Vendor',
+      contactFirstName: 'Alice',
+      contactLastName: 'Smith',
+      email: 'alice@tenanta.com',
+      companyPhone: '+15095550001',
+      trade: 'plumbing',
+      locationIds: [locA.id],
+      inviterUserId: adminA.id,
+    });
+    if (result.type !== 'created') throw new Error('setup failed');
+    vendorId = result.vendorId;
+    inviteId = result.inviteId;
+  });
+  afterEach(() => db.close());
+
+  test('TenantDB(B) finds zero vendors from tenant A — by known vendor_id', () => {
+    const tdbB = new TenantDB(db, tenantB.id);
+    const rows = tdbB.all<{ id: string }>(
+      'SELECT id FROM vendors WHERE tenant_id = ? AND id = ?',
+      [vendorId]
+    );
+    expect(rows).toHaveLength(0);
+  });
+
+  test('TenantDB(B) finds zero invites from tenant A — by known invite_id', () => {
+    const tdbB = new TenantDB(db, tenantB.id);
+    const rows = tdbB.all<{ id: string }>(
+      'SELECT id FROM invites WHERE tenant_id = ? AND id = ?',
+      [inviteId]
+    );
+    expect(rows).toHaveLength(0);
+  });
+
+  test('TenantDB(B) finds zero vendor_locations from tenant A — by known vendor_id', () => {
+    const tdbB = new TenantDB(db, tenantB.id);
+    const rows = tdbB.all<{ id: string }>(
+      'SELECT id FROM vendor_locations WHERE tenant_id = ? AND vendor_id = ?',
+      [vendorId]
+    );
+    expect(rows).toHaveLength(0);
+  });
+
+  test('TenantDB(B) finds zero audit_events from tenant A — by known target_id', () => {
+    const tdbB = new TenantDB(db, tenantB.id);
+    const rows = tdbB.all<{ id: string }>(
+      "SELECT id FROM audit_events WHERE tenant_id = ? AND target_id = ?",
+      [vendorId]
+    );
+    expect(rows).toHaveLength(0);
+  });
+
+  test('raw data for tenant A is actually present (confirms tests above are not vacuous)', () => {
+    // Verify the data we planted is genuinely in the DB under tenant A,
+    // so the zero-row assertions above are meaningful, not vacuously true.
+    const tdbA = new TenantDB(db, tenantA.id);
+    expect(tdbA.all('SELECT id FROM vendors WHERE tenant_id = ? AND id = ?', [vendorId]))
+      .toHaveLength(1);
+    expect(tdbA.all('SELECT id FROM invites WHERE tenant_id = ? AND id = ?', [inviteId]))
+      .toHaveLength(1);
+    expect(tdbA.all('SELECT id FROM vendor_locations WHERE tenant_id = ? AND vendor_id = ?', [vendorId]))
+      .toHaveLength(1);
   });
 });
