@@ -21,7 +21,7 @@ import { validateInviteToken } from '@/lib/services/vendor-token';
 import { fsmTransition, IllegalTransitionError } from '@/lib/services/vendor-fsm';
 import { TenantDB } from '@/lib/db/tenant';
 import { encryptForStorage, decryptFromStorage } from '@/lib/crypto/envelope';
-import { sniffIsPdf } from '@/lib/upload/validate';
+import { sniffIsPdf, detectFileType } from '@/lib/upload/validate';
 import { convertImageToPdf } from '@/lib/upload/convert';
 import sharp from 'sharp';
 
@@ -424,5 +424,152 @@ describe('Inviter notification on submit', () => {
       .all(tenantB.id, admin.id) as { id: string }[];
 
     expect(rows).toHaveLength(0);
+  });
+});
+
+// ── Image upload conversion path — end-to-end ─────────────────────────────────
+//
+// Phone-photo uploads are a first-class supported format. These tests exercise
+// the full chain: image input → detectFileType → convertImageToPdf → encryptForStorage
+// → document row written → visible in the session-boundary resume query.
+// This is distinct from the encryption unit tests above, which do not write a
+// documents row or exercise the validateInviteToken → TenantDB path.
+
+describe('Image upload conversion path — end-to-end', () => {
+  let fixture: ReturnType<typeof buildFixture>;
+  beforeEach(() => { fixture = buildFixture(); });
+  afterEach(() => fixture.db.close());
+
+  test('JPEG: detect → convert → encrypt → document row → visible on session-boundary resume', async () => {
+    const { db, tenant, vendor, rawToken } = fixture;
+
+    // Synthetic JPEG (mimics a phone photo of a COI)
+    const jpegBuf = await sharp({
+      create: { width: 30, height: 40, channels: 3, background: { r: 180, g: 120, b: 60 } },
+    }).jpeg({ quality: 80 }).toBuffer();
+
+    // Step 1 — detect type by magic bytes (mirrors documents route: detectFileType)
+    const fileType = detectFileType(jpegBuf);
+    expect(fileType).toBe('jpeg');
+
+    // Step 2 — convert to single-page PDF (mirrors: convertImageToPdf)
+    const pdfBuf = await convertImageToPdf(jpegBuf);
+    expect(sniffIsPdf(pdfBuf)).toBe(true);
+    expect(pdfBuf.equals(jpegBuf)).toBe(false);
+
+    // Step 3 — envelope-encrypt (mirrors: encryptForStorage + BlobStore.put)
+    const { ciphertext, meta } = encryptForStorage(pdfBuf);
+    expect(ciphertext.equals(pdfBuf)).toBe(false); // ciphertext ≠ plaintext
+
+    // Step 4 — write document row (mirrors: tdb.insert('documents', ...))
+    const docId = randomUUID();
+    const storageKey = `tenants/${tenant.id}/vendors/${vendor.id}/${docId}`;
+    db.prepare(
+      `INSERT INTO documents
+         (id, tenant_id, vendor_id, doc_type, storage_key, encryption_json,
+          original_filename, superseded_by, state, uploaded_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    ).run(
+      docId, tenant.id, vendor.id, 'coi', storageKey,
+      JSON.stringify(meta), 'insurance.jpg', null, 'active', new Date().toISOString()
+    );
+
+    // Step 5 — fresh session (hard session boundary): only rawToken is known
+    const validated = validateInviteToken(db, rawToken);
+    expect(validated).not.toBeNull();
+    const tdb = new TenantDB(db, validated!.invite.tenant_id);
+    const uploadedDocs = tdb.all<{ id: string; doc_type: string }>(
+      `SELECT id, doc_type FROM documents
+       WHERE tenant_id = ? AND vendor_id = ? AND state = 'active' AND superseded_by IS NULL`,
+      [validated!.invite.vendor_id]
+    );
+
+    // The converted image upload shows up in initialUploadedDocs exactly as a PDF upload would
+    expect(uploadedDocs).toHaveLength(1);
+    expect(uploadedDocs[0].id).toBe(docId);
+    expect(uploadedDocs[0].doc_type).toBe('coi');
+
+    // Verify the stored meta decrypts back to the PDF (not the original JPEG)
+    const storedMeta = JSON.parse(
+      (db.prepare('SELECT encryption_json FROM documents WHERE id = ?').get(docId) as { encryption_json: string }).encryption_json
+    ) as typeof meta;
+    const recovered = decryptFromStorage(ciphertext, storedMeta);
+    expect(sniffIsPdf(recovered)).toBe(true);      // stored as PDF, not original image
+    expect(recovered.equals(pdfBuf)).toBe(true);   // exact round-trip
+  });
+
+  test('PNG: same conversion path produces a resumable document', async () => {
+    const { db, tenant, vendor, rawToken } = fixture;
+
+    const pngBuf = await sharp({
+      create: { width: 40, height: 30, channels: 3, background: { r: 40, g: 100, b: 200 } },
+    }).png().toBuffer();
+
+    expect(detectFileType(pngBuf)).toBe('png');
+
+    const pdfBuf = await convertImageToPdf(pngBuf);
+    expect(sniffIsPdf(pdfBuf)).toBe(true);
+
+    const { ciphertext, meta } = encryptForStorage(pdfBuf);
+
+    const docId = randomUUID();
+    db.prepare(
+      `INSERT INTO documents
+         (id, tenant_id, vendor_id, doc_type, storage_key, encryption_json,
+          original_filename, superseded_by, state, uploaded_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    ).run(
+      docId, tenant.id, vendor.id, 'w9',
+      `tenants/${tenant.id}/vendors/${vendor.id}/${docId}`,
+      JSON.stringify(meta), 'w9_scan.png', null, 'active', new Date().toISOString()
+    );
+
+    // Fresh session resume
+    const validated = validateInviteToken(db, rawToken);
+    const tdb = new TenantDB(db, validated!.invite.tenant_id);
+    const uploadedDocs = tdb.all<{ id: string; doc_type: string }>(
+      `SELECT id, doc_type FROM documents
+       WHERE tenant_id = ? AND vendor_id = ? AND state = 'active' AND superseded_by IS NULL`,
+      [validated!.invite.vendor_id]
+    );
+
+    expect(uploadedDocs).toHaveLength(1);
+    expect(uploadedDocs[0].doc_type).toBe('w9');
+
+    const recovered = decryptFromStorage(ciphertext, meta);
+    expect(sniffIsPdf(recovered)).toBe(true);  // stored as PDF, not original PNG
+  });
+
+  test('PDF input bypasses conversion and is stored as-is', () => {
+    const { db, tenant, vendor, rawToken } = fixture;
+
+    const pdfBuf = Buffer.from([0x25, 0x50, 0x44, 0x46, 0x2d, 0x31, 0x2e, 0x34]); // %PDF-1.4 header
+    expect(detectFileType(pdfBuf)).toBe('pdf');
+    // No conversion step — pdfBuf goes directly to encryptForStorage
+    const { ciphertext, meta } = encryptForStorage(pdfBuf);
+    expect(ciphertext.equals(pdfBuf)).toBe(false);
+
+    const docId = randomUUID();
+    db.prepare(
+      `INSERT INTO documents
+         (id, tenant_id, vendor_id, doc_type, storage_key, encryption_json,
+          original_filename, superseded_by, state, uploaded_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    ).run(
+      docId, tenant.id, vendor.id, 'ach',
+      `tenants/${tenant.id}/vendors/${vendor.id}/${docId}`,
+      JSON.stringify(meta), 'banking.pdf', null, 'active', new Date().toISOString()
+    );
+
+    const validated = validateInviteToken(db, rawToken);
+    const tdb = new TenantDB(db, validated!.invite.tenant_id);
+    const uploadedDocs = tdb.all<{ doc_type: string }>(
+      `SELECT doc_type FROM documents
+       WHERE tenant_id = ? AND vendor_id = ? AND state = 'active' AND superseded_by IS NULL`,
+      [validated!.invite.vendor_id]
+    );
+
+    expect(uploadedDocs).toHaveLength(1);
+    expect(uploadedDocs[0].doc_type).toBe('ach');
   });
 });
