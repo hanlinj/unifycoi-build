@@ -6,6 +6,13 @@ export async function register() {
     await import('@/lib/env');
     const { getRawDb } = await import('@/lib/db/client');
     const { seedTemplates } = await import('@/lib/requirements/templates');
-    seedTemplates(getRawDb());
+    const db = getRawDb();
+    seedTemplates(db);
+
+    // Start the in-process background workers (notification sender, daily digest cycle,
+    // retention sweep). Dynamic imports keep them out of the edge bundle.
+    const { defaultMailer } = await import('@/lib/notifications/mailer');
+    const { startAllWorkers } = await import('@/lib/workers/bootstrap');
+    startAllWorkers(defaultMailer, db);
   }
 }

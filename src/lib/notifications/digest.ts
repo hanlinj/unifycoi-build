@@ -11,6 +11,7 @@ import { TenantDB } from '@/lib/db/tenant';
 import type { Mailer } from './mailer';
 import { resolveFrom } from './mailer';
 import { getOperatorName } from './queue';
+import { env } from '@/lib/env';
 
 interface DigestRow {
   id: string;
@@ -123,6 +124,7 @@ function digestLine(payloadJson: string): string {
   }
   const type = String(p['type'] ?? 'update');
   switch (type) {
+    case 'vendor_submitted':
     case 'vendor_ready_for_review':
       return `Vendor ready for review: ${p['vendor_name'] ?? p['vendor_id']}`;
     case 'clean_auto_continue':
@@ -136,4 +138,91 @@ function digestLine(payloadJson: string): string {
     default:
       return `Update: ${type}`;
   }
+}
+
+// ── Timezone-aware daily cycle ────────────────────────────────────────────────────
+
+/** The local hour (0–23) at `now` in the given IANA timezone. */
+export function localHourInZone(now: Date, timeZone: string): number {
+  const formatted = new Intl.DateTimeFormat('en-US', {
+    timeZone,
+    hour: 'numeric',
+    hour12: false,
+  }).format(now);
+  // 'en-US' h23-ish formatting can yield '24' at midnight — normalize to 0–23.
+  return parseInt(formatted, 10) % 24;
+}
+
+export interface DigestCycleResult {
+  tenantsConsidered: number;
+  tenantsFired: number;
+  utcFallbacks: number;
+}
+
+/**
+ * Run the daily digest for every ACTIVE tenant whose LOCAL hour right now equals
+ * DIGEST_HOUR_LOCAL. Tenants with no configured timezone fall back to UTC (per the kickoff
+ * assumption) and emit a warning so the gap surfaces in operational logs.
+ *
+ * Intended to be called once per hour (see startDigestWorker); the hour-match gate makes it
+ * fire ~once/day per tenant. Idempotent within the hour: buildAndSendDigest drains queued
+ * rows, so a second call the same hour finds nothing new.
+ */
+export async function runDigestCycle(
+  mailer: Mailer,
+  db: Database.Database,
+  now: Date = new Date(),
+  digestHour: number = env.notifications.digestHourLocal
+): Promise<DigestCycleResult> {
+  const tenants = db
+    .prepare(`SELECT id, timezone FROM tenants WHERE lifecycle_state = 'active'`)
+    .all() as { id: string; timezone: string | null }[];
+
+  let tenantsFired = 0;
+  let utcFallbacks = 0;
+
+  for (const t of tenants) {
+    let tz = t.timezone;
+    if (!tz) {
+      tz = 'UTC';
+      utcFallbacks++;
+      console.warn(`[digest] tenant ${t.id} has no timezone; falling back to UTC for digest timing`);
+    }
+
+    let hour: number;
+    try {
+      hour = localHourInZone(now, tz);
+    } catch {
+      // Bad tz string — fail safe to UTC and warn.
+      console.warn(`[digest] tenant ${t.id} has invalid timezone "${tz}"; falling back to UTC`);
+      hour = localHourInZone(now, 'UTC');
+      utcFallbacks++;
+    }
+
+    if (hour === digestHour) {
+      await buildAndSendDigest(mailer, db, t.id, now);
+      tenantsFired++;
+    }
+  }
+
+  return { tenantsConsidered: tenants.length, tenantsFired, utcFallbacks };
+}
+
+export interface DigestWorkerHandle {
+  stop: () => void;
+}
+
+/** Start the hourly digest cycle. Logic lives in runDigestCycle (tested with a frozen clock). */
+export function startDigestWorker(
+  mailer: Mailer,
+  db: Database.Database,
+  intervalSeconds: number = 60 * 60
+): DigestWorkerHandle {
+  const timer = setInterval(() => {
+    void runDigestCycle(mailer, db).catch((err) => {
+      console.error('[digest-worker] cycle failed:', err);
+    });
+  }, intervalSeconds * 1000);
+  if (typeof timer.unref === 'function') timer.unref();
+  return { stop: () => clearInterval(timer) };
 }

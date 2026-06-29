@@ -373,7 +373,8 @@ describe('Inviter notification on submit', () => {
     const { db, tenant, admin, vendor } = fixture;
     const now = new Date().toISOString();
 
-    // Write the notification directly (simulating what the submit route does)
+    // Write the notification directly (simulating what the submit route does).
+    // "Vendor ready for review" is a DIGEST (routine) item per the notifications catalog.
     db.prepare(
       `INSERT INTO notifications
          (id, tenant_id, recipient_type, recipient_ref, channel, kind, status, scheduled_for, sent_at, payload_json, created_at)
@@ -381,7 +382,7 @@ describe('Inviter notification on submit', () => {
     ).run(
       randomUUID(), tenant.id,
       'user', admin.id,
-      'email', 'exception', 'queued',
+      'email', 'digest', 'queued',
       null, null,
       JSON.stringify({ type: 'vendor_submitted', vendor_id: vendor.id, vendor_name: vendor.business_name }),
       now
@@ -397,7 +398,7 @@ describe('Inviter notification on submit', () => {
     expect(row).toBeDefined();
     expect(row!.recipient_type).toBe('user');
     expect(row!.recipient_ref).toBe(admin.id);
-    expect(row!.kind).toBe('exception');     // immediate, not digest
+    expect(row!.kind).toBe('digest');        // routine throughput → batched into the daily digest
     expect(row!.status).toBe('queued');
     const payload = JSON.parse(row!.payload_json) as { type: string; vendor_id: string };
     expect(payload.type).toBe('vendor_submitted');
@@ -413,7 +414,7 @@ describe('Inviter notification on submit', () => {
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     ).run(
       randomUUID(), tenant.id, 'user', admin.id,
-      'email', 'exception', 'queued', null, null,
+      'email', 'digest', 'queued', null, null,
       JSON.stringify({ type: 'vendor_submitted', vendor_id: vendor.id }),
       new Date().toISOString()
     );

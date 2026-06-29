@@ -85,14 +85,16 @@ export async function POST(
     );
   }
 
-  // Notify the Admin who sent the invite — exception/immediate (invariant #9)
+  // Notify the Admin who sent the invite. Per Notifications_and_Communications.md catalog
+  // ("Vendor ready for review → Admin → Digest"), this is ROUTINE throughput, batched into
+  // the daily digest — not an immediate exception. (Corrected from the Phase 5 deviation.)
   const now = new Date().toISOString();
   tdb.insert('notifications', {
     id: randomUUID(),
     recipient_type: 'user',
     recipient_ref: invite.inviter_user_id,
     channel: 'email',
-    kind: 'exception',
+    kind: 'digest',
     status: 'queued',
     scheduled_for: null,
     sent_at: null,
