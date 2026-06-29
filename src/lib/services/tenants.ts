@@ -103,11 +103,28 @@ export function updateTenant(
     });
   }
 
-  if (input.name !== undefined) {
+  const settingsChanges: Record<string, { from: unknown; to: unknown }> = {};
+  if (input.name !== undefined && input.name.trim() !== tenant.name) {
+    settingsChanges['name'] = { from: tenant.name, to: input.name.trim() };
     db.prepare('UPDATE tenants SET name = ? WHERE id = ?').run(input.name.trim(), tenantId);
   }
-  if (input.monthlyRateCents !== undefined) {
+  if (input.monthlyRateCents !== undefined && input.monthlyRateCents !== tenant.monthly_rate_cents) {
+    settingsChanges['monthly_rate_cents'] = { from: tenant.monthly_rate_cents, to: input.monthlyRateCents };
     db.prepare('UPDATE tenants SET monthly_rate_cents = ? WHERE id = ?').run(input.monthlyRateCents, tenantId);
+  }
+
+  // Audit tenant settings changes (name / billing rate) with before→after. A billing-rate
+  // change with no trail is a defensibility hole (Audit_Trail.md). No Sensitive values here.
+  if (Object.keys(settingsChanges).length > 0) {
+    logAudit(db, {
+      tenantId,
+      actorType: 'platform',
+      actorId,
+      eventType: 'tenant.settings_changed',
+      targetType: 'tenant',
+      targetId: tenantId,
+      payload: { changes: settingsChanges },
+    });
   }
 
   return getTenantById(db, tenantId) as Tenant;

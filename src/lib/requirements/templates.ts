@@ -16,6 +16,7 @@
 
 import { randomUUID } from 'crypto';
 import type Database from 'better-sqlite3';
+import { logAudit } from '@/lib/audit';
 
 export interface TemplatePayload {
   floor: Record<string, string>;
@@ -168,4 +169,22 @@ export function applyTemplate(
     // Record which template was applied
     db.prepare('UPDATE tenants SET applied_template_id = ? WHERE id = ?').run(templateId, tenantId);
   })();
+
+  // Audit the template application (provisioning). Spec: "template applications" are a
+  // logged requirement-change event (Audit_Trail.md). Actor is the tenant admin who
+  // triggers provisioning — the rules' created_by FK references tenant users(id), so the
+  // actor is necessarily a tenant user, not the platform user. No Sensitive values here.
+  logAudit(db, {
+    tenantId,
+    actorType: 'user',
+    actorId,
+    eventType: 'requirement.template_applied',
+    targetType: 'tenant',
+    targetId: tenantId,
+    payload: {
+      template_id: templateId,
+      template_name: tpl.name,
+      defaults_count: Object.keys(payload.defaults).length,
+    },
+  });
 }

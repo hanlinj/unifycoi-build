@@ -7,7 +7,7 @@ import { NextResponse } from 'next/server';
 import { getRawDb } from '@/lib/db/client';
 import { TenantDB } from '@/lib/db/tenant';
 import { validateInviteToken, INVALID_TOKEN_MESSAGE } from '@/lib/services/vendor-token';
-import { fsmTransition } from '@/lib/services/vendor-fsm';
+import { fireOnboardingStarted } from '@/lib/services/vendor-onboarding';
 
 // Required document types: COI, W-9, and ACH are the platform floor for v1.
 // All three are always required; future per-trade overrides will come from the resolver.
@@ -41,15 +41,15 @@ export async function GET(
 
   const { invite, vendor, vendorLocations } = validated;
 
-  // Fire open_link: invited_pending → onboarding on the vendor's first access.
-  // Idempotent: if any location is already past invited_pending the check is false and
-  // fsmTransition is skipped (avoids IllegalTransitionError on subsequent requests).
-  const allPending =
-    vendorLocations.length > 0 &&
-    vendorLocations.every((vl) => vl.status === 'invited_pending');
-  if (allPending) {
-    fsmTransition(db, invite.tenant_id, invite.vendor_id, 'open_link');
-  }
+  // Fire open_link (Invited/Pending → Onboarding) + audit on the vendor's first access.
+  // Idempotent — see fireOnboardingStarted.
+  fireOnboardingStarted(db, {
+    tenantId: invite.tenant_id,
+    vendorId: invite.vendor_id,
+    inviteId: invite.id,
+    purpose: invite.purpose,
+    vendorLocations,
+  });
 
   const tdb = new TenantDB(db, invite.tenant_id);
 
