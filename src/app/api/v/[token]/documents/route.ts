@@ -5,12 +5,13 @@
 // Flow:
 //   1. Validate invite token (hash lookup, uniform 401 on failure)
 //   2. Parse multipart/form-data (fields: file, doc_type)
-//   3. Enforce size cap (10 MB) and content-type sniff (PDF magic bytes only)
-//   4. Envelope-encrypt → BlobStore.put (ciphertext, never plaintext at rest)
-//   5. Write documents row
-//   6. Run Vision extraction → write extractions row → audit document.extracted
-//   7. Expiration gate (COI only) — expired policy bounced here, never reaches Admin
-//   8. Return 201 with document_id
+//   3. Enforce size cap (25 MB); detect file type by magic bytes
+//   4. If image (JPEG/PNG/HEIC): convert to single-page PDF via sharp + pdf-lib
+//   5. Envelope-encrypt PDF → BlobStore.put (ciphertext only; plaintext never at rest)
+//   6. Write documents row
+//   7. Run Vision extraction → write extractions row → audit document.extracted
+//   8. Expiration gate (COI only) — expired policy bounced here, never reaches Admin
+//   9. Return 201 with document_id
 
 import { NextResponse } from 'next/server';
 import { randomUUID } from 'crypto';
@@ -21,7 +22,14 @@ import { encryptForStorage } from '@/lib/crypto/envelope';
 import { logAudit } from '@/lib/audit';
 import { extractDocument, checkExpirationGate } from '@/lib/extraction/extractor';
 import { validateInviteToken, INVALID_TOKEN_MESSAGE } from '@/lib/services/vendor-token';
-import { sniffIsPdf, withinSizeLimit, MAX_UPLOAD_BYTES } from '@/lib/upload/validate';
+import {
+  detectFileType,
+  withinSizeLimit,
+  MAX_UPLOAD_BYTES,
+  ERR_FILE_SIZE,
+  ERR_FILE_TYPE,
+} from '@/lib/upload/validate';
+import { convertImageToPdf } from '@/lib/upload/convert';
 import { env } from '@/lib/env';
 import type { DocType } from '@/lib/extraction/types';
 import type { ProcessedCOIExtraction } from '@/lib/extraction/types';
@@ -47,7 +55,7 @@ export async function POST(
   const vendorId = invite.vendor_id;
 
   // Parse multipart upload
-  let fileBytes: Buffer;
+  let rawBytes: Buffer;
   let docType: DocType;
   let originalFilename: string | null = null;
 
@@ -66,25 +74,31 @@ export async function POST(
       );
     }
 
-    fileBytes = Buffer.from(await fileEntry.arrayBuffer());
+    rawBytes = Buffer.from(await fileEntry.arrayBuffer());
     docType = docTypeEntry as DocType;
     if (fileEntry instanceof File) originalFilename = fileEntry.name ?? null;
   } catch {
     return NextResponse.json({ error: 'Failed to parse upload' }, { status: 400 });
   }
 
-  // Size cap — checked before any further processing
-  if (!withinSizeLimit(fileBytes)) {
-    return NextResponse.json(
-      { error: `File too large. Maximum size is ${MAX_UPLOAD_BYTES / 1024 / 1024} MB.` },
-      { status: 413 }
-    );
+  // Size cap — checked before any further processing (25 MB; headroom for phone photos)
+  if (!withinSizeLimit(rawBytes)) {
+    return NextResponse.json({ error: ERR_FILE_SIZE }, { status: 413 });
   }
 
-  // Content-type sniff — magic bytes, not extension or Content-Type header
-  if (!sniffIsPdf(fileBytes)) {
+  // File-type detection by magic bytes — extension and Content-Type header are ignored
+  const fileType = detectFileType(rawBytes);
+  if (!fileType) {
+    return NextResponse.json({ error: ERR_FILE_TYPE }, { status: 422 });
+  }
+
+  // Normalise to PDF — every downstream artifact (extraction, storage, engine) is PDF-only
+  let pdfBytes: Buffer;
+  try {
+    pdfBytes = fileType === 'pdf' ? rawBytes : await convertImageToPdf(rawBytes);
+  } catch (err) {
     return NextResponse.json(
-      { error: 'Unsupported file type. Please upload a PDF.' },
+      { error: 'Could not process image', detail: (err as Error).message },
       { status: 422 }
     );
   }
@@ -93,7 +107,7 @@ export async function POST(
   const documentId = randomUUID();
 
   // Envelope-encrypt and write to BlobStore (ciphertext only; plaintext never at rest)
-  const { ciphertext, meta } = encryptForStorage(fileBytes);
+  const { ciphertext, meta } = encryptForStorage(pdfBytes);
   const storageKey = documentKey(tenantId, vendorId, documentId);
 
   try {
@@ -114,10 +128,10 @@ export async function POST(
     uploaded_at: new Date().toISOString(),
   });
 
-  // Vision extraction
+  // Vision extraction (operates on PDF bytes)
   let extraction;
   try {
-    extraction = await extractDocument(fileBytes, docType);
+    extraction = await extractDocument(pdfBytes, docType);
   } catch (err) {
     return NextResponse.json(
       { error: 'Document extraction failed', detail: (err as Error).message },
@@ -148,6 +162,7 @@ export async function POST(
       extraction_id: extractionId,
       model_id: extraction.modelId,
       escalated: extraction.escalated,
+      converted_from: fileType !== 'pdf' ? fileType : undefined,
     },
   });
 
@@ -185,6 +200,7 @@ export async function POST(
         doc_type: docType,
         extraction_id: extractionId,
         escalated: extraction.escalated,
+        converted_from: fileType !== 'pdf' ? fileType : undefined,
       },
     },
     { status: 201 }

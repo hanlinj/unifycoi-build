@@ -178,7 +178,7 @@ describe('withinSizeLimit', () => {
     expect(withinSizeLimit(Buffer.alloc(0))).toBe(true);
   });
 
-  test('MAX_UPLOAD_BYTES is 10 MB', () => {
-    expect(MAX_UPLOAD_BYTES).toBe(10 * 1024 * 1024);
+  test('MAX_UPLOAD_BYTES is 25 MB', () => {
+    expect(MAX_UPLOAD_BYTES).toBe(25 * 1024 * 1024);
   });
 });
