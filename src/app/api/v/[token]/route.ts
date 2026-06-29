@@ -1,29 +1,21 @@
 // GET /api/v/:token
-// Returns the current vendor onboarding flow state (tokenized — no login required).
-// Vendors use this to resume a save-and-resume session or see submission status.
+// Returns the current vendor onboarding flow state.
+// Fires the open_link FSM transition (invited_pending → onboarding) on the first valid request.
+// Token lookup is always by SHA-256 hash — the raw bearer token is never stored.
 
 import { NextResponse } from 'next/server';
 import { getRawDb } from '@/lib/db/client';
+import { TenantDB } from '@/lib/db/tenant';
+import { validateInviteToken, INVALID_TOKEN_MESSAGE } from '@/lib/services/vendor-token';
+import { fsmTransition } from '@/lib/services/vendor-fsm';
 
-interface InviteRow {
-  id: string;
-  tenant_id: string;
-  vendor_id: string;
-  token_expires_at: string;
-  purpose: string;
-  delivery_state: string;
-}
-
-interface VendorRow {
-  id: string;
-  business_name: string;
-  trade: string;
-}
+// Required document types: COI, W-9, and ACH are the platform floor for v1.
+// All three are always required; future per-trade overrides will come from the resolver.
+const REQUIRED_DOC_TYPES = ['coi', 'w9', 'ach'] as const;
 
 interface DocumentRow {
   id: string;
   doc_type: string;
-  state: string;
   uploaded_at: string;
 }
 
@@ -33,88 +25,82 @@ interface RunRow {
   created_at: string;
 }
 
+export const runtime = 'nodejs';
+export const dynamic = 'force-dynamic';
+
 export async function GET(
   _request: Request,
   { params }: { params: { token: string } }
 ): Promise<NextResponse> {
   const db = getRawDb();
-  const { token } = params;
+  const validated = validateInviteToken(db, params.token);
 
-  const invite = db
-    .prepare(
-      `SELECT id, tenant_id, vendor_id, token_expires_at, purpose, delivery_state
-       FROM invites WHERE token = ?`
-    )
-    .get(token) as InviteRow | undefined;
-
-  if (!invite) {
-    return NextResponse.json({ error: 'Invalid or expired token' }, { status: 401 });
-  }
-  if (new Date(invite.token_expires_at) < new Date()) {
-    return NextResponse.json({ error: 'Token has expired' }, { status: 401 });
-  }
-  if (invite.delivery_state === 'bounced' || invite.delivery_state === 'expired_invite') {
-    return NextResponse.json({ error: 'Invite no longer valid' }, { status: 401 });
+  if (!validated) {
+    return NextResponse.json({ error: INVALID_TOKEN_MESSAGE }, { status: 401 });
   }
 
-  const { tenant_id: tenantId, vendor_id: vendorId } = invite;
+  const { invite, vendor, vendorLocations } = validated;
 
-  const vendor = db
-    .prepare('SELECT id, business_name, trade FROM vendors WHERE tenant_id = ? AND id = ?')
-    .get(tenantId, vendorId) as VendorRow | undefined;
-
-  if (!vendor) {
-    return NextResponse.json({ error: 'Vendor not found' }, { status: 404 });
+  // Fire open_link: invited_pending → onboarding on the vendor's first access.
+  // Idempotent: if any location is already past invited_pending the check is false and
+  // fsmTransition is skipped (avoids IllegalTransitionError on subsequent requests).
+  const allPending =
+    vendorLocations.length > 0 &&
+    vendorLocations.every((vl) => vl.status === 'invited_pending');
+  if (allPending) {
+    fsmTransition(db, invite.tenant_id, invite.vendor_id, 'open_link');
   }
 
-  // Documents: all non-superseded docs for this vendor
-  const documents = db
-    .prepare(
-      `SELECT id, doc_type, state, uploaded_at
-       FROM documents
-       WHERE tenant_id = ? AND vendor_id = ? AND superseded_by IS NULL
-       ORDER BY uploaded_at ASC`
-    )
-    .all(tenantId, vendorId) as DocumentRow[];
+  const tdb = new TenantDB(db, invite.tenant_id);
 
-  // Latest verification run (if any)
-  const latestRun = db
-    .prepare(
-      `SELECT id, recommendation, created_at
-       FROM verification_runs
-       WHERE tenant_id = ? AND vendor_id = ?
-       ORDER BY created_at DESC LIMIT 1`
-    )
-    .get(tenantId, vendorId) as RunRow | undefined;
+  const documents = tdb.all<DocumentRow>(
+    `SELECT id, doc_type, uploaded_at
+     FROM documents
+     WHERE tenant_id = ? AND vendor_id = ? AND superseded_by IS NULL AND state = 'active'
+     ORDER BY uploaded_at ASC`,
+    [invite.vendor_id]
+  );
+
+  const latestRun = tdb.get<RunRow>(
+    `SELECT id, recommendation, created_at
+     FROM verification_runs
+     WHERE tenant_id = ? AND vendor_id = ?
+     ORDER BY created_at DESC LIMIT 1`,
+    [invite.vendor_id]
+  );
+
+  const uploadedTypes = new Set(documents.map((d) => d.doc_type));
+  const allUploaded = REQUIRED_DOC_TYPES.every((t) => uploadedTypes.has(t));
 
   const flowState = latestRun
     ? 'submitted'
-    : documents.length > 0
-      ? 'uploading'
-      : 'awaiting_upload';
+    : allUploaded
+      ? 'ready_to_submit'
+      : documents.length > 0
+        ? 'uploading'
+        : 'awaiting_upload';
 
   return NextResponse.json({
     data: {
       invite: {
+        id: invite.id,
         purpose: invite.purpose,
-        vendor_id: vendorId,
         expires_at: invite.token_expires_at,
-        delivery_state: invite.delivery_state,
       },
       vendor: {
         business_name: vendor.business_name,
         trade: vendor.trade,
       },
-      documents: documents.map((d) => ({
+      required_docs: REQUIRED_DOC_TYPES,
+      uploaded_docs: documents.map((d) => ({
         id: d.id,
         doc_type: d.doc_type,
-        state: d.state,
         uploaded_at: d.uploaded_at,
       })),
-      verification: latestRun
-        ? { run_id: latestRun.id, recommendation: latestRun.recommendation, created_at: latestRun.created_at }
-        : null,
       flow_state: flowState,
+      verification: latestRun
+        ? { run_id: latestRun.id, recommendation: latestRun.recommendation }
+        : null,
     },
   });
 }

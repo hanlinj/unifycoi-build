@@ -1,77 +1,50 @@
 // POST /api/v/:token/submit
-// Vendor submit endpoint — enqueues a verification run.
-// For v1: runs synchronously in-process (no external queue).
-//
-// Vendor hits this after uploading all required documents via /documents.
-// Returns immediately with the run result (recommendation + any evaluations).
+// Vendor submit — transitions vendor to Under Review and enqueues a verification run.
+// Token lookup is always by SHA-256 hash of the raw bearer token.
+// Submission and engine wiring are completed in Slice C.
 
 import { NextResponse } from 'next/server';
 import { getRawDb } from '@/lib/db/client';
 import { TenantDB } from '@/lib/db/tenant';
+import { validateInviteToken, INVALID_TOKEN_MESSAGE } from '@/lib/services/vendor-token';
 import { runVerification } from '@/lib/verification/run';
 
-interface InviteRow {
-  id: string;
-  tenant_id: string;
-  vendor_id: string;
-  token_expires_at: string;
-  purpose: string;
-  delivery_state: string;
-}
+interface VendorRow { id: string; trade: string }
 
-interface VendorRow {
-  id: string;
-  trade: string;
-}
+export const runtime = 'nodejs';
+export const dynamic = 'force-dynamic';
 
 export async function POST(
   _request: Request,
   { params }: { params: { token: string } }
 ): Promise<NextResponse> {
   const db = getRawDb();
-  const { token } = params;
+  const validated = validateInviteToken(db, params.token);
 
-  // Validate vendor invite token
-  const invite = db
-    .prepare(
-      `SELECT id, tenant_id, vendor_id, token_expires_at, purpose, delivery_state
-       FROM invites WHERE token = ?`
-    )
-    .get(token) as InviteRow | undefined;
-
-  if (!invite) {
-    return NextResponse.json({ error: 'Invalid or expired token' }, { status: 401 });
-  }
-  if (new Date(invite.token_expires_at) < new Date()) {
-    return NextResponse.json({ error: 'Token has expired' }, { status: 401 });
+  if (!validated) {
+    return NextResponse.json({ error: INVALID_TOKEN_MESSAGE }, { status: 401 });
   }
 
+  const { invite } = validated;
   const tenantId = invite.tenant_id;
   const vendorId = invite.vendor_id;
   const tdb = new TenantDB(db, tenantId);
 
-  // Load vendor trade
   const vendor = tdb.get<VendorRow>(
     'SELECT id, trade FROM vendors WHERE tenant_id = ? AND id = ?',
     [vendorId]
   );
-
   if (!vendor) {
     return NextResponse.json({ error: 'Vendor not found' }, { status: 404 });
   }
 
-  const trigger = invite.purpose === 'renewal' ? 'renewal'
+  const trigger =
+    invite.purpose === 'renewal' ? 'renewal'
     : invite.purpose === 'correction' ? 'resubmission'
     : 'onboarding';
 
   try {
-    const result = await runVerification(db, {
-      tenantId,
-      vendorId,
-      vendorTrade: vendor.trade,
-      trigger,
-    });
-
+    const result = await runVerification(db, { tenantId, vendorId, vendorTrade: vendor.trade, trigger });
     return NextResponse.json({
       data: {
         run_id: result.runId,

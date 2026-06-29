@@ -1,14 +1,16 @@
 // POST /api/v/:token/documents
-// Vendor document upload endpoint (tokenized — no login required).
+// Vendor document upload (tokenized — no login required).
+// Token lookup is always by SHA-256 hash of the raw bearer token.
 //
 // Flow:
-//   1. Validate vendor invite token
-//   2. Accept multipart/form-data upload (field: 'file', field: 'doc_type')
-//   3. Envelope-encrypt → BlobStore → write documents row
-//   4. Run Vision extraction → write extractions row → audit document.extracted
-//   5. Expiration gate (post-extraction, pre-verification-run) — invariant #6
-//   6. If expired: mark document bounced_expired, return 422
-//   7. Return 201 with document id (vendor submits separately via /submit)
+//   1. Validate invite token (hash lookup, uniform 401 on failure)
+//   2. Parse multipart/form-data (fields: file, doc_type)
+//   3. Enforce size cap (10 MB) and content-type sniff (PDF magic bytes only)
+//   4. Envelope-encrypt → BlobStore.put (ciphertext, never plaintext at rest)
+//   5. Write documents row
+//   6. Run Vision extraction → write extractions row → audit document.extracted
+//   7. Expiration gate (COI only) — expired policy bounced here, never reaches Admin
+//   8. Return 201 with document_id
 
 import { NextResponse } from 'next/server';
 import { randomUUID } from 'crypto';
@@ -18,49 +20,36 @@ import { getBlobStore, documentKey } from '@/lib/blob';
 import { encryptForStorage } from '@/lib/crypto/envelope';
 import { logAudit } from '@/lib/audit';
 import { extractDocument, checkExpirationGate } from '@/lib/extraction/extractor';
+import { validateInviteToken, INVALID_TOKEN_MESSAGE } from '@/lib/services/vendor-token';
+import { sniffIsPdf, withinSizeLimit, MAX_UPLOAD_BYTES } from '@/lib/upload/validate';
 import { env } from '@/lib/env';
 import type { DocType } from '@/lib/extraction/types';
 import type { ProcessedCOIExtraction } from '@/lib/extraction/types';
 
-interface InviteRow {
-  id: string;
-  tenant_id: string;
-  vendor_id: string;
-  token_expires_at: string;
-  purpose: string;
-  delivery_state: string;
-}
-
 const ALLOWED_DOC_TYPES: DocType[] = ['coi', 'w9', 'ach'];
+
+export const runtime = 'nodejs';
+export const dynamic = 'force-dynamic';
 
 export async function POST(
   request: Request,
   { params }: { params: { token: string } }
 ): Promise<NextResponse> {
   const db = getRawDb();
-  const { token } = params;
+  const validated = validateInviteToken(db, params.token);
 
-  // Validate vendor invite token
-  const invite = db
-    .prepare(
-      `SELECT id, tenant_id, vendor_id, token_expires_at, purpose, delivery_state
-       FROM invites WHERE token = ?`
-    )
-    .get(token) as InviteRow | undefined;
+  if (!validated) {
+    return NextResponse.json({ error: INVALID_TOKEN_MESSAGE }, { status: 401 });
+  }
 
-  if (!invite) {
-    return NextResponse.json({ error: 'Invalid or expired token' }, { status: 401 });
-  }
-  if (new Date(invite.token_expires_at) < new Date()) {
-    return NextResponse.json({ error: 'Token has expired' }, { status: 401 });
-  }
-  if (invite.delivery_state === 'bounced' || invite.delivery_state === 'expired_invite') {
-    return NextResponse.json({ error: 'Invite no longer valid' }, { status: 401 });
-  }
+  const { invite } = validated;
+  const tenantId = invite.tenant_id;
+  const vendorId = invite.vendor_id;
 
   // Parse multipart upload
   let fileBytes: Buffer;
   let docType: DocType;
+  let originalFilename: string | null = null;
 
   try {
     const formData = await request.formData();
@@ -79,16 +68,31 @@ export async function POST(
 
     fileBytes = Buffer.from(await fileEntry.arrayBuffer());
     docType = docTypeEntry as DocType;
+    if (fileEntry instanceof File) originalFilename = fileEntry.name ?? null;
   } catch {
     return NextResponse.json({ error: 'Failed to parse upload' }, { status: 400 });
   }
 
-  const tenantId = invite.tenant_id;
-  const vendorId = invite.vendor_id;
+  // Size cap — checked before any further processing
+  if (!withinSizeLimit(fileBytes)) {
+    return NextResponse.json(
+      { error: `File too large. Maximum size is ${MAX_UPLOAD_BYTES / 1024 / 1024} MB.` },
+      { status: 413 }
+    );
+  }
+
+  // Content-type sniff — magic bytes, not extension or Content-Type header
+  if (!sniffIsPdf(fileBytes)) {
+    return NextResponse.json(
+      { error: 'Unsupported file type. Please upload a PDF.' },
+      { status: 422 }
+    );
+  }
+
   const tdb = new TenantDB(db, tenantId);
   const documentId = randomUUID();
 
-  // Envelope-encrypt and store in BlobStore
+  // Envelope-encrypt and write to BlobStore (ciphertext only; plaintext never at rest)
   const { ciphertext, meta } = encryptForStorage(fileBytes);
   const storageKey = documentKey(tenantId, vendorId, documentId);
 
@@ -98,32 +102,29 @@ export async function POST(
     return NextResponse.json({ error: 'Storage error' }, { status: 503 });
   }
 
-  // Write documents row (state='active' by default)
   tdb.insert('documents', {
     id: documentId,
     vendor_id: vendorId,
     doc_type: docType,
     storage_key: storageKey,
     encryption_json: JSON.stringify(meta),
-    original_filename: null,
+    original_filename: originalFilename,
     superseded_by: null,
     state: 'active',
     uploaded_at: new Date().toISOString(),
   });
 
-  // Run Vision extraction
+  // Vision extraction
   let extraction;
   try {
     extraction = await extractDocument(fileBytes, docType);
   } catch (err) {
-    // Extraction failure — don't lose the upload; return error
     return NextResponse.json(
       { error: 'Document extraction failed', detail: (err as Error).message },
       { status: 422 }
     );
   }
 
-  // Write extractions row (sensitive fields are already ciphertext in the payload)
   const extractionId = randomUUID();
   tdb.insert('extractions', {
     id: extractionId,
@@ -135,7 +136,6 @@ export async function POST(
     created_at: new Date().toISOString(),
   });
 
-  // Audit: document.extracted (sensitive values are already encrypted in payload)
   logAudit(db, {
     tenantId,
     actorType: 'ai',
@@ -148,15 +148,13 @@ export async function POST(
       extraction_id: extractionId,
       model_id: extraction.modelId,
       escalated: extraction.escalated,
-      document_type_confirmed: (extraction.payload as { document_type_confirmed?: string }).document_type_confirmed,
     },
   });
 
-  // Expiration gate — fires AFTER extraction, BEFORE verification run (invariant #6)
+  // Expiration gate — COI only; fires after extraction, before any verification run (invariant #6)
   if (docType === 'coi') {
     const gate = checkExpirationGate(extraction.payload as ProcessedCOIExtraction);
     if (!gate.passed) {
-      // Mark document as bounced_expired
       tdb.update('documents', { state: 'bounced_expired' }, { id: documentId });
 
       logAudit(db, {
@@ -166,10 +164,7 @@ export async function POST(
         eventType: 'document.bounced_expired',
         targetType: 'document',
         targetId: documentId,
-        payload: {
-          vendor_id: vendorId,
-          expired_policies: gate.expiredPolicies,
-        },
+        payload: { vendor_id: vendorId, expired_policies: gate.expiredPolicies },
       });
 
       return NextResponse.json(
