@@ -3,6 +3,7 @@ import fs from 'fs';
 import path from 'path';
 import { randomUUID } from 'crypto';
 import { hashPassword } from '@/lib/auth/password';
+import { hashInviteToken } from '@/lib/auth/invite-token';
 import type { ProcessedExtraction } from '@/lib/extraction/types';
 
 export function setupTestDb(): Database.Database {
@@ -198,24 +199,30 @@ export function seedInvite(
   db: Database.Database,
   tenantId: string,
   overrides: Partial<{
-    id: string; vendorId: string; inviterUserId: string; token: string;
-    purpose: string; expiresAt: string;
+    id: string; vendorId: string; inviterUserId: string; rawToken: string;
+    purpose: string; expiresAt: string; deliveryState: string;
   }> = {}
-): { id: string; token: string } {
+): { id: string; rawToken: string } {
+  // rawToken is the bearer token sent to the vendor; the DB stores its SHA-256 hash.
+  const rawToken = overrides.rawToken ?? randomUUID();
   const inv = {
     id: overrides.id ?? randomUUID(),
-    token: overrides.token ?? randomUUID(),
+    tokenHash: hashInviteToken(rawToken),
     vendorId: overrides.vendorId ?? null,
     inviterUserId: overrides.inviterUserId ?? randomUUID(),
     purpose: overrides.purpose ?? 'onboarding',
     expiresAt: overrides.expiresAt ?? new Date(Date.now() + 14 * 86400000).toISOString(),
+    deliveryState: overrides.deliveryState ?? 'sent',
   };
   db.prepare(
     `INSERT INTO invites
        (id, tenant_id, vendor_id, inviter_user_id, token, token_expires_at, purpose, delivery_state, created_at)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
-  ).run(inv.id, tenantId, inv.vendorId, inv.inviterUserId, inv.token, inv.expiresAt, inv.purpose, 'sent', new Date().toISOString());
-  return inv;
+  ).run(
+    inv.id, tenantId, inv.vendorId, inv.inviterUserId,
+    inv.tokenHash, inv.expiresAt, inv.purpose, inv.deliveryState, new Date().toISOString()
+  );
+  return { id: inv.id, rawToken };
 }
 
 export function seedDocument(
