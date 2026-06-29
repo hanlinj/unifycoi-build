@@ -4,15 +4,27 @@
 // right tier, most-severe wins), specific deficiency phrases, chase-derived expiry tiers,
 // scope clamping (basic; full District tests in Slice C), and the resend-invite service.
 
+import fs from 'fs';
+import path from 'path';
 import { randomUUID } from 'crypto';
 import type Database from 'better-sqlite3';
 import {
   setupTestDb, seedTenant, seedTenantUser, seedVendor, seedLocation, seedVendorLocation, seedInvite,
 } from './helpers';
 import { TenantDB } from '@/lib/db/tenant';
+import { getRawDb, closeDb } from '@/lib/db/client';
+import { issueToken } from '@/lib/auth/jwt';
 import { buildCommandCenter } from '@/lib/services/command-center';
 import { queueNotification } from '@/lib/notifications/queue';
 import { resendInvite, ResendInviteError } from '@/lib/services/resend-invite';
+
+function migrateRaw(db: Database.Database): void {
+  const dir = path.join(process.cwd(), 'src', 'migrations');
+  db.exec(`CREATE TABLE IF NOT EXISTS _migrations (name TEXT PRIMARY KEY, applied_at TEXT NOT NULL)`);
+  for (const f of fs.readdirSync(dir).filter((x) => x.endsWith('.sql')).sort()) {
+    db.exec(fs.readFileSync(path.join(dir, f), 'utf-8'));
+  }
+}
 
 const NOW = Date.parse('2026-06-29T12:00:00.000Z');
 const DAY = 86_400_000;
@@ -306,5 +318,33 @@ describe('Command Center — cross-tenant isolation', () => {
     expect(ccB.tier1).toHaveLength(0);
     expect(ccB.tier2).toHaveLength(0);
     db.close();
+  });
+});
+
+// ── Page/API wiring smoke (route handler, real getRawDb + Admin JWT) ──────────────
+// Proves the data path the /command-center page renders from: auth → resolveScope →
+// buildCommandCenter → JSON. Catches "page renders empty due to a key mismatch" by
+// asserting a seeded vendor's name appears in the response body. (No render harness.)
+
+describe('GET /api/command-center wiring smoke', () => {
+  afterEach(() => closeDb());
+
+  test('authenticated Admin gets a body containing a seeded at-risk vendor name', async () => {
+    closeDb();
+    const db = getRawDb();
+    migrateRaw(db);
+    const t = seedTenant(db);
+    const admin = seedTenantUser(db, t.id, { role: 'admin' });
+    const loc = seedLocation(db, t.id);
+    const v = seedVendor(db, t.id, { business_name: 'Acme Plumbing Smoke-Test LLC' });
+    seedVendorLocation(db, t.id, v.id, loc.id, { status: 'expired' });
+
+    const jwt = issueToken({ sub: admin.id, tenantId: t.id, role: 'admin', type: 'tenant' });
+    const { GET } = await import('@/app/api/command-center/route');
+    const res = await GET(new Request('http://t/api/command-center', { headers: { Authorization: `Bearer ${jwt}` } }));
+    expect(res.status).toBe(200);
+    const body = await res.text();
+    expect(body).toContain('Acme Plumbing Smoke-Test LLC');
+    expect(body).toContain('"condition":"expired"');
   });
 });

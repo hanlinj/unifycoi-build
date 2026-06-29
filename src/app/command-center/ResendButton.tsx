@@ -6,6 +6,9 @@ export function ResendButton({ vendorId }: { vendorId: string }) {
   const [state, setState] = useState<'idle' | 'sending' | 'sent' | 'error'>('idle');
 
   async function resend() {
+    // Guard against double-fire: ignore clicks while a send is in flight or already succeeded
+    // (avoids queueing two invite emails seconds apart). Errors may be retried.
+    if (state === 'sending' || state === 'sent') return;
     setState('sending');
     try {
       const res = await fetch(`/api/vendors/${vendorId}/resend-invite`, { method: 'POST' });

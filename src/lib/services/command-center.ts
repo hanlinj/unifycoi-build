@@ -83,11 +83,17 @@ export function buildCommandCenter(
   const locParams = scoped ? scope.locationIds! : [];
   const locFilter = scoped ? ` AND vl.location_id IN (${locParams.map(() => '?').join(', ')})` : '';
 
-  // Facilities in scope (for the empty-state count).
-  const facRow = scoped
-    ? { n: new Set(locParams).size }
-    : tdb.get<{ n: number }>(`SELECT COUNT(*) AS n FROM locations WHERE tenant_id = ? AND status = 'active'`)!;
-  const facilitiesInScope = facRow.n;
+  // Facilities in scope (for the empty-state count) — always SCOPE-SCOPED and active-only.
+  // Admin (scope.locationIds === null): org-wide active count.
+  // District: count of active locations across their regions (resolveScope's location set).
+  // Store Manager: count of their assigned active locations.
+  const facilitiesInScope = scoped
+    ? tdb.get<{ n: number }>(
+        `SELECT COUNT(*) AS n FROM locations
+         WHERE tenant_id = ? AND status = 'active' AND id IN (${locParams.map(() => '?').join(', ')})`,
+        locParams
+      )!.n
+    : tdb.get<{ n: number }>(`SELECT COUNT(*) AS n FROM locations WHERE tenant_id = ? AND status = 'active'`)!.n;
 
   // 1. In-scope vendor-locations + vendor identity.
   const vlocs = tdb.all<VLoc>(
