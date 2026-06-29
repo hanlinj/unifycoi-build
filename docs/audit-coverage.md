@@ -131,6 +131,14 @@ own delivery-state record (queued/sent/failed/superseded). The **send** itself I
 the worker (Slice C) logs `notification.sent` (actor `system`/notification-worker, no Sensitive)
 on each successful delivery — satisfying "every send is logged." No new MISSING rows result.
 
+## Note — retention marking (Slice D)
+
+The retention worker marks rows past the 7-year horizon `purge_eligible=1` and logs
+`retention.purge_eligible` (actor `system`/retention-worker, no Sensitive) per marked row —
+documents and audit events alike. Marking is operational metadata; the immutable audit
+*content* (actor/action/target/payload/timestamp) is never edited, so append-only is intact.
+Actual purge (deletion) is a separate deliberate step, also logged — not built in v1.
+
 ## Note — platform-altitude writes (out of scope for tenant audit)
 
 `platform_users`, `requirement_templates` (seeded at startup via `seedTemplates`), and the raw

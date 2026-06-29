@@ -23,36 +23,40 @@ import {
   LADDER_DAYS,
 } from '@/lib/notifications/renewal';
 import { processDueNotifications } from '@/lib/notifications/worker';
-import type { ProcessedCOIExtraction } from '@/lib/extraction/types';
+import type { ProcessedCOIExtraction, FieldValue } from '@/lib/extraction/types';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const NOW = new Date('2026-06-29T12:00:00.000Z');
+
+function fv<T>(value: T): FieldValue<T> {
+  return { value, confidence: 1, band: 'high', source: { page: 1, snippet: '' }, corroborated: false };
+}
 
 function coiWith(expirations: (string | null)[]): ProcessedCOIExtraction {
   return {
     doc_type: 'coi',
     document_type_confirmed: 'coi',
-    certificate_date: { value: null, confidence: 1, band: 'high', source: 'x', corroborated: false },
-    producer: { value: null, confidence: 1, band: 'high', source: 'x', corroborated: false },
-    named_insured: { value: null, confidence: 1, band: 'high', source: 'x', corroborated: false },
-    insured_address: { value: null, confidence: 1, band: 'high', source: 'x', corroborated: false },
+    certificate_date: fv<string | null>(null),
+    producer: fv<string | null>(null),
+    named_insured: fv<string | null>(null),
+    insured_address: fv<string | null>(null),
     insurers: [],
     policies: expirations.map((e) => ({
-      coverage_type: { value: 'gl', confidence: 1, band: 'high', source: 'x', corroborated: false },
-      insurer_letter: { value: null, confidence: 1, band: 'high', source: 'x', corroborated: false },
-      policy_number: { value: null, confidence: 1, band: 'high', source: 'x', corroborated: false },
-      effective_date: { value: null, confidence: 1, band: 'high', source: 'x', corroborated: false },
-      expiration_date: { value: e, confidence: 1, band: 'high', source: 'x', corroborated: false },
+      coverage_type: fv<string | null>('gl'),
+      insurer_letter: fv<string | null>(null),
+      policy_number: fv<string | null>(null),
+      effective_date: fv<string | null>(null),
+      expiration_date: fv<string | null>(e),
       limits: {},
-      additional_insured: { value: null, confidence: 1, band: 'high', source: 'x', corroborated: false },
-      additional_insured_scope: { value: null, confidence: 1, band: 'high', source: 'x', corroborated: false },
-      waiver_of_subrogation: { value: null, confidence: 1, band: 'high', source: 'x', corroborated: false },
-      primary_noncontributory: { value: null, confidence: 1, band: 'high', source: 'x', corroborated: false },
+      additional_insured: fv<boolean | null>(null),
+      additional_insured_scope: fv<string | null>(null),
+      waiver_of_subrogation: fv<boolean | null>(null),
+      primary_noncontributory: fv<boolean | null>(null),
     })),
-    additional_insured_entities: { value: null, confidence: 1, band: 'high', source: 'x', corroborated: false },
-    description_of_operations: { value: null, confidence: 1, band: 'high', source: 'x', corroborated: false },
-    certificate_holder: { value: null, confidence: 1, band: 'high', source: 'x', corroborated: false },
-  } as ProcessedCOIExtraction;
+    additional_insured_entities: fv<string | null>(null),
+    description_of_operations: fv<string | null>(null),
+    certificate_holder: fv<string | null>(null),
+  };
 }
 
 // ── earliestExpiration ──────────────────────────────────────────────────────────

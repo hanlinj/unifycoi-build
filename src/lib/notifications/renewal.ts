@@ -176,7 +176,13 @@ export function handleCoiUploadChase(
   let supersededReminders = 0;
 
   if (prior) {
-    tdb.update('documents', { superseded_by: newDocumentId }, { id: prior.id });
+    // superseded_at is the retention anchor for the old COI (Slice D): the 7-year clock
+    // starts when a renewal makes it inactive.
+    tdb.update(
+      'documents',
+      { superseded_by: newDocumentId, superseded_at: now.toISOString() },
+      { id: prior.id }
+    );
     supersededReminders = supersedeReminders(db, tenantId, prior.id);
     supersededDocumentId = prior.id;
   }
