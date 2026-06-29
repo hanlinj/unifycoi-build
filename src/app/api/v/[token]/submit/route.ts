@@ -4,13 +4,15 @@
 // Token lookup is always by SHA-256 hash of the raw bearer token.
 
 import { NextResponse } from 'next/server';
+import { randomUUID } from 'crypto';
 import { getRawDb } from '@/lib/db/client';
 import { TenantDB } from '@/lib/db/tenant';
 import { validateInviteToken, INVALID_TOKEN_MESSAGE } from '@/lib/services/vendor-token';
 import { fsmTransition, IllegalTransitionError } from '@/lib/services/vendor-fsm';
+import { logAudit } from '@/lib/audit';
 import { runVerification } from '@/lib/verification/run';
 
-interface VendorRow { id: string; trade: string }
+interface VendorRow { id: string; business_name: string; trade: string }
 interface DocRow { doc_type: string }
 
 const REQUIRED_DOC_TYPES = ['coi', 'w9', 'ach'] as const;
@@ -35,7 +37,7 @@ export async function POST(
   const tdb = new TenantDB(db, tenantId);
 
   const vendor = tdb.get<VendorRow>(
-    'SELECT id, trade FROM vendors WHERE tenant_id = ? AND id = ?',
+    'SELECT id, business_name, trade FROM vendors WHERE tenant_id = ? AND id = ?',
     [vendorId]
   );
   if (!vendor) {
@@ -73,20 +75,58 @@ export async function POST(
     : invite.purpose === 'correction' ? 'resubmission'
     : 'onboarding';
 
+  let result;
   try {
-    const result = await runVerification(db, { tenantId, vendorId, vendorTrade: vendor.trade, trigger });
-    return NextResponse.json({
-      data: {
-        run_id: result.runId,
-        recommendation: result.recommendation,
-        evaluation_count: result.evaluationCount,
-        advisory_count: result.advisoryCount,
-      },
-    });
+    result = await runVerification(db, { tenantId, vendorId, vendorTrade: vendor.trade, trigger });
   } catch (err) {
     return NextResponse.json(
       { error: 'Verification run failed', detail: (err as Error).message },
       { status: 500 }
     );
   }
+
+  // Notify the Admin who sent the invite — exception/immediate (invariant #9)
+  const now = new Date().toISOString();
+  tdb.insert('notifications', {
+    id: randomUUID(),
+    recipient_type: 'user',
+    recipient_ref: invite.inviter_user_id,
+    channel: 'email',
+    kind: 'exception',
+    status: 'queued',
+    scheduled_for: null,
+    sent_at: null,
+    payload_json: JSON.stringify({
+      type: 'vendor_submitted',
+      vendor_id: vendorId,
+      vendor_name: vendor.business_name,
+      trade: vendor.trade,
+      run_id: result.runId,
+      recommendation: result.recommendation,
+    }),
+    created_at: now,
+  });
+
+  logAudit(db, {
+    tenantId,
+    actorType: 'vendor',
+    actorId: vendorId,
+    eventType: 'vendor.submitted',
+    targetType: 'vendor',
+    targetId: vendorId,
+    payload: {
+      invite_id: invite.id,
+      run_id: result.runId,
+      recommendation: result.recommendation,
+    },
+  });
+
+  return NextResponse.json({
+    data: {
+      run_id: result.runId,
+      recommendation: result.recommendation,
+      evaluation_count: result.evaluationCount,
+      advisory_count: result.advisoryCount,
+    },
+  });
 }

@@ -7,6 +7,7 @@ export interface ValidatedToken {
     id: string;
     tenant_id: string;
     vendor_id: string;
+    inviter_user_id: string;
     token_expires_at: string;
     purpose: string;
     delivery_state: string;
@@ -36,7 +37,7 @@ export function validateInviteToken(
 
   const invite = db
     .prepare(
-      `SELECT id, tenant_id, vendor_id, token_expires_at, purpose, delivery_state
+      `SELECT id, tenant_id, vendor_id, inviter_user_id, token_expires_at, purpose, delivery_state
        FROM invites WHERE token = ?`
     )
     .get(tokenHash) as ValidatedToken['invite'] | undefined;
