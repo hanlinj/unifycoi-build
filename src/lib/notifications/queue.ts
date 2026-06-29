@@ -15,6 +15,7 @@ export interface QueueNotificationInput {
   kind: 'exception' | 'digest';
   payload: Record<string, unknown>;
   scheduledFor?: string | null;    // ISO; null = send asap (immediate)
+  documentId?: string | null;      // the COI a renewal reminder chases (for supersession)
 }
 
 /** Insert one notification row (status='queued'). Returns its id. */
@@ -35,6 +36,8 @@ export function queueNotification(
     scheduled_for: input.scheduledFor ?? null,
     sent_at: null,
     payload_json: JSON.stringify(input.payload),
+    document_id: input.documentId ?? null,
+    claimed_at: null,
     created_at: new Date().toISOString(),
   });
   return id;

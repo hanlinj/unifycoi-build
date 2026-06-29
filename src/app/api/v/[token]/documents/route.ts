@@ -21,6 +21,7 @@ import { getBlobStore, documentKey } from '@/lib/blob';
 import { encryptForStorage } from '@/lib/crypto/envelope';
 import { logAudit } from '@/lib/audit';
 import { queueNotification } from '@/lib/notifications/queue';
+import { earliestExpiration, handleCoiUploadChase } from '@/lib/notifications/renewal';
 import { extractDocument, checkExpirationGate } from '@/lib/extraction/extractor';
 import { validateInviteToken, INVALID_TOKEN_MESSAGE } from '@/lib/services/vendor-token';
 import {
@@ -212,6 +213,19 @@ export async function POST(
         },
         { status: 422 }
       );
+    }
+
+    // Gate passed → eager-schedule the renewal ladder against this COI's earliest
+    // expiration, and (renewal upload) supersede any prior COI's unfired reminders.
+    const coiPayload = extraction.payload as ProcessedCOIExtraction;
+    const expDate = earliestExpiration(coiPayload);
+    if (expDate) {
+      handleCoiUploadChase(db, {
+        tenantId,
+        vendorId,
+        newDocumentId: documentId,
+        expirationDate: expDate,
+      });
     }
   }
 

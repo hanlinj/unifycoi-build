@@ -124,10 +124,12 @@ review per the user's instruction to decide whether the rationale is sound or th
 Slice B added `notifications` inserts at several sites (vendor.declined → admins,
 non_compliant_rule_change → admins, document.bounced_expired → vendor, plus the digest).
 Per `Audit_Trail.md` ("Notifications are the *communicate* leg; the audit trail is the
-*record* leg"), a queued notification is **not** itself a separately-audited mutation — it is
-the side-channel of an action whose **parent** event is already audited (`vendor.declined`,
+*record* leg"), **queuing** a notification is **not** a separately-audited mutation — it is the
+side-channel of an action whose **parent** event is already audited (`vendor.declined`,
 `vendor.non_compliant_rule_change`, `document.bounced_expired`). The notifications table is its
-own delivery-state record (queued/sent/failed/superseded). No new MISSING rows result.
+own delivery-state record (queued/sent/failed/superseded). The **send** itself IS audited:
+the worker (Slice C) logs `notification.sent` (actor `system`/notification-worker, no Sensitive)
+on each successful delivery — satisfying "every send is logged." No new MISSING rows result.
 
 ## Note — platform-altitude writes (out of scope for tenant audit)
 
