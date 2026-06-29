@@ -111,10 +111,7 @@ const ORG_REQUIREMENTS: Record<string, string> = {
   'coverage_required.workers_comp': 'true',
   'coverage_required.umbrella_excess': 'true',
   'endorsement.additional_insured': 'true',
-  // NOTE: certificate_holder requirement is intentionally omitted in this eval.
-  // All fixture COIs use an ACORD 25 template pre-filled with "City of Los Angeles"
-  // as the cert holder placeholder. certificate_holder_match cannot be tested until
-  // fixtures are regenerated with the correct cert holder per vendor.
+  'certificate_holder': 'StoreSafe Capital Partners LLC',
   'entity_type': 'llc_or_corp',
 };
 

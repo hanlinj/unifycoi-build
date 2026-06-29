@@ -71,16 +71,14 @@ vendors:
       - key: coverage_continuity
         severity: warn
         message: >
-          All policies share the same recent effective date, suggesting a possible recent
-          carrier switch. Prior carrier expiration date needed to confirm no coverage gap.
+          New carrier effective 03/01/2026 implies a possible coverage gap vs. the prior
+          carrier's expected expiration. Current policies are fully compliant; prior
+          expiration date needed to confirm no gap.
         evidence: >
-          All current policy effective dates are the same and within 45 days of the
-          reference date. This is a fixture artifact — all PDFs were generated with
-          the same policy inception date.
+          All current policy effective dates: 03/01/2026 (39 day(s) before evaluation date).
+          Prior carrier expiration unknown — Admin should verify continuity.
     # GL $2M/$4M, Auto $1M CSL, Umbrella $5M/$5M, WC $1M/$1M/$1M.
     # AI on GL and Auto. Cert holder StoreSafe. All names consistent. ACH = LLC name.
-    # ADVISORY NOTE: fixture PDFs share a single policy effective date within 45 days of
-    # reference_date, triggering the coverage_continuity signal. Correct engine behavior.
 
   # ── 03 ──────────────────────────────────────────────────────────────────────────
   clearwater:
@@ -103,7 +101,6 @@ vendors:
   summit_pro:
     display_name: "Summit Pro Plumbing & Mechanical LLC"
     fixture_dir: "Summit Pro (Errors)"
-    fixture_status: MISSING   # directory exists but contains no PDFs as of 2026-04-09
     expected_overall: deficient
     expected_evaluations:
       - requirement_key: named_insured_match
@@ -182,19 +179,13 @@ vendors:
   iron_gate:
     display_name: "Iron Gate Security Solutions LLC"
     fixture_dir: "Iron Gate Security (Error)"
-    # NOTE: The fixture PDF cert holder field uses the ACORD 25 template placeholder
-    # "City of Los Angeles" rather than "Cascade Self Storage Partners LP".
-    # The certificate_holder requirement is excluded from the eval ORG_REQUIREMENTS
-    # (see eval harness comment) so cert_holder_match is not evaluated.
-    # Iron Gate is therefore approve with current fixtures; update when PDFs are fixed.
-    expected_overall: approve
-    expected_evaluations: []
-    # INTENDED scenario (when fixtures are correct):
-    #   expected_overall: deficient
-    #   expected_evaluations:
-    #     - requirement_key: certificate_holder_match
-    #       expected_outcome: fails
-    #       reason: COI cert holder is "Cascade Self Storage Partners LP"; required "StoreSafe Capital Partners LLC"
+    expected_overall: deficient
+    expected_evaluations:
+      - requirement_key: certificate_holder_match
+        expected_outcome: fails
+        reason: >
+          COI cert holder is "Cascade Self Storage Partners LP"; required
+          "StoreSafe Capital Partners LLC". Verified directly from PDF form field.
 
   # ── 08 ──────────────────────────────────────────────────────────────────────────
   proclean:
@@ -274,11 +265,12 @@ vendors:
       - key: coverage_continuity
         severity: warn
         message: >
-          All policies share the same recent effective date, suggesting a possible recent
-          carrier switch. Prior carrier expiration date needed to confirm no coverage gap.
+          New carrier effective 03/01/2026 implies a possible coverage gap vs. the prior
+          carrier's expected expiration. Current policies are fully compliant; prior
+          expiration date needed to confirm no gap.
         evidence: >
-          All current policy effective dates are the same and within 45 days of the
-          reference date. Fixture artifact — PDFs generated with matching inception dates.
+          All current policy effective dates: 03/01/2026 (39 day(s) before evaluation date).
+          Prior carrier expiration unknown — Admin should verify continuity.
       - key: personal_ach_account
         severity: warn
         message: >
