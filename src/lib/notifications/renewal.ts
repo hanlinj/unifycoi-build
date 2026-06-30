@@ -223,13 +223,18 @@ export function handleCoiUploadChase(
   const { tenantId, vendorId, newDocumentId, expirationDate } = input;
   const tdb = new TenantDB(db, tenantId);
 
-  // Prior active, non-superseded COI for this vendor (excluding the just-inserted doc).
+  // Prior active, non-superseded COI for this vendor — STRICTLY OLDER than the new doc. The
+  // uploaded_at guard prevents a concurrency cycle: COI upload does an async Vision extraction
+  // between the document insert and this supersession, so two overlapping COI uploads can both
+  // be present here. Without the guard each would supersede the other (A↔B), leaving NO active
+  // COI and bricking submit. Only superseding strictly-older COIs makes the newest always win.
   const prior = tdb.get<{ id: string }>(
     `SELECT id FROM documents
      WHERE tenant_id = ? AND vendor_id = ? AND doc_type = 'coi'
        AND id != ? AND superseded_by IS NULL AND state = 'active'
+       AND uploaded_at < (SELECT uploaded_at FROM documents WHERE id = ?)
      ORDER BY uploaded_at DESC LIMIT 1`,
-    [vendorId, newDocumentId]
+    [vendorId, newDocumentId, newDocumentId]
   );
 
   let supersededDocumentId: string | null = null;
