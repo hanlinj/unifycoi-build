@@ -15,7 +15,7 @@ interface Rule { id: string; scope_type: string; scope_ref: string | null; requi
 interface ReqData { rules: { org: Rule[]; trade: Rule[]; location: Rule[] }; precedence: string; floor: Record<string, string> }
 interface Loc { id: string; name: string }
 
-export function humanizeKey(key: string): string {
+function humanizeKey(key: string): string {
   const parts = key.split('.');
   const head = parts[0];
   const rest = ['coverage', 'coverage_required', 'endorsement', 'doc_required'].includes(head) ? parts.slice(1) : parts;
