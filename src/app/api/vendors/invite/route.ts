@@ -8,6 +8,7 @@ import { getRawDb } from '@/lib/db/client';
 import { requireTenantAuth, isResponse, created, badRequest, forbidden, conflict } from '@/lib/api';
 import { resolveScope, scopeIncludesLocation } from '@/lib/scope';
 import { createVendorInvite, VALID_TRADES } from '@/lib/services/vendors';
+import { logAudit } from '@/lib/audit';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -47,6 +48,12 @@ export async function POST(request: Request): Promise<NextResponse> {
 
   for (const locId of locationIds as string[]) {
     if (!scopeIncludesLocation(scope, locId)) {
+      // Out-of-scope invite attempt — log the violation (Phase 8 security-pass grain) then 403.
+      logAudit(db, {
+        tenantId: auth.tenantId, actorType: 'user', actorId: auth.sub,
+        eventType: 'security.scope_violation', targetType: 'location', targetId: locId,
+        payload: { role: auth.role, scope_region_ids: scope.regionIds, attempted: 'POST /api/vendors/invite' },
+      });
       return forbidden();
     }
   }

@@ -13,6 +13,7 @@ module.exports = {
       tsconfig: {
         module: 'commonjs',
         moduleResolution: 'node',
+        jsx: 'react-jsx', // compile JSX so component render tests can import .tsx (Slice D item 3)
       },
     }],
   },
