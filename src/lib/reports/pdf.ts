@@ -23,7 +23,7 @@ function filtersLine(f: ReportFilters): string {
 
 // StandardFonts use WinAnsi (≈ latin1); map common Unicode punctuation to ASCII and drop any
 // remaining non-encodable codepoint, so report text never crashes the PDF embedder.
-function winAnsi(s: string): string {
+export function winAnsi(s: string): string {
   return s
     .replace(/→/g, '->').replace(/←/g, '<-')
     .replace(/≤/g, '<=').replace(/≥/g, '>=')

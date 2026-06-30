@@ -66,8 +66,9 @@ describe('audit export — sync (vendor scope)', () => {
     const dl = await download(w.adminJwt, data.export_id);
     expect(dl.status).toBe(200);
     const csv = Buffer.from(await dl.arrayBuffer()).toString('utf-8');
-    expect(csv).toContain('vendor.approved');
-    expect(csv).toContain('event_type'); // header
+    // Slice E format: combined record_type CSV (was a flat event-only CSV in Slice D).
+    expect(csv).toContain('record_type'); // header of the combined format
+    expect(csv).toContain('vendor.approved'); // the scoped event still present (as an 'event' row)
 
     const tdb = new TenantDB(w.db, w.t.id);
     expect(tdb.get(`SELECT id FROM audit_events WHERE tenant_id=? AND event_type='export.generated' AND target_id=?`, [data.export_id])).toBeDefined();

@@ -13,9 +13,10 @@ import { TenantDB } from '@/lib/db/tenant';
 import { logAudit } from '@/lib/audit';
 import { getBlobStore } from '@/lib/blob';
 import { packEncrypted } from '@/lib/crypto/envelope-file';
-import { toCsv } from '@/lib/reports/csv';
-import { renderReportPdf } from '@/lib/reports/pdf';
 import { inClause } from '@/lib/reports';
+import { gatherAuditExportContent } from './content';
+import { renderAuditExportCsv } from './audit-csv';
+import { renderAuditExportPdf } from './audit-pdf';
 
 export type ExportScope = 'vendor' | 'location' | 'region' | 'org' | 'tenant_offboard';
 export type ExportFormat = 'pdf' | 'csv';
@@ -101,15 +102,22 @@ interface ExportRow {
   id: string; scope_type: ExportScope; scope_ref: string | null; format: ExportFormat; includes_sensitive: number; status: string;
 }
 
+interface ExportRowFull extends ExportRow { requested_by: string }
+
 /** Build the export bytes, encrypt, store, and flip the row to 'ready'. Shared by sync + worker. */
 export async function generateExportArtifact(db: Database.Database, tenantId: string, exportId: string): Promise<string> {
   const tdb = new TenantDB(db, tenantId);
-  const row = tdb.get<ExportRow>(
-    'SELECT id, scope_type, scope_ref, format, includes_sensitive, status FROM audit_exports WHERE tenant_id = ? AND id = ?',
+  const row = tdb.get<ExportRowFull>(
+    'SELECT id, scope_type, scope_ref, format, includes_sensitive, status, requested_by FROM audit_exports WHERE tenant_id = ? AND id = ?',
     [exportId]
   )!;
+  const generator = tdb.get<{ id: string; name: string; role: string }>('SELECT id, name, role FROM users WHERE tenant_id = ? AND id = ?', [row.requested_by]) ?? null;
   const tenantName = (db.prepare('SELECT name FROM tenants WHERE id = ?').get(tenantId) as { name: string } | undefined)?.name ?? 'UnifyCOI';
-  const bytes = await buildAuditExportBytes(db, tenantId, row.scope_type, row.scope_ref, row.format, tenantName);
+
+  const bytes = await buildAuditExportBytes(db, tenantId, {
+    scope: row.scope_type, scopeRef: row.scope_ref, format: row.format,
+    includesSensitive: row.includes_sensitive === 1, tenantName, generator,
+  });
 
   const storageKey = `tenants/${tenantId}/exports/${exportId}.${row.format}`;
   await getBlobStore().put(storageKey, packEncrypted(bytes));
@@ -153,23 +161,25 @@ export function scopeAuditEvents(db: Database.Database, tenantId: string, scope:
   );
 }
 
-const EXPORT_COLUMNS = ['created_at', 'actor_type', 'actor_id', 'event_type', 'target_type', 'target_id', 'payload_json'];
-
 export async function buildAuditExportBytes(
-  db: Database.Database, tenantId: string, scope: ExportScope, scopeRef: string | null, format: ExportFormat, tenantName: string
+  db: Database.Database,
+  tenantId: string,
+  input: {
+    scope: ExportScope; scopeRef: string | null; format: ExportFormat;
+    includesSensitive: boolean; tenantName: string; generator: { id: string; name: string; role: string } | null;
+  }
 ): Promise<Buffer> {
-  const events = scopeAuditEvents(db, tenantId, scope, scopeRef);
-  const rows = events.map((e) => [e.created_at, e.actor_type, e.actor_id ?? '', e.event_type, e.target_type ?? '', e.target_id ?? '', e.payload_json ?? '']);
-  const title = `Audit Export — ${scope}${scopeRef ? ` (${scopeRef})` : ''}`;
+  const { scope, scopeRef, format, includesSensitive, tenantName, generator } = input;
+  const generatedAt = new Date().toISOString();
+  const content = gatherAuditExportContent(db, tenantId, { scope, scopeRef, includesSensitive, generatedAt, generator });
 
   if (format === 'csv') {
-    return Buffer.from(toCsv(EXPORT_COLUMNS, rows), 'utf-8');
+    return Buffer.from(renderAuditExportCsv(content), 'utf-8');
   }
-  const pdf = await renderReportPdf({
+  const pdf = await renderAuditExportPdf(content, {
     tenantName,
-    table: { title, subtitle: `${events.length} events`, columns: EXPORT_COLUMNS, rows },
-    generatedAt: new Date().toISOString(),
-    filters: {},
+    scopeLabel: `${scope}${scopeRef ? ` (${scopeRef})` : ''}`,
+    generatedAt,
   });
   return Buffer.from(pdf);
 }
