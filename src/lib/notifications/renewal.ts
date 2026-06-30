@@ -6,16 +6,21 @@
 // The worker sends each when due. Reminders are tied to the COI's document_id so a renewal
 // upload can supersede the unfired ones.
 //
-// Phase 7 scope (per kickoff): the 5 vendor reminders + supersession. The day-0 Expired
-// status flip and lapse/imminent-lapse internal alerts are deferred to Phase 8 (where the
-// risk-queue dashboards that surface them are built).
+// Phase 8 (Slice E) adds, on the same eager schedule:
+//   - a 6th job at the expiration date itself (type 'coi_expiration') — the worker flips the
+//     vendor's locations to 'expired' when it fires (no email; an internal action).
+//   - internal imminent-lapse alerts to Admins at the 7d and 1d rungs (type
+//     'imminent_lapse_admin'), alongside the vendor reminder.
+// All chase artifacts share the COI's document_id, so a renewal supersedes every one of them.
 
 import type Database from 'better-sqlite3';
 import { TenantDB } from '@/lib/db/tenant';
-import { queueNotification } from './queue';
+import { queueNotification, notifyTenantAdmins } from './queue';
+import { logAudit } from '@/lib/audit';
 import type { ProcessedCOIExtraction } from '@/lib/extraction/types';
 
 export const LADDER_DAYS = [60, 30, 14, 7, 1] as const;
+const IMMINENT_RUNGS = new Set([7, 1]); // rungs that also alert Admins internally
 const DAY_MS = 24 * 60 * 60 * 1000;
 
 /** Earliest valid (parseable, future-or-any) expiration date across a COI's policies. */
@@ -36,10 +41,12 @@ export function earliestExpiration(coi: ProcessedCOIExtraction): string | null {
 }
 
 export interface ScheduleResult {
-  scheduled: number;
+  scheduled: number;            // vendor renewal_reminder rows queued (the 5-rung ladder)
   skippedPast: number;
   alreadyScheduled: boolean;
   reminderDates: string[];
+  expirationJobScheduled: boolean; // the day-0 coi_expiration job
+  adminAlerts: number;             // imminent-lapse admin alert rows queued (7d/1d × admins)
 }
 
 /**
@@ -69,12 +76,12 @@ export function scheduleRenewalReminders(
     [documentId]
   );
   if (existing && existing.n > 0) {
-    return { scheduled: 0, skippedPast: 0, alreadyScheduled: true, reminderDates: [] };
+    return { scheduled: 0, skippedPast: 0, alreadyScheduled: true, reminderDates: [], expirationJobScheduled: false, adminAlerts: 0 };
   }
 
   const expMs = Date.parse(expirationDate);
   if (Number.isNaN(expMs)) {
-    return { scheduled: 0, skippedPast: 0, alreadyScheduled: false, reminderDates: [] };
+    return { scheduled: 0, skippedPast: 0, alreadyScheduled: false, reminderDates: [], expirationJobScheduled: false, adminAlerts: 0 };
   }
 
   // Resolve vendor name + email for a payload-complete reminder.
@@ -85,8 +92,17 @@ export function scheduleRenewalReminders(
   const vendorEmail = vendor?.contact_email ?? null;
   const vendorName = vendor?.business_name ?? null;
 
+  // The vendor's locations + the tenant's admins (for the imminent-lapse internal alerts).
+  const locationIds = tdb
+    .all<{ location_id: string }>('SELECT location_id FROM vendor_locations WHERE tenant_id = ? AND vendor_id = ?', [vendorId])
+    .map((r) => r.location_id);
+  const adminIds = tdb
+    .all<{ id: string }>(`SELECT id FROM users WHERE tenant_id = ? AND role = 'admin' AND status != 'disabled'`)
+    .map((r) => r.id);
+
   let scheduled = 0;
   let skippedPast = 0;
+  let adminAlerts = 0;
   const reminderDates: string[] = [];
 
   for (const days of LADDER_DAYS) {
@@ -98,45 +114,89 @@ export function scheduleRenewalReminders(
     const reminderIso = new Date(reminderMs).toISOString();
     reminderDates.push(reminderIso);
 
-    if (!vendorEmail) {
-      // No deliverable address — skip the send but record nothing stuck.
-      // (Invite-time bounce handling already surfaces a missing email to the inviter.)
+    if (vendorEmail) {
+      queueNotification(db, tenantId, {
+        recipientType: 'vendor',
+        recipientRef: vendorEmail,
+        kind: 'exception',          // vendor-facing, immediate-tier — never batched into a digest
+        scheduledFor: reminderIso,
+        documentId,
+        payload: {
+          type: 'renewal_reminder',
+          days_before: days,
+          vendor_id: vendorId,
+          vendor_name: vendorName,
+          document_id: documentId,
+          expiration_date: expirationDate,
+        },
+      });
+      scheduled++;
+    } else {
+      // No deliverable address — skip the vendor send; the day-0 flip below still happens.
       skippedPast++;
-      continue;
     }
 
+    // Imminent-lapse internal alert to Admins at the 7d and 1d rungs (in addition to the
+    // vendor reminder). One row per admin, scheduled for the rung date, superseded on renewal.
+    if (IMMINENT_RUNGS.has(days)) {
+      for (const adminId of adminIds) {
+        queueNotification(db, tenantId, {
+          recipientType: 'user',
+          recipientRef: adminId,
+          kind: 'exception',
+          scheduledFor: reminderIso,
+          documentId,
+          payload: {
+            type: 'imminent_lapse_admin',
+            days_before: days,
+            vendor_id: vendorId,
+            vendor_name: vendorName,
+            location_ids: locationIds,
+            expiration_date: expirationDate,
+          },
+        });
+        adminAlerts++;
+      }
+    }
+  }
+
+  // 6th job — the day-0 expiration flip. Queued regardless of vendor email (a status change,
+  // not an email). The worker special-cases type='coi_expiration' to flip status to expired.
+  let expirationJobScheduled = false;
+  if (expMs > now.getTime()) {
     queueNotification(db, tenantId, {
-      recipientType: 'vendor',
-      recipientRef: vendorEmail,
-      kind: 'exception',          // vendor-facing, immediate-tier — never batched into a digest
-      scheduledFor: reminderIso,
+      recipientType: 'user',
+      recipientRef: 'system', // internal action; the worker never emails this row
+      kind: 'exception',
+      scheduledFor: new Date(expMs).toISOString(),
       documentId,
       payload: {
-        type: 'renewal_reminder',
-        days_before: days,
+        type: 'coi_expiration',
         vendor_id: vendorId,
         vendor_name: vendorName,
         document_id: documentId,
         expiration_date: expirationDate,
       },
     });
-    scheduled++;
+    expirationJobScheduled = true;
   }
 
-  return { scheduled, skippedPast, alreadyScheduled: false, reminderDates };
+  return { scheduled, skippedPast, alreadyScheduled: false, reminderDates, expirationJobScheduled, adminAlerts };
 }
 
 /**
- * Mark all UNFIRED (status='queued') renewal reminders for a document as 'superseded'.
- * Fired reminders (status='sent') are left as the historical record (Audit_Trail.md). Returns
- * the number superseded.
+ * Mark all UNFIRED (status='queued') chase artifacts for a document as 'superseded' — the
+ * vendor reminders, the day-0 expiration job, and the imminent-lapse admin alerts. A renewal
+ * cancels the entire chase for the old COI. Fired rows (status='sent') are left as the
+ * historical record (Audit_Trail.md). Returns the number superseded.
+ *
+ * document_id is only ever set on these chase artifacts, so no type filter is needed.
  */
 export function supersedeReminders(db: Database.Database, tenantId: string, documentId: string): number {
   const res = db
     .prepare(
       `UPDATE notifications SET status = 'superseded'
-       WHERE tenant_id = ? AND document_id = ? AND status = 'queued'
-         AND json_extract(payload_json, '$.type') = 'renewal_reminder'`
+       WHERE tenant_id = ? AND document_id = ? AND status = 'queued'`
     )
     .run(tenantId, documentId);
   return res.changes;
@@ -194,4 +254,68 @@ export function handleCoiUploadChase(
   );
 
   return { supersededDocumentId, supersededReminders, schedule };
+}
+
+// ── Day-0 expiration flip (Slice E) ───────────────────────────────────────────────
+
+export interface ExpirationFlipResult {
+  flippedLocationIds: string[];
+}
+
+/**
+ * Apply the day-0 expiration: flip the vendor's currently-satisfied locations (status
+ * 'approved' or 'under_review') to 'expired', write a vendor.expired audit event, and queue
+ * an exception notification to Admins. Called by the notification worker when a 'coi_expiration'
+ * job fires. Idempotent: if no satisfied locations remain (already expired / renewed), no-op.
+ *
+ * Defensive: if the COI was renewed (superseded), the chase — including this job — was
+ * superseded, so this should not run; we double-check and skip if so.
+ */
+export function applyExpirationFlip(
+  db: Database.Database,
+  input: { tenantId: string; vendorId: string; documentId: string | null },
+  now: Date = new Date()
+): ExpirationFlipResult {
+  const { tenantId, vendorId, documentId } = input;
+  const tdb = new TenantDB(db, tenantId);
+
+  if (documentId) {
+    const doc = tdb.get<{ superseded_by: string | null }>(
+      'SELECT superseded_by FROM documents WHERE tenant_id = ? AND id = ?',
+      [documentId]
+    );
+    if (doc?.superseded_by) return { flippedLocationIds: [] }; // renewed — nothing to expire
+  }
+
+  const locs = tdb.all<{ location_id: string }>(
+    `SELECT location_id FROM vendor_locations
+     WHERE tenant_id = ? AND vendor_id = ? AND status IN ('approved', 'under_review')`,
+    [vendorId]
+  );
+  if (locs.length === 0) return { flippedLocationIds: [] };
+
+  const flipped: string[] = [];
+  for (const l of locs) {
+    tdb.update('vendor_locations', { status: 'expired' }, { vendor_id: vendorId, location_id: l.location_id });
+    flipped.push(l.location_id);
+  }
+
+  logAudit(db, {
+    tenantId,
+    actorType: 'system',
+    actorId: 'expiration-worker',
+    eventType: 'vendor.expired',
+    targetType: 'vendor',
+    targetId: vendorId,
+    payload: { document_id: documentId, location_ids: flipped, expired_at: now.toISOString() },
+  });
+
+  // Exception (immediate) alert to Admins — coverage lapsed, vendor pulled from hireable.
+  notifyTenantAdmins(db, tenantId, {
+    type: 'vendor_expired',
+    vendor_id: vendorId,
+    location_ids: flipped,
+  });
+
+  return { flippedLocationIds: flipped };
 }

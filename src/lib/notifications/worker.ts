@@ -22,6 +22,7 @@ import type Database from 'better-sqlite3';
 import { logAudit } from '@/lib/audit';
 import type { Mailer } from './mailer';
 import { resolveFrom } from './mailer';
+import { applyExpirationFlip } from './renewal';
 import { env } from '@/lib/env';
 
 export interface WorkerTickResult {
@@ -80,6 +81,22 @@ export async function processDueNotifications(
     // Atomic claim — if another pass already took it, changes===0, skip.
     const claimed = claimStmt.run(nowIso, row.id).changes;
     if (claimed === 0) continue;
+
+    // Internal action job, not an email: the day-0 expiration flip.
+    if (messageType(row) === 'coi_expiration') {
+      try {
+        const payload = JSON.parse(row.payload_json) as { vendor_id?: string; document_id?: string | null };
+        if (payload.vendor_id) {
+          applyExpirationFlip(db, { tenantId: row.tenant_id, vendorId: payload.vendor_id, documentId: payload.document_id ?? null }, now);
+        }
+        db.prepare(`UPDATE notifications SET status = 'sent', sent_at = ?, claimed_at = NULL WHERE id = ?`).run(new Date().toISOString(), row.id);
+        sent++;
+      } catch (err) {
+        markFailed(db, row, (err as Error).message);
+        failed++;
+      }
+      continue;
+    }
 
     const resolved = resolveRecipient(db, row);
     if (!resolved.ok) {
@@ -201,6 +218,12 @@ function renderEmail(row: DueRow): { subject: string; body: string } {
       return { subject: `Vendor ready for review: ${vname}`, body: `${vname} submitted documents and is awaiting your review.` };
     case 'vendor_declined':
       return { subject: `Vendor declined: ${vname}`, body: `${vname} was declined.` };
+    case 'vendor_expired':
+      return { subject: `Vendor coverage expired: ${vname}`, body: `${vname}'s coverage has lapsed and the vendor is no longer hireable.` };
+    case 'imminent_lapse_admin': {
+      const days = p['days_before'];
+      return { subject: `Coverage expiring in ${days}d: ${vname}`, body: `${vname} expires in ${days} days with no renewal uploaded yet.` };
+    }
     case 'non_compliant_rule_change':
       return { subject: `Vendor now non-compliant: ${vname}`, body: `A requirement change flagged ${vname} as non-compliant.` };
     default:

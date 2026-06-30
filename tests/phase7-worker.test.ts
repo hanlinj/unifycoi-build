@@ -123,7 +123,9 @@ describe('scheduleRenewalReminders (eager 60/30/14/7/1)', () => {
     expect(res2.alreadyScheduled).toBe(true);
     const tdb = new TenantDB(db, t.id);
     const { n } = tdb.get<{ n: number }>(`SELECT COUNT(*) n FROM notifications WHERE tenant_id=?`)!;
-    expect(n).toBe(5);
+    // Phase 8 Slice E: 5 vendor reminders + 1 day-0 coi_expiration job (no admins seeded here,
+    // so no imminent-lapse admin alerts). Idempotency still prevents a second batch.
+    expect(n).toBe(6);
     db.close();
   });
 
@@ -137,15 +139,21 @@ describe('scheduleRenewalReminders (eager 60/30/14/7/1)', () => {
     db.close();
   });
 
-  test('no vendor email → nothing queued (no stuck rows)', () => {
+  test('no vendor email → no vendor reminders, but the day-0 flip job IS queued', () => {
     const db = setupTestDb();
     const t = seedTenant(db);
     const v = seedVendor(db, t.id); // no contact_email
     const doc = seedDocument(db, t.id, v.id, { doc_type: 'coi' });
     const res = scheduleRenewalReminders(db, { tenantId: t.id, vendorId: v.id, documentId: doc.id, expirationDate: '2027-01-01' }, NOW);
-    expect(res.scheduled).toBe(0);
+    expect(res.scheduled).toBe(0);                  // no vendor-facing reminders without an email
+    // Phase 8 Slice E: the day-0 expiration flip is a status change, not an email — it must be
+    // queued regardless of whether the vendor has a deliverable address.
+    expect(res.expirationJobScheduled).toBe(true);
     const tdb = new TenantDB(db, t.id);
-    expect(tdb.all(`SELECT id FROM notifications WHERE tenant_id=?`)).toHaveLength(0);
+    const reminders = tdb.all(`SELECT id FROM notifications WHERE tenant_id=? AND json_extract(payload_json,'$.type')='renewal_reminder'`);
+    const expJob = tdb.all(`SELECT id FROM notifications WHERE tenant_id=? AND json_extract(payload_json,'$.type')='coi_expiration'`);
+    expect(reminders).toHaveLength(0);
+    expect(expJob).toHaveLength(1);
     db.close();
   });
 });
@@ -166,19 +174,21 @@ describe('supersession on renewal upload', () => {
     const res = handleCoiUploadChase(db, { tenantId: t.id, vendorId: v.id, newDocumentId: newDoc.id, expirationDate: '2028-01-01T00:00:00Z' }, NOW);
 
     expect(res.supersededDocumentId).toBe(oldDoc.id);
-    expect(res.supersededReminders).toBe(5);
-    expect(res.schedule.scheduled).toBe(5);
+    // Phase 8 Slice E: a chase = 5 reminders + 1 day-0 job (no admins seeded → no admin
+    // alerts). Supersession now cancels ALL chase artifacts for the old doc, not just reminders.
+    expect(res.supersededReminders).toBe(6);
+    expect(res.schedule.scheduled).toBe(5); // .scheduled counts vendor reminders only
 
     const tdb = new TenantDB(db, t.id);
     // old doc marked superseded_by new
     const od = tdb.get<{ superseded_by: string }>(`SELECT superseded_by FROM documents WHERE tenant_id=? AND id=?`, [oldDoc.id]);
     expect(od!.superseded_by).toBe(newDoc.id);
-    // old reminders retained as 'superseded' (NOT deleted)
+    // old chase artifacts retained as 'superseded' (NOT deleted)
     const supRows = tdb.all(`SELECT id FROM notifications WHERE tenant_id=? AND document_id=? AND status='superseded'`, [oldDoc.id]);
-    expect(supRows).toHaveLength(5);
-    // new reminders queued
+    expect(supRows).toHaveLength(6);
+    // new chase queued
     const newRows = tdb.all(`SELECT id FROM notifications WHERE tenant_id=? AND document_id=? AND status='queued'`, [newDoc.id]);
-    expect(newRows).toHaveLength(5);
+    expect(newRows).toHaveLength(6);
     db.close();
   });
 
@@ -206,7 +216,8 @@ describe('supersession on renewal upload', () => {
     tdb.update('notifications', { status: 'sent' }, { id: one.id });
 
     const superseded = supersedeReminders(db, t.id, doc.id);
-    expect(superseded).toBe(4); // the sent one is untouched
+    // Phase 8 Slice E: 6 chase rows (5 reminders + 1 day-0 job) minus the 1 already-sent = 5.
+    expect(superseded).toBe(5); // the sent one is untouched
     const sent = tdb.get<{ status: string }>(`SELECT status FROM notifications WHERE tenant_id=? AND id=?`, [one.id]);
     expect(sent!.status).toBe('sent');
     db.close();

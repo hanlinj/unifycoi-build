@@ -126,9 +126,11 @@ export default async function LocationRecordPage({ params, searchParams }: { par
         </table>
       )}
 
-      {/* Admin invite affordance — reuses the global invite (chrome) prefilled with this location.
-          The global invite modal is Phase 10 navigation; the backend reuse is verified by test. */}
-      {isAdmin && !archived && (
+      {/* Invite affordance — Admin / District-in-scope / Store-in-scope (Location_Record.md).
+          Anyone who can view this record is in scope to invite here. Reuses the global invite
+          (chrome) prefilled with this location; the modal is Phase 10 navigation, backend
+          reuse is verified by test. */}
+      {!archived && (
         <p style={{ marginTop: 18, fontSize: 13, color: '#57606a' }}>
           To add a vendor here, use <strong>Invite</strong> (prefilled with this location).
         </p>
