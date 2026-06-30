@@ -93,6 +93,34 @@ export function loginWithEmail(
   };
 }
 
+/**
+ * Login for the browser form (email + password, no tenant id). Tries platform first, then
+ * resolves the tenant(s) carrying that email and authenticates against the one whose password
+ * verifies. (Email is unique per tenant; the same email in two tenants is rare — first match
+ * whose password verifies wins.) An explicit tenantId short-circuits to that tenant.
+ */
+export function loginResolvingTenant(
+  db: Database.Database,
+  email: string,
+  password: string,
+  tenantId?: string
+): LoginResult | null {
+  if (!email || !password) return null;
+  if (tenantId) return loginWithEmail(db, email, password, tenantId);
+
+  const platform = loginWithEmail(db, email, password); // platform path (no tenantId)
+  if (platform) return platform;
+
+  const rows = db
+    .prepare('SELECT DISTINCT tenant_id FROM users WHERE email = ? COLLATE NOCASE')
+    .all(email) as { tenant_id: string }[];
+  for (const r of rows) {
+    const res = loginWithEmail(db, email, password, r.tenant_id);
+    if (res) return res;
+  }
+  return null;
+}
+
 export function getMeInfo(
   db: Database.Database,
   payload: TokenPayload

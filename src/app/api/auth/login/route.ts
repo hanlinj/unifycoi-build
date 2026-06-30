@@ -1,10 +1,12 @@
 import { NextResponse } from 'next/server';
 import { getRawDb } from '@/lib/db/client';
-import { loginWithEmail } from '@/lib/services/auth';
-import { ok, badRequest, apiError } from '@/lib/api';
+import { loginResolvingTenant } from '@/lib/services/auth';
+import { ok, badRequest, apiError, SESSION_COOKIE } from '@/lib/api';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
+
+const SESSION_MAX_AGE = 8 * 60 * 60; // 8h, matches the JWT lifetime
 
 export async function POST(request: Request): Promise<NextResponse> {
   let body: unknown;
@@ -20,10 +22,20 @@ export async function POST(request: Request): Promise<NextResponse> {
   }
 
   const db = getRawDb();
-  const result = loginWithEmail(db, email, password, typeof tenantId === 'string' ? tenantId : undefined);
+  const result = loginResolvingTenant(db, email, password, typeof tenantId === 'string' ? tenantId : undefined);
   if (!result) {
     return apiError('Invalid credentials or account is not accessible', 401);
   }
 
-  return ok({ token: result.token, user: result.user }, 200);
+  // Establish the browser session: JWT in an HTTP-only cookie. The token is also returned in
+  // the body for API/test clients.
+  const res = ok({ token: result.token, user: result.user }, 200);
+  res.cookies.set(SESSION_COOKIE, result.token, {
+    httpOnly: true,
+    secure: process.env.NODE_ENV === 'production',
+    sameSite: 'lax',
+    path: '/',
+    maxAge: SESSION_MAX_AGE,
+  });
+  return res;
 }

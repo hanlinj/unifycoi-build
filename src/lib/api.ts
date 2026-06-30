@@ -22,9 +22,28 @@ export const badRequest = (msg: string): NextResponse => apiError(msg, 400);
 export const conflict = (msg: string): NextResponse => apiError(msg, 409);
 export const unprocessable = (msg: string): NextResponse => apiError(msg, 422);
 
-/** Parse and verify the Bearer token; returns null on any failure. */
+/** Name of the HTTP-only session cookie holding the JWT for browser sessions. */
+export const SESSION_COOKIE = 'uc_session';
+
+/** Read the session token from a request: Authorization: Bearer … first, else the cookie. */
+function tokenFromRequest(request: Request): string | null {
+  const bearer = extractBearerToken(request.headers.get('Authorization'));
+  if (bearer) return bearer;
+  const cookieHeader = request.headers.get('cookie');
+  if (!cookieHeader) return null;
+  for (const part of cookieHeader.split(';')) {
+    const idx = part.indexOf('=');
+    if (idx === -1) continue;
+    if (part.slice(0, idx).trim() === SESSION_COOKIE) {
+      return decodeURIComponent(part.slice(idx + 1).trim());
+    }
+  }
+  return null;
+}
+
+/** Parse and verify the session token (Bearer header or cookie); returns null on any failure. */
 export function getAuth(request: Request): TokenPayload | null {
-  const token = extractBearerToken(request.headers.get('Authorization'));
+  const token = tokenFromRequest(request);
   if (!token) return null;
   try {
     return verifyToken(token);
