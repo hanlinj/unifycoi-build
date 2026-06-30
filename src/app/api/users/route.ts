@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server';
 import { getRawDb } from '@/lib/db/client';
-import { createUser, listUsers } from '@/lib/services/users';
+import { createUser, usersForManagement } from '@/lib/services/users';
 import { resolveScope } from '@/lib/scope';
 import { requireTenantAuth, isResponse, ok, created, badRequest, forbidden } from '@/lib/api';
 
@@ -16,7 +16,7 @@ export async function GET(request: Request): Promise<NextResponse> {
 
   const db = getRawDb();
   const scope = resolveScope(db, auth.tenantId, auth.sub, auth.role);
-  return ok(listUsers(db, auth.tenantId, scope));
+  return ok(usersForManagement(db, auth.tenantId, scope, auth.role));
 }
 
 export async function POST(request: Request): Promise<NextResponse> {

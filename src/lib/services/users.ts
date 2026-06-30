@@ -3,7 +3,7 @@ import type Database from 'better-sqlite3';
 import { TenantDB } from '@/lib/db/tenant';
 import { hashPassword } from '@/lib/auth/password';
 import { logAudit } from '@/lib/audit';
-import type { Scope } from '@/lib/scope';
+import { userManageableByScope, type Scope } from '@/lib/scope';
 
 export interface User {
   id: string;
@@ -170,6 +170,40 @@ export function getUserById(
   userId: string
 ): UserWithScope | null {
   return userWithScope(db, tenantId, userId);
+}
+
+export interface ManagedUser extends UserWithScope {
+  /** Whether the calling user may manage this target (Phase 8 containment rule). */
+  manageable: boolean;
+}
+
+/**
+ * Users for the management UI, each tagged with the caller's manageability.
+ * Admin: every user, all manageable. District: their in-region manageable users PLUS Admins
+ * shown-but-marked unmanageable (explicit affordance, not hidden); out-of-scope non-admins are
+ * omitted. (Reuses the Phase 8 containment rule — target's scope ⊆ caller's regions; Admins
+ * unmanageable by Districts.)
+ */
+export function usersForManagement(
+  db: Database.Database,
+  tenantId: string,
+  scope: Scope,
+  callerRole: string
+): ManagedUser[] {
+  const tdb = new TenantDB(db, tenantId);
+  const all = tdb.all<{ id: string; role: string }>('SELECT id, role FROM users WHERE tenant_id = ? ORDER BY name');
+  const out: ManagedUser[] = [];
+  for (const u of all) {
+    if (callerRole === 'admin') {
+      out.push({ ...userWithScope(db, tenantId, u.id)!, manageable: true });
+    } else if (u.role === 'admin') {
+      out.push({ ...userWithScope(db, tenantId, u.id)!, manageable: false }); // shown, marked
+    } else if (userManageableByScope(db, tenantId, scope, u.id).inScope) {
+      out.push({ ...userWithScope(db, tenantId, u.id)!, manageable: true });
+    }
+    // else: out-of-scope non-admin → omitted (District sees only manageable + admins-marked)
+  }
+  return out;
 }
 
 export function updateUser(

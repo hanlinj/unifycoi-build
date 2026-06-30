@@ -4,6 +4,7 @@ import { TenantDB } from '@/lib/db/tenant';
 import { logAudit } from '@/lib/audit';
 import { isStricter } from '@/lib/requirements/resolver';
 import { triggerRuleChangeReeval } from '@/lib/requirements/re-eval';
+import { VALID_TRADES as SHARED_TRADES } from '@/lib/trades';
 
 // ─── Types ─────────────────────────────────────────────────────────────────────
 
@@ -31,13 +32,11 @@ export interface SetRuleInput {
 }
 
 // Valid trades from the vendor schema
-// NOTE (launch-prep): this trade enum differs from the vendors VALID_TRADES enum (Phase 5).
-// Trade overrides validate against THIS set. The divergence is banked in the launch-prep audit.
-export const REQUIREMENT_TRADES = [
-  'plumbing', 'electrical', 'gate_tech', 'landscaping', 'paving', 'roofing',
-  'hvac', 'pest_control', 'cleaning', 'security', 'other',
-] as const;
-const VALID_TRADES = new Set<string>(REQUIREMENT_TRADES);
+// Trade overrides validate against the SAME shared enum the invite/vendor surface uses
+// (Requirements_Configuration.md: trade overrides use the invite Primary Niche). Re-exported
+// as REQUIREMENT_TRADES for the config UI's selectors.
+export { VALID_TRADES as REQUIREMENT_TRADES } from '@/lib/trades';
+const VALID_TRADES = new Set<string>(SHARED_TRADES);
 
 // ─── Reads ─────────────────────────────────────────────────────────────────────
 

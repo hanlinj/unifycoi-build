@@ -4,13 +4,9 @@ import { TenantDB } from '@/lib/db/tenant';
 import { logAudit } from '@/lib/audit';
 import { generateInviteToken } from '@/lib/auth/invite-token';
 
-export const VALID_TRADES = [
-  'plumbing', 'hvac', 'electrical', 'landscaping', 'sprinklers_irrigation',
-  'paving_asphalt', 'handyman', 'security', 'cleaning', 'general_contractor',
-  'gate_door', 'other',
-] as const;
-
-export type Trade = typeof VALID_TRADES[number];
+// Single shared trade enum (see src/lib/trades.ts) — re-exported for existing importers.
+export { VALID_TRADES } from '@/lib/trades';
+export type { Trade } from '@/lib/trades';
 
 export interface CreateInviteInput {
   businessName: string;
