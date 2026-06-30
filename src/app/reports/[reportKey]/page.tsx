@@ -27,10 +27,20 @@ export default async function ReportPage({ params, searchParams }: { params: { r
   const { data: result } = (await res.json()) as { data: { meta: { name: string }; generatedAt: string; data: Record<string, unknown> } };
   const d = result.data;
 
+  // Download links carry the current filters; the API streams the file (Content-Disposition:
+  // attachment), so a plain same-origin link (cookie sent automatically) triggers the download.
+  const dlBase = `/api/reports/${params.reportKey}?${qs}${qs.toString() ? '&' : ''}`;
+
   return (
     <main style={wrap}>
       <a href="/reports" style={{ fontSize: 12, color: '#0969da', textDecoration: 'none' }}>← All reports</a>
-      <h1 style={{ margin: '6px 0 2px', fontSize: 23, fontWeight: 700 }}>{result.meta.name}</h1>
+      <div style={{ display: 'flex', alignItems: 'flex-start', gap: 16, margin: '6px 0 2px' }}>
+        <h1 style={{ margin: 0, fontSize: 23, fontWeight: 700, flex: 1 }}>{result.meta.name}</h1>
+        <div style={{ display: 'flex', gap: 8, paddingTop: 4 }}>
+          <a href={`${dlBase}format=csv`} style={dlBtn}>Download CSV</a>
+          <a href={`${dlBase}format=pdf`} style={dlBtn}>Download PDF</a>
+        </div>
+      </div>
       <p style={{ margin: '0 0 22px', fontSize: 12, color: '#8c959f', fontVariantNumeric: 'tabular-nums' }}>
         Generated {new Date(result.generatedAt).toLocaleString()}
       </p>
@@ -38,6 +48,8 @@ export default async function ReportPage({ params, searchParams }: { params: { r
     </main>
   );
 }
+
+const dlBtn: React.CSSProperties = { border: '1px solid #d0d7de', background: 'white', borderRadius: 6, padding: '6px 12px', fontSize: 13, textDecoration: 'none', color: '#24292f', fontWeight: 500, whiteSpace: 'nowrap' };
 
 function renderReport(key: string, d: Record<string, unknown>) {
   switch (key) {

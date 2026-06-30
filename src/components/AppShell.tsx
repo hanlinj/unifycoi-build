@@ -9,6 +9,7 @@ import { usePathname } from 'next/navigation';
 import { useEffect, useState } from 'react';
 import { navForRole, shouldShowChrome, isActive } from '@/lib/nav';
 import { CommandPalette } from './CommandPalette';
+import { InviteVendorModal } from './InviteVendorModal';
 
 interface Me { type: 'tenant' | 'platform'; role: string; name: string; tenant_name?: string | null }
 const ROLE_LABEL: Record<string, string> = { admin: 'Admin', district_manager: 'District Manager', store_manager: 'Store Manager' };
@@ -63,6 +64,10 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         <header style={{ height: 52, flexShrink: 0, borderBottom: '1px solid #e1e4e8', display: 'flex', alignItems: 'center', gap: 12, padding: '0 18px' }}>
           <div style={{ fontWeight: 600, fontSize: 14 }}>{me?.tenant_name ?? 'UnifyCOI'}</div>
           <div style={{ flex: 1 }} />
+          <button onClick={() => window.dispatchEvent(new CustomEvent('uc:open-invite'))}
+            style={{ border: 'none', background: '#1f883d', color: 'white', borderRadius: 6, padding: '6px 14px', fontSize: 13, fontWeight: 600, cursor: 'pointer' }}>
+            + Invite vendor
+          </button>
           <button aria-label="Search" title="Search (⌘K)" onClick={() => window.dispatchEvent(new CustomEvent('uc:open-search'))}
             style={{ border: '1px solid #d0d7de', background: 'white', borderRadius: 6, padding: '5px 10px', fontSize: 13, cursor: 'pointer', color: '#57606a' }}>
             🔍 Search <span style={{ color: '#8c959f' }}>⌘K</span>
@@ -77,6 +82,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       </div>
 
       <CommandPalette />
+      <InviteVendorModal />
     </div>
   );
 }
