@@ -4,6 +4,7 @@
 
 import { cookies, headers } from 'next/headers';
 import { redirect } from 'next/navigation';
+import { requestBaseUrl } from '@/lib/http/base-url';
 import { InviteUserForm, UserRowActions } from './UsersClient';
 
 export const dynamic = 'force-dynamic';
@@ -23,8 +24,7 @@ async function fetchJson(base: string, p: string, h: Headers): Promise<{ status:
 
 export default async function UsersPage({ searchParams }: { searchParams: { role?: string; status?: string } }) {
   const h = headers();
-  const host = h.get('host') ?? 'localhost:3000';
-  const base = `${host.startsWith('localhost') ? 'http' : 'https'}://${host}`;
+  const base = requestBaseUrl(h);
 
   const usersRes = await fetchJson(base, '/api/users', h);
   if (usersRes.status === 401) redirect('/login');

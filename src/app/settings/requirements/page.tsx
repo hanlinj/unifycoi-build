@@ -5,6 +5,7 @@
 
 import { cookies, headers } from 'next/headers';
 import { redirect } from 'next/navigation';
+import { requestBaseUrl } from '@/lib/http/base-url';
 import { REQUIREMENT_TRADES } from '@/lib/services/requirements';
 import { AddRuleForm, PrecedenceSelector, ResolvedMatrix } from './RequirementsClient';
 
@@ -29,8 +30,7 @@ async function fetchJson(base: string, p: string, h: Headers): Promise<{ status:
 
 export default async function RequirementsPage() {
   const h = headers();
-  const host = h.get('host') ?? 'localhost:3000';
-  const base = `${host.startsWith('localhost') ? 'http' : 'https'}://${host}`;
+  const base = requestBaseUrl(h);
 
   const req = await fetchJson(base, '/api/requirements', h);
   if (req.status === 401) redirect('/login');

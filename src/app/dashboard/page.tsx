@@ -4,6 +4,7 @@
 
 import { cookies, headers } from 'next/headers';
 import { redirect } from 'next/navigation';
+import { requestBaseUrl } from '@/lib/http/base-url';
 
 export const dynamic = 'force-dynamic';
 
@@ -41,8 +42,7 @@ export default async function DashboardPage({ searchParams }: { searchParams: { 
   const q = searchParams.q ?? '';
 
   const h = headers();
-  const host = h.get('host') ?? 'localhost:3000';
-  const base = `${host.startsWith('localhost') ? 'http' : 'https'}://${host}`;
+  const base = requestBaseUrl(h);
   const qs = new URLSearchParams();
   if (trade) qs.set('trade', trade);
   if (q) qs.set('q', q);

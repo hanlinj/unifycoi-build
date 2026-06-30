@@ -3,6 +3,7 @@
 
 import { cookies, headers } from 'next/headers';
 import { redirect, notFound } from 'next/navigation';
+import { requestBaseUrl } from '@/lib/http/base-url';
 
 export const dynamic = 'force-dynamic';
 
@@ -15,8 +16,7 @@ export default async function ReportPage({ params, searchParams }: { params: { r
   if (!KNOWN.has(params.reportKey)) notFound();
 
   const h = headers();
-  const host = h.get('host') ?? 'localhost:3000';
-  const base = `${host.startsWith('localhost') ? 'http' : 'https'}://${host}`;
+  const base = requestBaseUrl(h);
   const qs = new URLSearchParams();
   for (const k of ['region', 'location', 'trade', 'from', 'to']) if (searchParams[k]) qs.set(k, searchParams[k]);
   const res = await fetch(`${base}/api/reports/${params.reportKey}?${qs}`, { headers: { Authorization: h.get('Authorization') ?? '', Cookie: cookies().toString() }, cache: 'no-store' });

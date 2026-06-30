@@ -4,6 +4,7 @@
 
 import { cookies, headers } from 'next/headers';
 import { redirect } from 'next/navigation';
+import { requestBaseUrl } from '@/lib/http/base-url';
 import { ResendButton } from './ResendButton';
 
 export const dynamic = 'force-dynamic';
@@ -35,8 +36,7 @@ function ago(iso: string | null): string {
 
 export default async function CommandCenterPage() {
   const h = headers();
-  const host = h.get('host') ?? 'localhost:3000';
-  const base = `${host.startsWith('localhost') ? 'http' : 'https'}://${host}`;
+  const base = requestBaseUrl(h);
   const res = await fetch(`${base}/api/command-center`, {
     headers: { Authorization: h.get('Authorization') ?? '', Cookie: cookies().toString() },
     cache: 'no-store',

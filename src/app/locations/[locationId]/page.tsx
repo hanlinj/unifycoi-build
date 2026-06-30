@@ -4,6 +4,7 @@
 
 import { cookies, headers } from 'next/headers';
 import { redirect } from 'next/navigation';
+import { requestBaseUrl } from '@/lib/http/base-url';
 import { SendReminderButton, ArchiveLocationButton } from './LocationActions';
 
 export const dynamic = 'force-dynamic';
@@ -38,8 +39,7 @@ export default async function LocationRecordPage({ params, searchParams }: { par
   const status = searchParams.status ?? '';
   const trade = searchParams.trade ?? '';
   const h = headers();
-  const host = h.get('host') ?? 'localhost:3000';
-  const base = `${host.startsWith('localhost') ? 'http' : 'https'}://${host}`;
+  const base = requestBaseUrl(h);
   const qs = new URLSearchParams();
   if (status) qs.set('status', status);
   if (trade) qs.set('trade', trade);

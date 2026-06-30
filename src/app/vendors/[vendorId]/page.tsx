@@ -5,6 +5,7 @@
 
 import { cookies, headers } from 'next/headers';
 import { redirect } from 'next/navigation';
+import { requestBaseUrl } from '@/lib/http/base-url';
 import { Workbench } from './Workbench';
 
 export const dynamic = 'force-dynamic';
@@ -113,10 +114,8 @@ export default async function VendorRecordPage({ params }: { params: { vendorId:
   const authHeader = headers().get('Authorization') ?? '';
   const cookieHeader = cookies().toString();
 
-  // Resolve the base URL for internal API call
-  const host = headers().get('host') ?? 'localhost:3000';
-  const protocol = host.startsWith('localhost') ? 'http' : 'https';
-  const base = `${protocol}://${host}`;
+  // Resolve the base URL for the internal API call (honors x-forwarded-proto; http in dev).
+  const base = requestBaseUrl(headers());
 
   const res = await fetch(`${base}/api/vendors/${params.vendorId}`, {
     headers: {

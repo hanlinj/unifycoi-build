@@ -2,6 +2,7 @@
 
 import { cookies, headers } from 'next/headers';
 import { redirect } from 'next/navigation';
+import { requestBaseUrl } from '@/lib/http/base-url';
 
 export const dynamic = 'force-dynamic';
 
@@ -9,8 +10,7 @@ interface Meta { key: string; name: string; question: string }
 
 export default async function ReportsIndexPage() {
   const h = headers();
-  const host = h.get('host') ?? 'localhost:3000';
-  const base = `${host.startsWith('localhost') ? 'http' : 'https'}://${host}`;
+  const base = requestBaseUrl(h);
   const res = await fetch(`${base}/api/reports`, { headers: { Authorization: h.get('Authorization') ?? '', Cookie: cookies().toString() }, cache: 'no-store' });
   if (res.status === 401) redirect('/');
   if (res.status === 403) return <main style={wrap}><p style={{ color: '#57606a' }}>Reports are available to Admins and District Managers. Your operational view is the dashboard.</p></main>;

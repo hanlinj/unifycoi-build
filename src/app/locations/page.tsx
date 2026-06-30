@@ -4,6 +4,7 @@
 
 import { cookies, headers } from 'next/headers';
 import { redirect } from 'next/navigation';
+import { requestBaseUrl } from '@/lib/http/base-url';
 
 export const dynamic = 'force-dynamic';
 
@@ -11,8 +12,7 @@ interface Loc { id: string; name: string; region_name: string | null; address?: 
 
 export default async function LocationsPage() {
   const h = headers();
-  const host = h.get('host') ?? 'localhost:3000';
-  const base = `${host.startsWith('localhost') ? 'http' : 'https'}://${host}`;
+  const base = requestBaseUrl(h);
   const res = await fetch(`${base}/api/locations`, { headers: { Authorization: h.get('Authorization') ?? '', Cookie: cookies().toString() }, cache: 'no-store' });
   if (res.status === 401) redirect('/login');
   const locations = (res.ok ? ((await res.json()).data as Loc[]) : []) ?? [];
