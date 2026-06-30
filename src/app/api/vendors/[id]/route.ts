@@ -8,6 +8,8 @@ import { NextResponse } from 'next/server';
 import { getRawDb } from '@/lib/db/client';
 import { TenantDB } from '@/lib/db/tenant';
 import { requireTenantAuth, isResponse, forbidden, notFound } from '@/lib/api';
+import { resolveScope, scopeIncludesLocation } from '@/lib/scope';
+import { logAudit } from '@/lib/audit';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -88,7 +90,7 @@ export async function GET(
   if (!vendor) return notFound('Vendor not found');
 
   // Load per-location statuses with location names
-  const locations = tdb.all<VendorLocationRow>(
+  const allLocations = tdb.all<VendorLocationRow>(
     `SELECT vl.id, vl.location_id, l.name AS location_name, vl.status, vl.flags_json,
             vl.approved_by, vl.approved_at
      FROM vendor_locations vl
@@ -97,6 +99,34 @@ export async function GET(
      ORDER BY l.name`,
     [vendorId]
   );
+
+  // Within-tenant scope clamp (Phase 8 Slice C). A District/Store user may see this vendor
+  // only if ≥1 of the vendor's locations is in their scope, and then ONLY their in-scope
+  // location rows. Out-of-scope → uniform 404 (enumeration-resistant, same shape/code as a
+  // genuinely-missing vendor — Search.md). Admin (scope.locationIds === null) sees all rows.
+  const scope = resolveScope(db, tenantId, auth.sub, auth.role);
+  const locations = scope.locationIds === null
+    ? allLocations
+    : allLocations.filter((vl) => scopeIncludesLocation(scope, vl.location_id));
+
+  if (!isAdmin && locations.length === 0) {
+    // The vendor exists but is entirely outside the caller's scope — a real out-of-scope
+    // access attempt. Log the security event (no Sensitive values), then 404.
+    logAudit(db, {
+      tenantId,
+      actorType: 'user',
+      actorId: auth.sub,
+      eventType: 'security.scope_violation',
+      targetType: 'vendor',
+      targetId: vendorId,
+      payload: {
+        role: auth.role,
+        scope_location_ids: scope.locationIds,
+        attempted: 'GET /api/vendors/:id',
+      },
+    });
+    return notFound('Vendor not found');
+  }
 
   // Documents (metadata only — no storage_key, no encryption_json)
   const documents = tdb.all<DocumentRow>(
