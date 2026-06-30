@@ -31,10 +31,13 @@ export interface SetRuleInput {
 }
 
 // Valid trades from the vendor schema
-const VALID_TRADES = new Set([
+// NOTE (launch-prep): this trade enum differs from the vendors VALID_TRADES enum (Phase 5).
+// Trade overrides validate against THIS set. The divergence is banked in the launch-prep audit.
+export const REQUIREMENT_TRADES = [
   'plumbing', 'electrical', 'gate_tech', 'landscaping', 'paving', 'roofing',
   'hvac', 'pest_control', 'cleaning', 'security', 'other',
-]);
+] as const;
+const VALID_TRADES = new Set<string>(REQUIREMENT_TRADES);
 
 // ─── Reads ─────────────────────────────────────────────────────────────────────
 
@@ -215,7 +218,8 @@ export function setPrecedence(
   db: Database.Database,
   tenantId: string,
   policy: Precedence,
-  actorId: string
+  actorId: string,
+  reason?: string
 ): void {
   const tdb = new TenantDB(db, tenantId);
   const old = getPrecedence(db, tenantId);
@@ -234,6 +238,6 @@ export function setPrecedence(
     eventType: 'requirement.precedence_changed',
     targetType: 'requirement_settings',
     targetId: tenantId,
-    payload: { old_policy: old, new_policy: policy },
+    payload: { old_policy: old, new_policy: policy, ...(reason ? { reason } : {}) },
   });
 }

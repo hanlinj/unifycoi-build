@@ -18,12 +18,16 @@ export async function PUT(request: Request): Promise<NextResponse> {
   let body: unknown;
   try { body = await request.json(); } catch { return badRequest('JSON body required'); }
 
-  const { policy } = body as Record<string, unknown>;
+  const { policy, reason } = body as Record<string, unknown>;
   if (!policy || !VALID_POLICIES.includes(policy as Precedence)) {
     return badRequest(`policy must be one of: ${VALID_POLICIES.join(', ')}`);
   }
+  // A precedence change is a requirement change → reason required (audit invariant #10).
+  if (typeof reason !== 'string' || reason.trim().length < 10) {
+    return badRequest('reason is required (min 10 characters) for a precedence change');
+  }
 
   const db = getRawDb();
-  setPrecedence(db, auth.tenantId, policy as Precedence, auth.sub);
+  setPrecedence(db, auth.tenantId, policy as Precedence, auth.sub, reason.trim());
   return ok({ policy });
 }
