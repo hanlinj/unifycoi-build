@@ -156,5 +156,6 @@ export function getMeInfo(
   }
 
   if (!u) return null;
-  return { ...u, type: 'tenant', tenantId: payload.tenantId };
+  const tenant = db.prepare('SELECT name FROM tenants WHERE id = ?').get(payload.tenantId) as { name: string } | undefined;
+  return { ...u, type: 'tenant', tenantId: payload.tenantId, tenant_name: tenant?.name ?? null };
 }

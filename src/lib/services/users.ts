@@ -214,8 +214,17 @@ export function updateUser(
   actorId: string
 ): UserWithScope {
   const tdb = new TenantDB(db, tenantId);
-  const existing = tdb.get<User>('SELECT id, status FROM users WHERE tenant_id = ? AND id = ?', [userId]);
+  const existing = tdb.get<User>('SELECT id, role, status FROM users WHERE tenant_id = ? AND id = ?', [userId]);
   if (!existing) throw Object.assign(new Error('User not found'), { status: 404 });
+
+  // An org must always have at least one active Admin — block deactivating the last one
+  // (otherwise the tenant locks itself out and recovery needs DB-level intervention).
+  if (input.status !== undefined && input.status !== 'active' && existing.role === 'admin' && existing.status === 'active') {
+    const active = tdb.get<{ n: number }>("SELECT COUNT(*) AS n FROM users WHERE tenant_id = ? AND role = 'admin' AND status = 'active'");
+    if ((active?.n ?? 0) <= 1) {
+      throw Object.assign(new Error('Cannot deactivate the last active Admin — an organization must always have at least one Admin.'), { status: 409 });
+    }
+  }
 
   if (input.name !== undefined) {
     tdb.update('users', { name: input.name.trim() }, { id: userId });

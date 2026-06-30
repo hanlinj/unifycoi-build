@@ -81,12 +81,15 @@ export function UserRowActions({ user, regions, locations }: { user: { id: strin
   const [regionIds, setRegionIds] = useState(user.regionIds);
   const [locationIds, setLocationIds] = useState(user.locationIds);
   const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
 
   async function patch(body: Record<string, unknown>) {
-    setBusy(true);
+    setBusy(true); setErr(null);
     try {
       const res = await fetch(`/api/users/${user.id}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
-      if (res.ok) window.location.reload();
+      if (res.ok) { window.location.reload(); return; }
+      const b = await res.json().catch(() => ({}));
+      setErr((b as { error?: string }).error ?? `Error ${res.status}`);
     } finally { setBusy(false); }
   }
   const toggle = (arr: string[], set: (v: string[]) => void, id: string) => set(arr.includes(id) ? arr.filter((x) => x !== id) : [...arr, id]);
@@ -111,6 +114,7 @@ export function UserRowActions({ user, regions, locations }: { user: { id: strin
           </div>
         </div>
       )}
+      {err && <span role="alert" style={{ flexBasis: '100%', fontSize: 12, color: '#cf222e' }}>{err}</span>}
     </div>
   );
 }

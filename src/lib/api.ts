@@ -23,7 +23,8 @@ export const conflict = (msg: string): NextResponse => apiError(msg, 409);
 export const unprocessable = (msg: string): NextResponse => apiError(msg, 422);
 
 /** Name of the HTTP-only session cookie holding the JWT for browser sessions. */
-export const SESSION_COOKIE = 'uc_session';
+export { SESSION_COOKIE } from '@/lib/auth/session-cookie';
+import { SESSION_COOKIE } from '@/lib/auth/session-cookie';
 
 /** Read the session token from a request: Authorization: Bearer … first, else the cookie. */
 function tokenFromRequest(request: Request): string | null {

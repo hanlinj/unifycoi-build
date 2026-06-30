@@ -67,6 +67,36 @@ describe('usersForManagement', () => {
   });
 });
 
+// ── last-Admin guard ───────────────────────────────────────────────────────────────────
+
+describe('updateUser — last active Admin guard', () => {
+  test('single-Admin tenant cannot deactivate that Admin; two-Admin tenant can deactivate one', async () => {
+    const { updateUser } = await import('@/lib/services/users');
+    const db = setupTestDb();
+    const t = seedTenant(db);
+    const a1 = seedTenantUser(db, t.id, { role: 'admin' });
+
+    // single admin → blocked
+    expect(() => updateUser(db, t.id, a1.id, { status: 'disabled' }, a1.id)).toThrow(/last active Admin/);
+
+    // add a second admin → now one can be deactivated, leaving the other as the last
+    const a2 = seedTenantUser(db, t.id, { role: 'admin' });
+    expect(() => updateUser(db, t.id, a2.id, { status: 'disabled' }, a1.id)).not.toThrow();
+    // a1 is now the last active admin → blocked again
+    expect(() => updateUser(db, t.id, a1.id, { status: 'disabled' }, a1.id)).toThrow(/last active Admin/);
+    db.close();
+  });
+
+  test('non-status edits to an Admin are unaffected by the guard', async () => {
+    const { updateUser } = await import('@/lib/services/users');
+    const db = setupTestDb();
+    const t = seedTenant(db);
+    const a1 = seedTenantUser(db, t.id, { role: 'admin' });
+    expect(() => updateUser(db, t.id, a1.id, { name: 'Renamed Admin' }, a1.id)).not.toThrow();
+    db.close();
+  });
+});
+
 // ── GET /api/users route (enriched) ───────────────────────────────────────────────────
 
 describe('GET /api/users — management list', () => {
