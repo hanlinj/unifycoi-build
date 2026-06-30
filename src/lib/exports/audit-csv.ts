@@ -15,8 +15,17 @@ import type { AuditExportContent } from './content';
 
 const HEADER = ['record_type', 'f1', 'f2', 'f3', 'f4', 'f5', 'f6', 'f7'];
 
+// A leading, in-file legend so a consumer can interpret the positional columns without the
+// source. It is itself a record_type='_schema' row (parseable; filter it out if undesired).
+const SCHEMA_LEGEND =
+  'meta:f1=label,f2=value | posture:f1=metric,f2=value | ' +
+  'requirement:f1=location,f2=trade,f3=requirement,f4=required,f5=source | ' +
+  'event:f1=created_at,f2=actor_type,f3=actor_id,f4=event_type,f5=target_type,f6=target_id,f7=payload_json | ' +
+  'document:f1=vendor,f2=doc_type,f3=document_id,f4=uploaded_at,f5=state,f6=sensitive';
+
 export function renderAuditExportCsv(content: AuditExportContent): string {
   const rows: (string | number)[][] = [];
+  rows.push(['_schema', SCHEMA_LEGEND, '', '', '', '', '', '']);
   for (const m of content.metadata) rows.push(['meta', m.label, m.value, '', '', '', '', '']);
   for (const p of content.posture) rows.push(['posture', p.metric, p.value, '', '', '', '', '']);
   for (const r of content.requirements) rows.push(['requirement', r.location, r.trade, r.requirement, r.required, r.source, '', '']);

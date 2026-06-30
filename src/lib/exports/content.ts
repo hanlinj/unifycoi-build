@@ -14,12 +14,16 @@ import { scopeAuditEvents, type ExportScope } from './audit-export';
 
 const DAY = 86_400_000;
 
+export interface SensitiveDecryptFailures { tin: number; routing: number; account: number }
+
 export interface AuditExportContent {
   metadata: { label: string; value: string }[];
   posture: { metric: string; value: string }[];
   requirements: { location: string; trade: string; requirement: string; required: string; source: string }[];
   events: { created_at: string; actor_type: string; actor_id: string; event_type: string; target_type: string; target_id: string; payload_json: string }[];
   documents: { vendor: string; doc_type: string; document_id: string; uploaded_at: string; state: string; sensitive: string }[];
+  /** Count of Sensitive leaves that could not be decrypted during a Sensitive-included build. */
+  decryptFailures: SensitiveDecryptFailures;
 }
 
 interface ScopeSets { vendorIds: string[]; locationIds: string[] | null }
@@ -113,6 +117,7 @@ export function gatherAuditExportContent(
 
   // 5. Documents manifest (meta only by default; Sensitive values only when opted in)
   const documents: AuditExportContent['documents'] = [];
+  const decryptFailures: SensitiveDecryptFailures = { tin: 0, routing: 0, account: 0 };
   for (const vid of vendorIds) {
     const vname = (tdb.get<{ business_name: string }>('SELECT business_name FROM vendors WHERE tenant_id = ? AND id = ?', [vid])?.business_name) ?? vid;
     const docs = tdb.all<{ id: string; doc_type: string; uploaded_at: string; state: string; superseded_by: string | null }>(
@@ -121,7 +126,7 @@ export function gatherAuditExportContent(
     );
     for (const d of docs) {
       let sensitive = '';
-      if (includesSensitive) sensitive = decryptedSensitiveFor(db, tenantId, d.id, d.doc_type);
+      if (includesSensitive) sensitive = decryptedSensitiveFor(db, tenantId, d.id, d.doc_type, decryptFailures);
       documents.push({
         vendor: vname, doc_type: d.doc_type, document_id: d.id, uploaded_at: d.uploaded_at,
         state: d.superseded_by ? 'superseded' : d.state, sensitive,
@@ -129,24 +134,25 @@ export function gatherAuditExportContent(
     }
   }
 
-  return { metadata, posture, requirements, events, documents };
+  return { metadata, posture, requirements, events, documents, decryptFailures };
 }
 
-/** Decrypt the Sensitive leaves (TIN for W-9, routing/account for ACH) for the manifest. */
-function decryptedSensitiveFor(db: Database.Database, tenantId: string, documentId: string, docType: string): string {
+/** Decrypt the Sensitive leaves (TIN for W-9, routing/account for ACH) for the manifest.
+ *  Counts unreadable values per category into `fails` (the values themselves never leak). */
+function decryptedSensitiveFor(db: Database.Database, tenantId: string, documentId: string, docType: string, fails: SensitiveDecryptFailures): string {
   if (docType !== 'w9' && docType !== 'ach') return '';
   const tdb = new TenantDB(db, tenantId);
   const ex = tdb.get<{ payload_json: string }>('SELECT payload_json FROM extractions WHERE tenant_id = ? AND document_id = ? ORDER BY created_at DESC LIMIT 1', [documentId]);
   if (!ex) return '';
   try {
     const p = JSON.parse(ex.payload_json) as Record<string, { value?: string | null }>;
-    const dec = (v?: string | null) => (v ? safeDecrypt(v) : '');
-    if (docType === 'w9') return `TIN=${dec(p.tin_value?.value)}`;
-    return `routing=${dec(p.routing_number?.value)} account=${dec(p.account_number?.value)}`;
+    const dec = (v: string | null | undefined, cat: keyof SensitiveDecryptFailures): string => {
+      if (!v) return '';
+      try { return decryptField(v); } catch { fails[cat]++; return '(unreadable)'; }
+    };
+    if (docType === 'w9') return `TIN=${dec(p.tin_value?.value, 'tin')}`;
+    return `routing=${dec(p.routing_number?.value, 'routing')} account=${dec(p.account_number?.value, 'account')}`;
   } catch {
     return '';
   }
-}
-function safeDecrypt(cipher: string): string {
-  try { return decryptField(cipher); } catch { return '(unreadable)'; }
 }

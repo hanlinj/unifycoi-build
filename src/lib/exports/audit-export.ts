@@ -114,10 +114,21 @@ export async function generateExportArtifact(db: Database.Database, tenantId: st
   const generator = tdb.get<{ id: string; name: string; role: string }>('SELECT id, name, role FROM users WHERE tenant_id = ? AND id = ?', [row.requested_by]) ?? null;
   const tenantName = (db.prepare('SELECT name FROM tenants WHERE id = ?').get(tenantId) as { name: string } | undefined)?.name ?? 'UnifyCOI';
 
-  const bytes = await buildAuditExportBytes(db, tenantId, {
+  const { bytes, decryptFailures } = await buildAuditExportBytes(db, tenantId, {
     scope: row.scope_type, scopeRef: row.scope_ref, format: row.format,
     includesSensitive: row.includes_sensitive === 1, tenantName, generator,
   });
+
+  // If any Sensitive ciphertext was unreadable, record the degradation (counts only — no
+  // Sensitive content in the payload). The artifact still renders '(unreadable)' gracefully.
+  const totalFails = decryptFailures.tin + decryptFailures.routing + decryptFailures.account;
+  if (totalFails > 0) {
+    logAudit(db, {
+      tenantId, actorType: 'user', actorId: row.requested_by,
+      eventType: 'export.sensitive_decrypt_failed', targetType: 'audit_export', targetId: exportId,
+      payload: { unreadable: decryptFailures },
+    });
+  }
 
   const storageKey = `tenants/${tenantId}/exports/${exportId}.${row.format}`;
   await getBlobStore().put(storageKey, packEncrypted(bytes));
@@ -168,18 +179,14 @@ export async function buildAuditExportBytes(
     scope: ExportScope; scopeRef: string | null; format: ExportFormat;
     includesSensitive: boolean; tenantName: string; generator: { id: string; name: string; role: string } | null;
   }
-): Promise<Buffer> {
+): Promise<{ bytes: Buffer; decryptFailures: { tin: number; routing: number; account: number } }> {
   const { scope, scopeRef, format, includesSensitive, tenantName, generator } = input;
   const generatedAt = new Date().toISOString();
   const content = gatherAuditExportContent(db, tenantId, { scope, scopeRef, includesSensitive, generatedAt, generator });
 
-  if (format === 'csv') {
-    return Buffer.from(renderAuditExportCsv(content), 'utf-8');
-  }
-  const pdf = await renderAuditExportPdf(content, {
-    tenantName,
-    scopeLabel: `${scope}${scopeRef ? ` (${scopeRef})` : ''}`,
-    generatedAt,
-  });
-  return Buffer.from(pdf);
+  const bytes = format === 'csv'
+    ? Buffer.from(renderAuditExportCsv(content), 'utf-8')
+    : Buffer.from(await renderAuditExportPdf(content, { tenantName, scopeLabel: `${scope}${scopeRef ? ` (${scopeRef})` : ''}`, generatedAt }));
+
+  return { bytes, decryptFailures: content.decryptFailures };
 }

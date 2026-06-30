@@ -98,6 +98,32 @@ describe('audit export content — includes_sensitive inverse', () => {
   });
 });
 
+// ── decrypt-failure audit ───────────────────────────────────────────────────────────────
+
+describe('audit export content — Sensitive decrypt failure', () => {
+  test('unreadable ciphertext → graceful render + export.sensitive_decrypt_failed audit (counts only)', async () => {
+    const w = vendorWorld();
+    // Corrupt the W-9 TIN ciphertext so decryptField throws.
+    const w9row = w.db.prepare(`SELECT id FROM extractions WHERE tenant_id=? AND doc_type='w9'`).get(w.t.id) as { id: string };
+    const payload = JSON.parse((w.db.prepare('SELECT payload_json FROM extractions WHERE id=?').get(w9row.id) as { payload_json: string }).payload_json);
+    payload.tin_value.value = 'not-valid-ciphertext';
+    w.db.prepare('UPDATE extractions SET payload_json=? WHERE id=?').run(JSON.stringify(payload), w9row.id);
+
+    const { createAuditExport } = await import('@/lib/exports/audit-export');
+    const { exportId } = await createAuditExport({
+      db: w.db, tenantId: w.t.id, requestedBy: w.admin.id, scope: 'vendor', scopeRef: w.vendorId,
+      format: 'csv', includesSensitive: true, reason: 'Dispute requires banking confirmation.',
+    });
+
+    const tdb = new TenantDB(w.db, w.t.id);
+    const ev = tdb.get<{ payload_json: string }>(`SELECT payload_json FROM audit_events WHERE tenant_id=? AND event_type='export.sensitive_decrypt_failed' AND target_id=?`, [exportId]);
+    expect(ev).toBeDefined();
+    expect(JSON.parse(ev!.payload_json).unreadable.tin).toBeGreaterThanOrEqual(1);
+    // no Sensitive content in the degradation event
+    expect(ev!.payload_json).not.toMatch(SSN);
+  });
+});
+
 // ── tenant_offboard completeness ────────────────────────────────────────────────────────
 
 describe('audit export content — tenant_offboard from inception', () => {
