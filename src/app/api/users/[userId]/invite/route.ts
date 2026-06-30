@@ -1,7 +1,9 @@
 import { NextResponse } from 'next/server';
 import { getRawDb } from '@/lib/db/client';
 import { inviteUser } from '@/lib/services/users';
-import { requireTenantAuth, isResponse, ok, forbidden } from '@/lib/api';
+import { requireTenantAuth, isResponse, ok, forbidden, notFound } from '@/lib/api';
+import { resolveScope, userManageableByScope } from '@/lib/scope';
+import { logAudit } from '@/lib/audit';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -17,6 +19,23 @@ export async function POST(
   if (!auth.tenantId) return forbidden();
 
   const db = getRawDb();
+
+  // Within-tenant scope clamp (Slice C security pass) — same rule as PATCH.
+  if (auth.role !== 'admin') {
+    const scope = resolveScope(db, auth.tenantId, auth.sub, auth.role);
+    const check = userManageableByScope(db, auth.tenantId, scope, params.userId);
+    if (!check.inScope) {
+      if (check.exists) {
+        logAudit(db, {
+          tenantId: auth.tenantId, actorType: 'user', actorId: auth.sub,
+          eventType: 'security.scope_violation', targetType: 'user', targetId: params.userId,
+          payload: { role: auth.role, scope_region_ids: scope.regionIds, attempted: 'POST /api/users/:id/invite' },
+        });
+      }
+      return notFound('User not found');
+    }
+  }
+
   try {
     const user = inviteUser(db, auth.tenantId, params.userId, auth.sub);
     return ok(user);
