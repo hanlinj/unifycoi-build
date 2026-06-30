@@ -40,6 +40,14 @@ export async function GET(
 
   const record = buildLocationRecord(db, auth.tenantId, params.locationId, { status, trade });
   if (!record) return notFound('Location not found');
+
+  // Record the in-scope view (standard-access grain) — powers Search recent-viewed.
+  logAudit(db, {
+    tenantId: auth.tenantId, actorType: 'user', actorId: auth.sub,
+    eventType: 'location.viewed', targetType: 'location', targetId: params.locationId,
+    payload: { role: auth.role },
+  });
+
   return ok({ ...record, role: auth.role });
 }
 

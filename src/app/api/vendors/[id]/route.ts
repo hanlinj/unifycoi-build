@@ -128,6 +128,13 @@ export async function GET(
     return notFound('Vendor not found');
   }
 
+  // Record the in-scope view (standard-access grain) — powers Search recent-viewed. No Sensitive.
+  logAudit(db, {
+    tenantId, actorType: 'user', actorId: auth.sub,
+    eventType: 'vendor.viewed', targetType: 'vendor', targetId: vendorId,
+    payload: { role: auth.role },
+  });
+
   // Documents (metadata only — no storage_key, no encryption_json)
   const documents = tdb.all<DocumentRow>(
     `SELECT id, doc_type, original_filename, uploaded_at
