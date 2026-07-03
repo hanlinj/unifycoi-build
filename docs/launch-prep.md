@@ -141,6 +141,7 @@ Self-serve SaaS signup; horizontal/multi-instance scale; real email at volume; t
 - **Trigger:** before first customer / public exposure.
 - **Effort:** small.
 - **Approach:** double-submit CSRF token or server-side `Origin`/`Sec-Fetch-Site` verification on mutations.
+- **RESOLVED — Phase 11 Slice 4 (`4a22144`).** Edge middleware enforces `Sec-Fetch-Site`→`Origin` on cookie-authed mutations; exemptions are structural (Bearer / cookie-less). **Conditional follow-up (not built):** the check rejects only `cross-site`, not `same-site` — tighten to reject `same-site` too **if untrusted subdomains are ever introduced** on the registrable domain (single-origin app today, so not needed).
 
 ### SEC-13 — No key rotation; keys in env *(discovered during audit)*
 - **What:** `MASTER_KEK` and `FIELD_ENCRYPTION_KEY` are single static env values with no versioning/rotation.
@@ -148,6 +149,7 @@ Self-serve SaaS signup; horizontal/multi-instance scale; real email at volume; t
 - **Trigger:** before 50 / security review.
 - **Effort:** medium.
 - **Approach:** key-version tags on encrypted blobs/fields + a rotation procedure; move keys to a secret manager (see OPS-13).
+- **PARTIAL — Phase 11 Slice 5 (`c795c80`).** The versioning HOOK landed (documents.key_version + version-aware decrypt, defaults→v1; keys moved to Doppler per OPS-13). Actual key **rotation** (multiple live key versions + a re-wrap procedure) is still deferred.
 
 ### SEC-14 — No Admin Sensitive-reveal path in UI *(documented, by design — not a gap)*
 - **What:** Full TIN/ACH are never shown in any UI; retrieval requires an audit export with `includes_sensitive=true` + reason.
