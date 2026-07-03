@@ -7,6 +7,8 @@
 // vendor knows the operator, not us. Internal email may carry UnifyCOI branding. The
 // From identity is passed per-send (see resolveFrom).
 
+import { env } from '@/lib/env';
+
 export interface EmailMessage {
   to: string;
   fromName: string;   // display name in the From header — operator name for vendor mail
@@ -20,6 +22,13 @@ export interface EmailMessage {
 export interface SendResult {
   ok: boolean;
   error?: string;
+  /**
+   * The ESP's own message id, when the transport returns one. Persisted on the
+   * notification row (provider_message_id) so the cookie-less delivery webhook can
+   * correlate a bounce/complaint back to a single tenant-scoped row. The NoOp mailer
+   * leaves this undefined. Additive/optional — does not change the send() contract.
+   */
+  providerId?: string;
 }
 
 export interface Mailer {
@@ -35,15 +44,16 @@ export interface Mailer {
  */
 export function resolveFrom(
   audience: 'vendor' | 'internal',
-  operatorName: string | null
+  operatorName: string | null,
+  fromEmail: string = env.email.fromEmail
 ): { fromName: string; fromEmail: string } {
   if (audience === 'vendor') {
     return {
       fromName: operatorName?.trim() || 'Your Operator',
-      fromEmail: 'noreply@unifycoi-mail.com',
+      fromEmail,
     };
   }
-  return { fromName: 'UnifyCOI', fromEmail: 'noreply@unifycoi-mail.com' };
+  return { fromName: 'UnifyCOI', fromEmail };
 }
 
 /**
@@ -75,5 +85,85 @@ export class NoOpMailer implements Mailer {
   }
 }
 
-/** Default process Mailer (v1: the no-op). Swap to a real ESP-backed impl later. */
-export const defaultMailer: Mailer = new NoOpMailer();
+// ── Resend transport ────────────────────────────────────────────────────────────
+//
+// The real ESP-backed Mailer (SEC-1). A thin fetch against Resend's REST API — no SDK
+// dependency, so the Idempotency-Key header and error surface stay under our control and
+// the whole thing mocks cleanly in tests via an injected fetch.
+//
+// Idempotency (SEC-2): the worker passes the notification row id as `notificationId`, and
+// we hand it to Resend as the `Idempotency-Key`. Resend collapses a repeated send within
+// its ~24h key-retention window — closing the crash-after-send/before-commit double-send
+// window. The DURABLE guard beyond 24h is the worker itself: it only ever polls
+// status='queued' rows and flips to 'sent' on success, so a sent row is never re-picked.
+
+/** Format an RFC5322 From value, always quoting the display name (handles commas etc.). */
+function formatFrom(name: string, email: string): string {
+  const quoted = name.replace(/(["\\])/g, '\\$1');
+  return `"${quoted}" <${email}>`;
+}
+
+export interface ResendMailerOptions {
+  apiKey: string;
+  /** Override for tests / self-hosted proxies. Defaults to Resend's public endpoint. */
+  endpoint?: string;
+  /** Injected for tests; defaults to the global fetch. */
+  fetchImpl?: typeof fetch;
+}
+
+export class ResendMailer implements Mailer {
+  private readonly apiKey: string;
+  private readonly endpoint: string;
+  private readonly fetchImpl: typeof fetch;
+
+  constructor(opts: ResendMailerOptions) {
+    this.apiKey = opts.apiKey;
+    this.endpoint = opts.endpoint ?? 'https://api.resend.com/emails';
+    this.fetchImpl = opts.fetchImpl ?? fetch;
+  }
+
+  async send(msg: EmailMessage): Promise<SendResult> {
+    const headers: Record<string, string> = {
+      Authorization: `Bearer ${this.apiKey}`,
+      'Content-Type': 'application/json',
+    };
+    // The notification row id doubles as the ESP idempotency key (SEC-2).
+    if (msg.notificationId) headers['Idempotency-Key'] = msg.notificationId;
+
+    try {
+      const res = await this.fetchImpl(this.endpoint, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          from: formatFrom(msg.fromName, msg.fromEmail),
+          to: msg.to,
+          subject: msg.subject,
+          text: msg.body,
+        }),
+      });
+
+      if (!res.ok) {
+        let detail = '';
+        try {
+          detail = await res.text();
+        } catch {
+          /* body already consumed / unavailable */
+        }
+        return { ok: false, error: `resend ${res.status}: ${detail}`.trim() };
+      }
+
+      const data = (await res.json()) as { id?: string };
+      return { ok: true, providerId: data.id };
+    } catch (err) {
+      return { ok: false, error: (err as Error).message };
+    }
+  }
+}
+
+/**
+ * Default process Mailer. Resend when RESEND_API_KEY is configured (prod / staging);
+ * otherwise the logged NoOp (dev / test / CI). The transport is chosen once at import.
+ */
+export const defaultMailer: Mailer = env.email.resendApiKey
+  ? new ResendMailer({ apiKey: env.email.resendApiKey })
+  : new NoOpMailer();

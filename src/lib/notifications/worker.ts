@@ -116,9 +116,11 @@ export async function processDueNotifications(
     });
 
     if (result.ok) {
+      // Persist the ESP message id (when the transport returns one) so the delivery
+      // webhook can correlate a bounce/complaint back to this row. NoOp mailer → null.
       db.prepare(
-        `UPDATE notifications SET status = 'sent', sent_at = ?, claimed_at = NULL WHERE id = ?`
-      ).run(new Date().toISOString(), row.id);
+        `UPDATE notifications SET status = 'sent', sent_at = ?, claimed_at = NULL, provider_message_id = ? WHERE id = ?`
+      ).run(new Date().toISOString(), result.providerId ?? null, row.id);
       // Comms are logged to the audit trail (Audit_Trail.md): fact + reference, no Sensitive.
       logAudit(db, {
         tenantId: row.tenant_id,

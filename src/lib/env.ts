@@ -32,6 +32,17 @@ export const env = {
     confBandHigh: parseFloat(process.env['CONF_BAND_HIGH'] ?? '0.90'),
     confBandMed: parseFloat(process.env['CONF_BAND_MED'] ?? '0.75'),
   },
+  email: {
+    // ESP (Resend). All optional: when RESEND_API_KEY is empty the process falls back to
+    // the logged NoOp mailer (dev/test/CI), so nothing here is `required()`.
+    resendApiKey: process.env['RESEND_API_KEY'] ?? '',
+    // Shared verified sending domain (FEAT-13: per-operator DKIM domains deferred). The
+    // operator name rides in the From display name; this is the envelope address.
+    fromEmail: process.env['MAIL_FROM_EMAIL'] ?? 'noreply@unifycoi-mail.com',
+    // Svix-style signing secret for the Resend delivery webhook (whsec_…). Empty → the
+    // webhook fails closed (rejects every event) since it cannot verify authenticity.
+    webhookSecret: process.env['RESEND_WEBHOOK_SECRET'] ?? '',
+  },
   notifications: {
     // Hour (0–23) in the tenant's local timezone at which the daily digest is sent.
     digestHourLocal: parseInt(process.env['DIGEST_HOUR_LOCAL'] ?? '8', 10),
