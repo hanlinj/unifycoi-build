@@ -10,3 +10,5 @@ export { Alert, type AlertProps, type AlertTone } from './Alert';
 export { Modal, type ModalProps } from './Modal';
 export { Tabs, type TabItem, type TabsProps } from './Tabs';
 export { ActionRow, type ActionRowProps, type ActionTone } from './ActionRow';
+export { Menu, MenuItem, type MenuProps, type MenuItemProps } from './Menu';
+export { Pagination, type PaginationProps } from './Pagination';

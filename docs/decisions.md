@@ -17,6 +17,13 @@ reasonable engineer might later ask "why did they do it *that* way?"
 - **Why (substrate):** the direction maps idiomatically onto Tailwind; shadcn/Radix is heavier than needed, a hand-rolled tokens-module reinvents Tailwind. Tokens as CSS vars keep the user's design-system file the editable source of truth. **Preflight OFF** because the DS is additive — Tailwind's global reset would restyle the un-retrofitted inline tenant pages (they migrate in Slice 9, FENCE: migration-only); primitives get box-sizing via a minimal `globals.css` base rule; the ambient lime/blue canvas is scoped to `.ds-canvas`, not the global body.
 - **Testing:** jest runs two projects — `node` (existing 762 `*.test.ts`, untouched) and `jsdom` (RTL `*.test.tsx`). Disjoint globs.
 
+### ADR-012-02 · Platform shell is a separate nested layout; planned nav items shown disabled
+- **Decision:** `/platform` gets its own route-group `layout.tsx` + `PlatformShell` (sidebar + header) — NOT the tenant `AppShell` (invariant #12). The layout gates every `/platform/*` surface to platform users (tenant→`/`, unauth→`/login`). The platform sidebar shows the full intended set (Tenants · Provisioning · Billing · Health · Settings) but **only Tenants is a link**; the rest render **disabled with a "Soon" chip** and enable as their slices land.
+- **Context:** Slice 2. Tenant chrome already can't reach `/platform` (`shouldShowChrome('/platform')===false`); the new layout adds platform chrome inside that gap.
+- **Why disabled-not-hidden:** the tenant nav strictly hides unbuilt destinations ("no dead doors"), but the platform console is founder-facing and benefits from seeing the roadmap — a *disabled* item is not a dead door (it never navigates). Proven non-vacuously that the tenant sidebar does NOT leak onto `/platform` (RTL, with a positive control showing it DOES render on a tenant route).
+- **Fleet data:** the roster reads `listTenants` directly in a server component (same source the GET exposes; no self-fetch). It shows only what the API returns — name, lifecycle, **monthly rate**, created. Per-tenant **location count + computed monthly value** (rate × billable locations) need a `listTenants` extension → deferred to the billing/detail slices, NOT invented.
+- **Row menu → minimal detail stub:** the fleet row kebab ("View details") links to a read-only `/platform/tenants/[id]` over the existing `getTenantById`. A deliberate stub so the fleet is navigable + the menu is a real door; **Slice 6 (tenant cockpit)** expands it with locations/users/template/billing/controls.
+
 ## Phase 11 — Launch-prep (infrastructural)
 
 ### ADR-011-11 · COI expiry boundary = START of the expiry day, tenant-local (not end-of-day)
