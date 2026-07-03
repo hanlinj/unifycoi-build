@@ -2,9 +2,49 @@
 @tailwind components;
 @tailwind utilities;
 
-/* preflight is disabled (see tailwind.config.ts) so the design system is additive. Give
-   design-system components correct box-sizing without resetting the whole (un-retrofitted)
-   app's typography/buttons. Design-system surfaces set their own fg/bg via tokens. */
+/* Design-system tokens — verbatim from refdoc/unifycoi-design-system.html (the authoritative
+   spec). This :root is the single source of truth; tailwind.config.ts maps utilities to these
+   vars. "Lime + graphite ops theme." */
+:root {
+  /* surfaces */
+  --canvas: #EDECEF;
+  --surface: #FFFFFF;
+  --surface-2: #F5F5F7;
+  --border: #E8E8EC;
+  --border-strong: #DEDEE4;
+
+  /* text */
+  --fg: #191A1E;
+  --fg-muted: #8B8C93;
+
+  /* brand + semantic */
+  --accent: #CFF04A;        /* lime — the brand highlight */
+  --accent-ink: #181A0C;    /* text on lime */
+  --accent-soft: #F1FADA;
+  --action: #191A1E;        /* primary action (dark) */
+  --info: #6E8BE8;          /* cornflower blue */
+  --info-ink: #3B57BE;
+  --info-soft: #EAEFFC;
+  --success: #2FA26A;
+  --success-soft: #E4F5EC;
+  --attention: #D79A2A;
+  --attention-soft: #FBF2DA;
+  --danger: #E0574C;
+  --danger-soft: #FCE7E4;
+
+  /* radii + elevation */
+  --radius-panel: 24px;
+  --radius-card: 18px;
+  --radius-ctl: 12px;
+  --radius-pill: 999px;
+  --shadow-panel: 0 1px 2px rgba(17, 18, 22, 0.04), 0 14px 34px -18px rgba(17, 18, 22, 0.16);
+  --shadow-raise: 0 1px 2px rgba(17, 18, 22, 0.05), 0 8px 22px -10px rgba(17, 18, 22, 0.2);
+  --ring: 0 0 0 4px rgba(111, 139, 232, 0.28);
+}
+
+/* preflight is OFF (tailwind.config.ts) so the design system is additive — the un-retrofitted
+   inline-styled tenant app is untouched until Slice 9. Give DS components box-sizing + a
+   keyboard focus ring without a global reset. */
 @layer base {
   *,
   ::before,
@@ -14,4 +54,23 @@
   :root {
     color-scheme: light;
   }
+  :focus-visible {
+    outline: none;
+    box-shadow: var(--ring);
+    border-radius: 8px;
+  }
+  @media (prefers-reduced-motion: reduce) {
+    * {
+      transition: none !important;
+    }
+  }
+}
+
+/* The ambient ops canvas (lime + blue radial washes). Applied to platform-shell / DS surfaces
+   via .ds-canvas — NOT the global body, so the tenant app's own backgrounds are unaffected. */
+.ds-canvas {
+  background:
+    radial-gradient(1100px 520px at 88% -8%, rgba(207, 240, 74, 0.16), transparent 60%),
+    radial-gradient(900px 500px at -6% 8%, rgba(110, 139, 232, 0.1), transparent 55%),
+    var(--canvas);
 }

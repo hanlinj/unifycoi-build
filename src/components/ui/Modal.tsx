@@ -1,6 +1,7 @@
 'use client';
 
 import React from 'react';
+import { X } from 'lucide-react';
 import { cn } from './cn';
 
 export interface ModalProps {
@@ -25,7 +26,7 @@ export function Modal({ open, onClose, title, children, footer, className }: Mod
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
+      className="fixed inset-0 z-50 flex items-center justify-center bg-[rgba(17,18,22,0.4)] p-4"
       onClick={onClose}
       data-testid="modal-overlay"
     >
@@ -33,24 +34,24 @@ export function Modal({ open, onClose, title, children, footer, className }: Mod
         role="dialog"
         aria-modal="true"
         aria-label={title}
-        className={cn('w-full max-w-lg rounded-card border border-border bg-canvas shadow-overlay', className)}
+        className={cn('w-full max-w-[420px] overflow-hidden rounded-[20px] border border-border bg-surface shadow-[0_24px_60px_-20px_rgba(17,18,22,0.4)]', className)}
         onClick={(e) => e.stopPropagation()}
       >
         {title && (
-          <div className="flex items-center justify-between border-b border-border px-4 py-3">
-            <h2 className="text-sm font-semibold text-fg">{title}</h2>
+          <div className="flex items-center justify-between px-[22px] pt-5">
+            <h2 className="text-base font-bold text-fg">{title}</h2>
             <button
               type="button"
               aria-label="Close"
               onClick={onClose}
-              className="rounded p-1 text-fg-muted hover:bg-surface"
+              className="grid h-[30px] w-[30px] place-items-center rounded-[9px] bg-surface-2 text-fg-muted hover:text-fg"
             >
-              ✕
+              <X size={15} strokeWidth={2.5} />
             </button>
           </div>
         )}
-        <div className="p-4">{children}</div>
-        {footer && <div className="flex justify-end gap-2 border-t border-border px-4 py-3">{footer}</div>}
+        <div className="px-[22px] py-[18px] text-sm text-[#5B5C63]">{children}</div>
+        {footer && <div className="flex justify-end gap-2.5 px-[22px] pb-[22px]">{footer}</div>}
       </div>
     </div>
   );

@@ -2,28 +2,40 @@ import React from 'react';
 import { cn } from './cn';
 
 const CONTROL = cn(
-  'w-full rounded-md border border-border bg-canvas text-fg placeholder:text-fg-subtle',
-  'px-3 h-8 text-sm transition-colors',
-  'focus:outline-none focus:border-accent focus:ring-1 focus:ring-accent',
-  'disabled:opacity-50 disabled:bg-surface'
+  'w-full rounded-ctl border border-border-strong bg-surface text-fg text-sm',
+  'px-[14px] py-[11px] placeholder:text-[#B7B8BE] transition-[border-color,box-shadow] duration-100',
+  'focus:outline-none focus:border-info focus:shadow-ring',
+  'disabled:opacity-60 disabled:bg-surface-2'
 );
 
+// Native-arrow-suppressed select with the design system's chevron (cornflower-muted).
+const SELECT_CHEVRON =
+  "bg-[url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 24 24' fill='none' stroke='%238B8C93' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'/%3E%3C/svg%3E\")] bg-no-repeat bg-[right_14px_center] appearance-none pr-10";
+
 export const Input = React.forwardRef<HTMLInputElement, React.InputHTMLAttributes<HTMLInputElement>>(
-  function Input({ className, type = 'text', ...rest }, ref) {
-    return <input ref={ref} type={type} className={cn(CONTROL, className)} {...rest} />;
+  function Input({ className, type = 'text', 'aria-invalid': ai, ...rest }, ref) {
+    return (
+      <input
+        ref={ref}
+        type={type}
+        aria-invalid={ai}
+        className={cn(CONTROL, ai && 'border-danger focus:border-danger shadow-[0_0_0_4px_rgba(224,87,76,0.16)]', className)}
+        {...rest}
+      />
+    );
   }
 );
 
 export const Textarea = React.forwardRef<HTMLTextAreaElement, React.TextareaHTMLAttributes<HTMLTextAreaElement>>(
   function Textarea({ className, rows = 3, ...rest }, ref) {
-    return <textarea ref={ref} rows={rows} className={cn(CONTROL, 'h-auto py-2', className)} {...rest} />;
+    return <textarea ref={ref} rows={rows} className={cn(CONTROL, className)} {...rest} />;
   }
 );
 
 export const Select = React.forwardRef<HTMLSelectElement, React.SelectHTMLAttributes<HTMLSelectElement>>(
   function Select({ className, children, ...rest }, ref) {
     return (
-      <select ref={ref} className={cn(CONTROL, 'pr-8', className)} {...rest}>
+      <select ref={ref} className={cn(CONTROL, SELECT_CHEVRON, className)} {...rest}>
         {children}
       </select>
     );
@@ -40,19 +52,19 @@ export interface FormFieldProps {
   className?: string;
 }
 
-/** Label + control + help/error. Error takes precedence over help and is announced to AT. */
+/** Label + control + help/error. Error takes precedence over help and is announced (role=alert). */
 export function FormField({ label, htmlFor, required, error, help, children, className }: FormFieldProps) {
   return (
-    <div className={cn('flex flex-col gap-1', className)}>
-      <label htmlFor={htmlFor} className="text-sm font-medium text-fg">
+    <div className={cn('flex flex-col', className)}>
+      <label htmlFor={htmlFor} className="mb-[7px] block text-[13px] font-semibold text-fg">
         {label}
-        {required && <span className="text-danger-fg"> *</span>}
+        {required && <span className="ml-0.5 text-danger">*</span>}
       </label>
       {children}
       {error ? (
-        <p role="alert" className="text-xs text-danger-fg">{error}</p>
+        <p role="alert" className="mt-[7px] text-xs font-medium text-danger">{error}</p>
       ) : help ? (
-        <p className="text-xs text-fg-muted">{help}</p>
+        <p className="mt-[7px] text-xs text-fg-muted">{help}</p>
       ) : null}
     </div>
   );

@@ -1,13 +1,14 @@
 import type { Config } from 'tailwindcss';
 
-// Design tokens (Phase 12 Slice 1). One source of truth for the palette that was previously
-// hand-repeated as inline hex across every surface. Direction: clean, light, trustworthy B2B
-// ops dashboard (refs: the self-storage ops screenshots + Cubby), Primer-family palette —
-// an evolution of what the app already used, not a rip-out.
+// Design tokens (Phase 12 Slice 1). The AUTHORITATIVE spec is
+// refdoc/unifycoi-design-system.html; its :root lives in globals.css and is the single source
+// of truth. These utilities map to those CSS vars so the design-system file stays editable in
+// one place. "Lime + graphite ops theme" — Plus Jakarta Sans, warm canvas, large radii,
+// soft layered shadows, lime brand highlight + graphite primary action.
 //
-// preflight is OFF: the design system is ADDITIVE this phase. Turning on Tailwind's global
-// reset would restyle the un-retrofitted inline-styled tenant pages; they migrate in Slice 9.
-// Primitives get correct box-sizing via a minimal base rule in globals.css instead.
+// preflight is OFF: the design system is ADDITIVE this phase — Tailwind's global reset would
+// restyle the un-retrofitted inline-styled tenant pages (they migrate in Slice 9). Primitives
+// get box-sizing via a minimal base rule in globals.css instead.
 
 const config: Config = {
   content: ['./src/**/*.{ts,tsx}'],
@@ -15,26 +16,30 @@ const config: Config = {
   theme: {
     extend: {
       colors: {
-        canvas: '#ffffff',
-        surface: '#f6f8fa',
-        'surface-hover': '#eef1f4',
-        border: '#d0d7de',
-        'border-muted': '#eaeef2',
-        fg: '#1f2328',
-        'fg-muted': '#57606a',
-        'fg-subtle': '#6e7781',
-        accent: { DEFAULT: '#0969da', emphasis: '#0550ae', subtle: '#ddf4ff', fg: '#0969da' },
-        success: { DEFAULT: '#1f883d', emphasis: '#1a7f37', subtle: '#dafbe1', fg: '#1a7f37' },
-        attention: { DEFAULT: '#bf8700', emphasis: '#9a6700', subtle: '#fff8c5', fg: '#9a6700' },
-        danger: { DEFAULT: '#cf222e', emphasis: '#a40e26', subtle: '#ffebe9', fg: '#cf222e' },
+        canvas: 'var(--canvas)',
+        surface: { DEFAULT: 'var(--surface)', 2: 'var(--surface-2)' },
+        border: { DEFAULT: 'var(--border)', strong: 'var(--border-strong)' },
+        fg: { DEFAULT: 'var(--fg)', muted: 'var(--fg-muted)' },
+        accent: { DEFAULT: 'var(--accent)', ink: 'var(--accent-ink)', soft: 'var(--accent-soft)' },
+        action: 'var(--action)',
+        info: { DEFAULT: 'var(--info)', ink: 'var(--info-ink)', soft: 'var(--info-soft)' },
+        success: { DEFAULT: 'var(--success)', soft: 'var(--success-soft)' },
+        attention: { DEFAULT: 'var(--attention)', soft: 'var(--attention-soft)' },
+        danger: { DEFAULT: 'var(--danger)', soft: 'var(--danger-soft)' },
       },
       fontFamily: {
-        sans: ['ui-sans-serif', 'system-ui', '-apple-system', 'Segoe UI', 'Roboto', 'Helvetica', 'Arial', 'sans-serif'],
+        sans: ['var(--font-jakarta)', 'ui-sans-serif', 'system-ui', '-apple-system', 'Segoe UI', 'sans-serif'],
       },
-      borderRadius: { card: '0.5rem' },
+      borderRadius: {
+        panel: 'var(--radius-panel)',
+        card: 'var(--radius-card)',
+        ctl: 'var(--radius-ctl)',
+        pill: 'var(--radius-pill)',
+      },
       boxShadow: {
-        card: '0 1px 0 rgba(27,31,36,0.04)',
-        overlay: '0 8px 24px rgba(27,31,36,0.20)',
+        panel: 'var(--shadow-panel)',
+        raise: 'var(--shadow-raise)',
+        ring: 'var(--ring)',
       },
     },
   },

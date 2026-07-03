@@ -1,11 +1,21 @@
 import React from 'react';
+import { ChevronRight } from 'lucide-react';
 import { cn } from './cn';
+
+export type ActionTone = 'danger' | 'attention' | 'info' | 'neutral';
+
+const ICON_TILE: Record<ActionTone, string> = {
+  danger: 'bg-danger-soft text-danger',
+  attention: 'bg-attention-soft text-attention',
+  info: 'bg-info-soft text-info-ink',
+  neutral: 'bg-surface-2 text-fg-muted',
+};
 
 export interface ActionRowProps {
   icon?: React.ReactNode;
-  /** Bold lead text (e.g. a count or subject). */
+  /** tone of the icon tile (severity). */
+  tone?: ActionTone;
   title: React.ReactNode;
-  /** Muted trailing description. */
   description?: React.ReactNode;
   trailing?: React.ReactNode;
   onClick?: () => void;
@@ -13,20 +23,20 @@ export interface ActionRowProps {
   className?: string;
 }
 
-/** "Action areas" list row (icon · bold title · muted description · chevron). Maps onto the
- *  exception-first Command Center: each risk item that needs attention is one row. */
-export function ActionRow({ icon, title, description, trailing, onClick, href, className }: ActionRowProps) {
+/** "Action areas" row (tone icon tile · bold title · muted description · chevron). Maps onto
+ *  the exception-first Command Center: each risk item needing attention is one row. */
+export function ActionRow({ icon, tone = 'neutral', title, description, trailing, onClick, href, className }: ActionRowProps) {
   const inner = (
     <>
-      {icon && <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-surface text-fg-muted">{icon}</span>}
-      <span className="min-w-0 flex-1">
-        <span className="font-semibold text-fg">{title}</span>
+      {icon && <span className={cn('grid h-[38px] w-[38px] flex-none place-items-center rounded-[11px]', ICON_TILE[tone])}>{icon}</span>}
+      <span className="min-w-0 flex-1 text-sm">
+        <b className="font-bold text-fg">{title}</b>
         {description != null && <span className="text-fg-muted"> {description}</span>}
       </span>
-      {trailing ?? <span aria-hidden className="text-fg-subtle">›</span>}
+      {trailing ?? <ChevronRight size={18} strokeWidth={2.5} className="flex-none text-[#C3C4CA]" />}
     </>
   );
-  const base = cn('flex w-full items-center gap-3 px-4 py-3 text-left text-sm hover:bg-surface transition-colors', className);
+  const base = cn('flex w-full items-center gap-3.5 rounded-xl px-1 py-3.5 text-left transition-colors hover:bg-surface-2', className);
   if (href) return <a href={href} className={base}>{inner}</a>;
   return <button type="button" onClick={onClick} className={base}>{inner}</button>;
 }
