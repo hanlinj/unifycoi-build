@@ -17,6 +17,7 @@ import type Database from 'better-sqlite3';
 import { TenantDB } from '@/lib/db/tenant';
 import { queueNotification, notifyTenantAdmins } from './queue';
 import { logAudit } from '@/lib/audit';
+import { expiryBoundaryMs } from '@/lib/time/zone';
 import type { ProcessedCOIExtraction } from '@/lib/extraction/types';
 
 export const LADDER_DAYS = [60, 30, 14, 7, 1] as const;
@@ -79,7 +80,10 @@ export function scheduleRenewalReminders(
     return { scheduled: 0, skippedPast: 0, alreadyScheduled: true, reminderDates: [], expirationJobScheduled: false, adminAlerts: 0 };
   }
 
-  const expMs = Date.parse(expirationDate);
+  // OPS-7: resolve the expiry boundary in the TENANT's timezone (start-of-day local for a
+  // date-only expiry), not UTC. Null tz → UTC (no-op vs the old Date.parse behavior).
+  const tz = (db.prepare('SELECT timezone FROM tenants WHERE id = ?').get(tenantId) as { timezone: string | null } | undefined)?.timezone ?? null;
+  const expMs = expiryBoundaryMs(expirationDate, tz);
   if (Number.isNaN(expMs)) {
     return { scheduled: 0, skippedPast: 0, alreadyScheduled: false, reminderDates: [], expirationJobScheduled: false, adminAlerts: 0 };
   }

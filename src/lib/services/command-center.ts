@@ -12,6 +12,7 @@
 import type Database from 'better-sqlite3';
 import { TenantDB } from '@/lib/db/tenant';
 import { chaseExpiryByVendor } from '@/lib/notifications/chase';
+import { expiryBoundaryMs } from '@/lib/time/zone';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const IMMINENT_DAYS = 7;        // ≤7d to expiry → Tier 1 imminent lapse
@@ -139,6 +140,9 @@ export function buildCommandCenter(
 
   // 4. Chase expiry per vendor.
   const expiryMap = chaseExpiryByVendor(db, tenantId);
+  // OPS-7: days-to-expiry buckets resolve the expiry boundary in the tenant's timezone, so
+  // they agree with the day-0 flip (which uses the same expiryBoundaryMs). Null tz → UTC.
+  const tz = (db.prepare('SELECT timezone FROM tenants WHERE id = ?').get(tenantId) as { timezone: string | null } | undefined)?.timezone ?? null;
 
   // 5. Invites per vendor (correction aging + delivery failures).
   const invites = tdb.all<{ vendor_id: string | null; purpose: string; delivery_state: string; created_at: string }>(
@@ -164,7 +168,7 @@ export function buildCommandCenter(
     const run = latestRun.get(agg.vendorId);
     const def = defByVendor.get(agg.vendorId);
     const expiresAt = expiryMap.get(agg.vendorId) ?? null;
-    const daysToExpiry = expiresAt ? Math.floor((Date.parse(expiresAt) - now) / DAY_MS) : null;
+    const daysToExpiry = expiresAt ? Math.floor((expiryBoundaryMs(expiresAt, tz) - now) / DAY_MS) : null;
     const inv = inviteAgg.get(agg.vendorId);
     const base = { vendorId: agg.vendorId, vendorName: agg.name, trade: agg.trade, locationsAffected: agg.inScopeLocations };
     const since = run?.created_at ?? null;

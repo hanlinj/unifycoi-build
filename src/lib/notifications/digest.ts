@@ -12,6 +12,10 @@ import type { Mailer } from './mailer';
 import { resolveFrom } from './mailer';
 import { getOperatorName } from './queue';
 import { env } from '@/lib/env';
+import { localHourInZone } from '@/lib/time/zone';
+// Re-exported so existing importers (`@/lib/notifications/digest`) keep working after the
+// tz helpers were consolidated into @/lib/time/zone (one timezone treatment).
+export { localHourInZone } from '@/lib/time/zone';
 
 interface DigestRow {
   id: string;
@@ -141,17 +145,7 @@ function digestLine(payloadJson: string): string {
 }
 
 // ── Timezone-aware daily cycle ────────────────────────────────────────────────────
-
-/** The local hour (0–23) at `now` in the given IANA timezone. */
-export function localHourInZone(now: Date, timeZone: string): number {
-  const formatted = new Intl.DateTimeFormat('en-US', {
-    timeZone,
-    hour: 'numeric',
-    hour12: false,
-  }).format(now);
-  // 'en-US' h23-ish formatting can yield '24' at midnight — normalize to 0–23.
-  return parseInt(formatted, 10) % 24;
-}
+// localHourInZone now lives in @/lib/time/zone (imported + re-exported above).
 
 export interface DigestCycleResult {
   tenantsConsidered: number;

@@ -4,6 +4,7 @@
 
 import type Database from 'better-sqlite3';
 import { TenantDB } from '@/lib/db/tenant';
+import { expiryBoundaryMs } from '@/lib/time/zone';
 import {
   reportMeta, type ReportKey, type ReportScope, type ReportFilters, type ReportResult,
   effectiveLocationIds, vendorIdsInScope, inClause,
@@ -73,6 +74,9 @@ function compliancePosture(db: Database.Database, tenantId: string, vendorIds: s
 
 function renewalForecast(db: Database.Database, tenantId: string, vendorIds: string[], effLoc: string[] | null, nowMs: number) {
   const tdb = new TenantDB(db, tenantId);
+  // OPS-7: days-out resolves the expiry boundary in the tenant's timezone (matches the flip
+  // + Command Center buckets). Null tz → UTC.
+  const tz = (db.prepare('SELECT timezone FROM tenants WHERE id = ?').get(tenantId) as { timezone: string | null } | undefined)?.timezone ?? null;
   if (vendorIds.length === 0) return { rows: [], buckets: { d30: 0, d60: 0, d90: 0, beyond: 0 } };
 
   // Queued chase rows for in-scope vendors → earliest expiration + nearest pending rung.
@@ -92,7 +96,7 @@ function renewalForecast(db: Database.Database, tenantId: string, vendorIds: str
   const rows = chase
     .filter((c) => c.exp)
     .map((c) => {
-      const daysOut = Math.floor((Date.parse(c.exp!) - nowMs) / DAY);
+      const daysOut = Math.floor((expiryBoundaryMs(c.exp!, tz) - nowMs) / DAY);
       const bucket = daysOut <= 30 ? 'd30' : daysOut <= 60 ? 'd60' : daysOut <= 90 ? 'd90' : 'beyond';
       buckets[bucket as keyof typeof buckets]++;
       const v = tdb.get<{ business_name: string; trade: string }>('SELECT business_name, trade FROM vendors WHERE tenant_id = ? AND id = ?', [c.vendor_id])!;

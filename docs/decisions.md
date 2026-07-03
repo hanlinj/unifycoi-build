@@ -11,6 +11,12 @@ reasonable engineer might later ask "why did they do it *that* way?"
 
 ## Phase 11 — Launch-prep (infrastructural)
 
+### ADR-011-11 · COI expiry boundary = START of the expiry day, tenant-local (not end-of-day)
+- **Decision:** OPS-7 math half. `expiryBoundaryMs(expiry, tz)` resolves a date-only expiry to **00:00 in the tenant's timezone** (start of the expiry day); a full-ISO expiry is honored as-is. Used by the renewal ladder + day-0 flip, Command Center `daysToExpiry`, and reports `daysOut` — one treatment, in `src/lib/time/zone.ts` (same `Intl` primitive as the digest cadence's `localHourInZone`).
+- **Context:** Slice 6. The kickoff's framing leaned "valid THROUGH the expiry date → flip at END of that local day." Investigation surfaced two problems with end-of-day.
+- **Why start-of-day, not end-of-day:** (1) The **spec wins** (CLAUDE.md) and `Renewal_and_Expiration_Chase` says "Expired **the moment the date passes** … safest compliance posture" and "**past its expiration date**" — i.e. expire *earlier*, don't grant an extra local day of hireability against possibly-lapsed coverage. (2) The current code was already start-of-day (`Date.parse(date-only)` = UTC midnight), so end-of-day would **change UTC behavior** (+1 day) and break `phase7-worker.test.ts:147` (a date-only, UTC-fallback tenant) — tripping the "no-op for UTC / stop if a test changes" rule. The premise that "UTC was already correct, only non-UTC was off" was itself wrong — it was start-of-day for *everyone*; the ONLY bug was the timezone, which is orthogonal to start-vs-end. So: fix the timezone (the real bug), keep the spec's start-of-day semantics. Byte-identical no-op for UTC/null-tz tenants (zero existing-test changes). The user chose this explicitly after the trade-off was surfaced.
+- **Not chosen:** end-of-day-local ("valid through") — would be a spec-level semantic change (grant one more day) requiring the spec + those tests updated; flagged, not built.
+
 ### ADR-011-01 · ESP is Resend, behind the existing Mailer seam
 - **Decision:** Real email goes through Resend, swapped in behind the existing `Mailer` interface (not a new abstraction).
 - **Context:** Slice 1. Postmark and Resend were both viable; the whole product value is that chase/invite emails reach the inbox.
