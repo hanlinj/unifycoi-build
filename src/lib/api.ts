@@ -22,6 +22,28 @@ export const badRequest = (msg: string): NextResponse => apiError(msg, 400);
 export const conflict = (msg: string): NextResponse => apiError(msg, 409);
 export const unprocessable = (msg: string): NextResponse => apiError(msg, 422);
 
+/**
+ * 429 with a generic message + Retry-After. The message must NOT reveal which factor
+ * (email vs IP) tripped the throttle (SEC-9) — it is deliberately opaque.
+ */
+export const tooManyRequests = (retryAfterSeconds: number): NextResponse =>
+  NextResponse.json(
+    { error: 'Too many attempts. Please try again later.' },
+    { status: 429, headers: { 'Retry-After': String(Math.max(1, retryAfterSeconds)) } }
+  );
+
+/** Best-effort client IP from proxy headers (x-forwarded-for first hop, then x-real-ip). */
+export function clientIp(request: Request): string {
+  const xff = request.headers.get('x-forwarded-for');
+  if (xff) {
+    const first = xff.split(',')[0]?.trim();
+    if (first) return first;
+  }
+  const xr = request.headers.get('x-real-ip')?.trim();
+  if (xr) return xr;
+  return 'unknown';
+}
+
 /** Name of the HTTP-only session cookie holding the JWT for browser sessions. */
 export { SESSION_COOKIE } from '@/lib/auth/session-cookie';
 import { SESSION_COOKIE } from '@/lib/auth/session-cookie';

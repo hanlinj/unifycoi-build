@@ -71,6 +71,12 @@ export const env = {
   auth: {
     jwtSecret: required('JWT_SECRET'),
     jwtExpiresIn: optional('JWT_EXPIRES_IN', '8h'),
+    // Login throttle (SEC-9). Rolling window; soft lockout derived from windowed counts.
+    login: {
+      maxPerEmail: parseInt(process.env['LOGIN_MAX_PER_EMAIL'] ?? '5', 10),
+      maxPerIp: parseInt(process.env['LOGIN_MAX_PER_IP'] ?? '30', 10),
+      windowSeconds: parseInt(process.env['LOGIN_RATE_WINDOW_SECONDS'] ?? '900', 10), // 15m
+    },
   },
 } as const;
 

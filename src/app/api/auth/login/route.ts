@@ -1,7 +1,8 @@
 import { NextResponse } from 'next/server';
 import { getRawDb } from '@/lib/db/client';
 import { loginResolvingTenant } from '@/lib/services/auth';
-import { ok, badRequest, apiError, SESSION_COOKIE } from '@/lib/api';
+import { ok, badRequest, apiError, tooManyRequests, clientIp, SESSION_COOKIE } from '@/lib/api';
+import { checkLoginRate, recordLoginFailure, clearLoginFailuresForEmail } from '@/lib/auth/rate-limit';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -22,10 +23,22 @@ export async function POST(request: Request): Promise<NextResponse> {
   }
 
   const db = getRawDb();
+  const ip = clientIp(request);
+
+  // Throttle BEFORE attempting (SEC-9). A blocked attempt is not recorded, so the rolling
+  // window ages out and the soft lock self-lifts. Generic 429 — never says which factor tripped.
+  const decision = checkLoginRate(db, { email, ip });
+  if (!decision.allowed) {
+    return tooManyRequests(decision.retryAfterSeconds);
+  }
+
   const result = loginResolvingTenant(db, email, password, typeof tenantId === 'string' ? tenantId : undefined);
   if (!result) {
+    recordLoginFailure(db, { email, ip });
     return apiError('Invalid credentials or account is not accessible', 401);
   }
+  // Success clears the per-email soft lock (IP rolling window is preserved).
+  clearLoginFailuresForEmail(db, email);
 
   // Establish the browser session: JWT in an HTTP-only cookie. The token is also returned in
   // the body for API/test clients.
