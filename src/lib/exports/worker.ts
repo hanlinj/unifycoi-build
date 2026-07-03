@@ -13,6 +13,7 @@
 
 import type Database from 'better-sqlite3';
 import { logAudit } from '@/lib/audit';
+import { captureSecurityAlert } from '@/lib/observability';
 import { queueNotification } from '@/lib/notifications/queue';
 import { generateExportArtifact } from './audit-export';
 import { env } from '@/lib/env';
@@ -66,6 +67,10 @@ export async function processQueuedExports(
         tenantId: row.tenant_id, actorType: 'system', actorId: 'export-worker',
         eventType: 'export.failed', targetType: 'audit_export', targetId: row.id,
         payload: { scope: row.scope_type, error: (err as Error).message },
+      });
+      // OPS-3: surface worker failures to ops alerting. IDs + scope; error message scrubbed.
+      captureSecurityAlert('export.failed', {
+        tenant_id: row.tenant_id, export_id: row.id, scope: row.scope_type, error: (err as Error).message,
       });
       failed++;
     }

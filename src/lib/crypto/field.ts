@@ -17,6 +17,12 @@ function fieldKey(): Buffer {
   return decodeKey(env.crypto.fieldEncryptionKey);
 }
 
+/** Field key for a given key version. Hook for rotation — only v1 exists today. */
+function fieldKeyForVersion(version: number): Buffer {
+  if (version === 1) return fieldKey();
+  throw new Error(`No field key for key_version ${version} (rotation not configured)`);
+}
+
 export function encryptField(plaintext: string): string {
   const key = fieldKey();
   const iv = crypto.randomBytes(12);
@@ -30,10 +36,22 @@ export function encryptField(plaintext: string): string {
 }
 
 export function decryptField(ciphertext: string): string {
-  const key = fieldKey();
+  // SEC-13 key-version hook. Unversioned 3-part ciphertext (iv:tag:ct) IS key version 1 —
+  // its format is unchanged, so encryptField still emits 3-part. A future rotation emits a
+  // `v<N>:iv:tag:ct` 4-part form, which this path already understands and routes to the
+  // matching key. Legacy/missing version → v1.
   const parts = ciphertext.split(':');
-  if (parts.length !== 3) throw new Error('Invalid field ciphertext format');
-  const [ivB64, tagB64, encB64] = parts;
+  let version = 1;
+  let ivB64: string, tagB64: string, encB64: string;
+  if (parts.length === 4 && /^v(\d+)$/.test(parts[0])) {
+    version = Number(parts[0].slice(1));
+    [, ivB64, tagB64, encB64] = parts;
+  } else if (parts.length === 3) {
+    [ivB64, tagB64, encB64] = parts; // unversioned == v1
+  } else {
+    throw new Error('Invalid field ciphertext format');
+  }
+  const key = fieldKeyForVersion(version);
   const iv = Buffer.from(ivB64, 'base64');
   const tag = Buffer.from(tagB64, 'base64');
   const encrypted = Buffer.from(encB64, 'base64');

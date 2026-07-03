@@ -4,6 +4,9 @@
 export async function register() {
   if (process.env.NEXT_RUNTIME === 'nodejs') {
     await import('@/lib/env');
+    // Error monitoring + structured logging up first, so startup failures are captured.
+    const { initObservability } = await import('@/lib/observability');
+    initObservability();
     const { getRawDb } = await import('@/lib/db/client');
     const { seedTemplates } = await import('@/lib/requirements/templates');
     const db = getRawDb();

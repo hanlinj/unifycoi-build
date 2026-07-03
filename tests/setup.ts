@@ -11,3 +11,4 @@ process.env['MASTER_KEK'] = crypto.randomBytes(32).toString('hex');
 process.env['FIELD_ENCRYPTION_KEY'] = crypto.randomBytes(32).toString('hex');
 process.env['JWT_SECRET'] = crypto.randomBytes(32).toString('hex');
 process.env['JWT_EXPIRES_IN'] = '1h';
+process.env['LOG_LEVEL'] = 'silent'; // keep pino quiet under jest (SENTRY_DSN unset → no Sentry)

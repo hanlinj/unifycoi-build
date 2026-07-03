@@ -23,6 +23,7 @@ import { logAudit } from '@/lib/audit';
 import type { Mailer } from './mailer';
 import { resolveFrom } from './mailer';
 import { applyExpirationFlip } from './renewal';
+import { captureSecurityAlert } from '@/lib/observability';
 import { env } from '@/lib/env';
 
 export interface WorkerTickResult {
@@ -170,6 +171,10 @@ function markFailed(db: Database.Database, row: DueRow, error: string | undefine
     JSON.stringify(payload),
     row.id
   );
+  // OPS-3: a send failure is an ops signal. IDs + kind only; error message scrubbed.
+  captureSecurityAlert('notification.failed', {
+    tenant_id: row.tenant_id, notification_id: row.id, kind: row.kind, error: error ?? 'unknown',
+  });
 }
 
 /**

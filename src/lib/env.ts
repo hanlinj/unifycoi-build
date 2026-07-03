@@ -68,6 +68,12 @@ export const env = {
     masterKek: required('MASTER_KEK'),
     fieldEncryptionKey: required('FIELD_ENCRYPTION_KEY'),
   },
+  observability: {
+    // Sentry (OPS-12). Empty DSN → capture is a pino-only no-op (dev/test/CI).
+    sentryDsn: process.env['SENTRY_DSN'] ?? '',
+    environment: process.env['NODE_ENV'] ?? 'development',
+    logLevel: process.env['LOG_LEVEL'] ?? 'info',
+  },
   auth: {
     jwtSecret: required('JWT_SECRET'),
     jwtExpiresIn: optional('JWT_EXPIRES_IN', '8h'),

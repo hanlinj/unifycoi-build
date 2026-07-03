@@ -11,6 +11,7 @@ import { randomUUID } from 'crypto';
 import type Database from 'better-sqlite3';
 import { TenantDB } from '@/lib/db/tenant';
 import { logAudit } from '@/lib/audit';
+import { captureSecurityAlert } from '@/lib/observability';
 import { getBlobStore } from '@/lib/blob';
 import { packEncrypted } from '@/lib/crypto/envelope-file';
 import { inClause } from '@/lib/reports';
@@ -127,6 +128,11 @@ export async function generateExportArtifact(db: Database.Database, tenantId: st
       tenantId, actorType: 'user', actorId: row.requested_by,
       eventType: 'export.sensitive_decrypt_failed', targetType: 'audit_export', targetId: exportId,
       payload: { unreadable: decryptFailures },
+    });
+    // SEC-16: an unreadable Sensitive value means key/data corruption — alert immediately.
+    // IDs + counts ONLY (decryptFailures is counts); no plaintext/ciphertext/key material.
+    captureSecurityAlert('export.sensitive_decrypt_failed', {
+      tenant_id: tenantId, export_id: exportId, unreadable: decryptFailures,
     });
   }
 

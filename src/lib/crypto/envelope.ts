@@ -10,12 +10,14 @@
 
 import crypto from 'crypto';
 import { env } from '@/lib/env';
+import { CURRENT_KEY_VERSION } from './version';
 
 export interface EncryptionMeta {
   algo: string;         // 'aes-256-gcm'
   iv: string;           // base64 — nonce used to encrypt the document bytes
   tag: string;          // base64 — GCM auth tag for the document ciphertext
   wrapped_data_key: string; // base64 — KEK-encrypted data key (contains its own iv+tag)
+  key_version?: number; // SEC-13 hook; absent on legacy rows → treated as v1 on decrypt
 }
 
 const ALGO = 'aes-256-gcm' as const;
@@ -31,6 +33,12 @@ function masterKek(): Buffer {
   return decodeKey(env.crypto.masterKek);
 }
 
+/** KEK for a given key version. Hook for rotation — only v1 exists today. */
+function kekForVersion(version: number): Buffer {
+  if (version === 1) return masterKek();
+  throw new Error(`No key material for key_version ${version} (rotation not configured)`);
+}
+
 function wrapKey(dataKey: Buffer): string {
   const kek = masterKek();
   const iv = crypto.randomBytes(12);
@@ -41,8 +49,8 @@ function wrapKey(dataKey: Buffer): string {
   return `${iv.toString('base64')}:${tag.toString('base64')}:${encrypted.toString('base64')}`;
 }
 
-function unwrapKey(wrapped: string): Buffer {
-  const kek = masterKek();
+function unwrapKey(wrapped: string, version: number): Buffer {
+  const kek = kekForVersion(version);
   const parts = wrapped.split(':');
   if (parts.length !== 3) throw new Error('Invalid wrapped_data_key format');
   const [ivB64, tagB64, encB64] = parts;
@@ -66,12 +74,14 @@ export function encryptForStorage(plaintext: Buffer): { ciphertext: Buffer; meta
     iv: iv.toString('base64'),
     tag: tag.toString('base64'),
     wrapped_data_key: wrapKey(dataKey),
+    key_version: CURRENT_KEY_VERSION,
   };
   return { ciphertext, meta };
 }
 
 export function decryptFromStorage(ciphertext: Buffer, meta: EncryptionMeta): Buffer {
-  const dataKey = unwrapKey(meta.wrapped_data_key);
+  // Legacy rows have no key_version → v1. (Hook: version selects the KEK; only v1 exists.)
+  const dataKey = unwrapKey(meta.wrapped_data_key, meta.key_version ?? 1);
   const iv = Buffer.from(meta.iv, 'base64');
   const tag = Buffer.from(meta.tag, 'base64');
   const decipher = crypto.createDecipheriv(ALGO, dataKey, iv);
