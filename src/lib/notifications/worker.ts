@@ -214,6 +214,11 @@ function renderEmail(row: DueRow): { subject: string; body: string } {
       };
     case 'vendor_invite':
       return { subject: `You've been invited to submit documents`, body: `Please use your secure link to get started.` };
+    case 'password_reset':
+      return {
+        subject: `Reset your password`,
+        body: `We received a request to reset your password. Use this link to choose a new one (it expires in 1 hour): ${p['reset_path']}\n\nIf you didn't request this, you can ignore this email.`,
+      };
     case 'correction_requested':
       return { subject: `A quick correction is needed`, body: `Please use your secure link to update your submission.` };
     case 'vendor_submitted':
