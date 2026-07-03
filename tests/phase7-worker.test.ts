@@ -166,6 +166,12 @@ describe('supersession on renewal upload', () => {
     const t = seedTenant(db);
     const v = seedVendor(db, t.id, { contact_email: 'vendor@x.test' });
     const oldDoc = seedDocument(db, t.id, v.id, { doc_type: 'coi' });
+    // Pin the old COI strictly earlier than the (wall-clock-seeded) renewal below. The
+    // supersession guard in handleCoiUploadChase is `uploaded_at < newDoc.uploaded_at`
+    // (the deliberate A↔B-cycle guard from 9808975); without an explicit anchor the two
+    // seedDocument() defaults can share a millisecond under parallel load and the strict
+    // `<` would exclude the old doc — a fixture-timing flake, not a product bug.
+    db.prepare('UPDATE documents SET uploaded_at = ? WHERE id = ?').run('2026-01-01T00:00:00.000Z', oldDoc.id);
     // Old ladder against a Sept expiry.
     scheduleRenewalReminders(db, { tenantId: t.id, vendorId: v.id, documentId: oldDoc.id, expirationDate: '2027-01-01T00:00:00Z' }, NOW);
 
