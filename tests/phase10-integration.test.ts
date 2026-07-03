@@ -159,12 +159,15 @@ describe('integration — middleware route guard', () => {
     expect(withCookie.headers.get('location')).toBeNull(); // next(), no redirect
   });
 
-  test('matcher excludes /login, /v/*, /api/*; includes /dashboard', async () => {
+  test('matcher includes /api/* (for CSRF) and /dashboard; excludes /login, /v/*, static', async () => {
     const cfg = (await import('@/middleware')).config;
     const re = new RegExp(`^${cfg.matcher[0]}$`);
     expect(re.test('/dashboard')).toBe(true);
+    // SEC-12: the matcher now INCLUDES /api/* so the middleware can evaluate CSRF on API
+    // mutations (it previously excluded /api/). Exemptions live in the middleware logic,
+    // not the matcher — a GET like /api/search is matched but passes through untouched.
+    expect(re.test('/api/search')).toBe(true);
     expect(re.test('/v/sometoken')).toBe(false); // vendor surface never guarded
     expect(re.test('/login')).toBe(false);
-    expect(re.test('/api/search')).toBe(false);
   });
 });
