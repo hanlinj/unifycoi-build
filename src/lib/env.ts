@@ -68,6 +68,13 @@ export const env = {
     masterKek: required('MASTER_KEK'),
     fieldEncryptionKey: required('FIELD_ENCRYPTION_KEY'),
   },
+  billing: {
+    // Stripe (OPS-10, owner-approved spec deviation). Empty secret → the NoOp billing
+    // provider (dev/test/CI): provisioning still attaches a synthetic customer so the flow
+    // works without real Stripe. Publishable key is for the Slice-5 wizard's Elements card entry.
+    stripeSecretKey: process.env['STRIPE_SECRET_KEY'] ?? '',
+    stripePublishableKey: process.env['STRIPE_PUBLISHABLE_KEY'] ?? '',
+  },
   observability: {
     // Sentry (OPS-12). Empty DSN → capture is a pino-only no-op (dev/test/CI).
     sentryDsn: process.env['SENTRY_DSN'] ?? '',

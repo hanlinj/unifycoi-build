@@ -15,6 +15,7 @@ export interface Tenant {
 export interface CreateTenantInput {
   name: string;
   monthlyRateCents?: number;
+  timezone?: string; // IANA zone (OPS-7). Optional here; provisioning REQUIRES + validates it.
 }
 
 export interface UpdateTenantInput {
@@ -40,8 +41,8 @@ export function createTenant(
   const rate = input.monthlyRateCents ?? 9000;
 
   db.prepare(
-    'INSERT INTO tenants (id, name, lifecycle_state, monthly_rate_cents, created_at) VALUES (?, ?, ?, ?, ?)'
-  ).run(id, input.name.trim(), 'provisioning', rate, now);
+    'INSERT INTO tenants (id, name, lifecycle_state, monthly_rate_cents, timezone, created_at) VALUES (?, ?, ?, ?, ?, ?)'
+  ).run(id, input.name.trim(), 'provisioning', rate, input.timezone ?? null, now);
 
   // Initial billing snapshot (0 locations) and requirement settings defaults
   const tdb = new TenantDB(db, id);

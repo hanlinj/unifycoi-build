@@ -5,6 +5,18 @@
 
 const DATE_ONLY = /^\d{4}-\d{2}-\d{2}$/;
 
+/** True if `tz` is a valid IANA timezone (e.g. 'America/Chicago'). Used to validate the
+ *  required tenant timezone at provisioning (OPS-7 input). Same Intl basis as the rest. */
+export function isValidTimeZone(tz: string): boolean {
+  if (!tz || !tz.trim()) return false;
+  try {
+    new Intl.DateTimeFormat('en-US', { timeZone: tz });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 /** Local hour (0–23) at `now` in an IANA zone. (Home of the digest cadence's helper; digest.ts re-exports it.) */
 export function localHourInZone(now: Date, timeZone: string): number {
   const formatted = new Intl.DateTimeFormat('en-US', {
