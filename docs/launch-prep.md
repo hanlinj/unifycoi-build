@@ -17,13 +17,13 @@
 
 | Category | Items |
 |---|---:|
-| Security & defensibility | 16 |
+| Security & defensibility | 17 |
 | Performance & scale | 10 |
 | Operational | 13 |
 | Feature completeness | 16 |
 | Testing infrastructure | 6 |
 | Patterns observed (meta) | 6 |
-| **Total** | **67** |
+| **Total** | **68** |
 
 **Top 5 priorities (all before first real customer)**
 
@@ -158,6 +158,15 @@ Self-serve SaaS signup; horizontal/multi-instance scale; real email at volume; t
 - **Trigger:** before 5 (an unreadable Sensitive value means key/data corruption — you want to know immediately).
 - **Effort:** small.
 - **Approach:** route the event to ops alerting (also OPS-5).
+
+### SEC-17 — No address-level suppression on hard bounce / spam complaint *(discovered Phase 11 Slice 1)*
+- **What:** The Resend delivery webhook (`18853a5`) marks a bounced/complained notification and audits it, but nothing adds the recipient address to a suppression list — a future send to a known-bad or complained address is not blocked.
+- **Source:** Phase 11 Slice 1; `src/lib/notifications/resend-webhook.ts`.
+- **Current state:** bounce → `status='bounced'` + `notification.bounced` audit; complaint → recorded + `notification.complained` audit. No `suppressions` table; the worker does not consult one before sending.
+- **Why it matters (not cosmetic):** all operators share ONE verified sending domain (per-operator DKIM = FEAT-13), so every operator's bounces and spam complaints pool into a **single domain reputation**. Repeatedly sending to addresses that hard-bounce or file spam complaints degrades deliverability *for every tenant at once* — suppression hygiene protects a shared asset, not just one operator's mail.
+- **Trigger:** before 5 / once real send volume accrues across >1 operator on the shared domain.
+- **Effort:** small–medium.
+- **Approach:** a `suppressions` table (address + reason + source event) written by the webhook on hard bounce/complaint; the notification worker checks it before send and marks skipped sends. Pairs with the deferred invite-bounce → inviter re-notify loop.
 
 ---
 
