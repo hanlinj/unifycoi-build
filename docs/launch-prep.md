@@ -284,10 +284,15 @@ Self-serve SaaS signup; horizontal/multi-instance scale; real email at volume; t
 - **Effort:** medium.
 - **Approach:** leader election or extract workers to a single dedicated process / real queue.
 
-### OPS-7 — Timezone must be set at provisioning
-- **What:** Digest fires on tenant-local hour; null/invalid `timezone` falls back to UTC (logged).
-- **Source:** Phase 7 B (`51bcffb`), Phase 7 closing.
-- **Trigger:** before first customer (set tz at provisioning). **Effort:** trivial.
+### OPS-7 — Tenant timezone: provisioning input + timezone-aware expiry boundary math  🚩 **FIRST-CUSTOMER BLOCKER**
+- **What:** Two halves. (a) `tenants.timezone` must be a **required, validated** input at provisioning (today nullable → UTC fallback). (b) The COI-expiry **boundary math** must evaluate against the tenant's local day, not UTC.
+- **Source:** Phase 7 B (`51bcffb`); investigated end of Phase 11.
+- **Why this is a BLOCKER, not hardening:** a compliance product's core promise is being right at the COI-expiry boundary. "Expires this week" / the day-0 expired-flip computed in UTC is **off by up to a day** at the edges for a non-UTC customer — e.g. a US-Pacific tenant's day-0 flip fires at UTC-midnight of the expiry date, which is ~5pm the *previous* day Pacific, marking a vendor expired while (locally) coverage is still valid. Off-by-a-day at the compliance boundary is a correctness bug in the product's reason to exist, not cosmetic. This is distinct from the SEC-17 / SEC-8b / login-attempts-pruning items, which are hardening.
+- **Current state (investigated, read-only):**
+  - **Digest FIRING cadence is already tz-aware** — `computeDigestDueTenants` reads `tenants.timezone` and fires at `DIGEST_HOUR_LOCAL` via `localHourInZone` (`digest.ts:146,178`). This half just needs the column reliably populated.
+  - **Boundary MATH is UTC/date-only today — NOT tz-aware.** The renewal ladder + day-0 job anchor to `Date.parse(expirationDate)` (`renewal.ts:82,171`) — a date-only expiry parses as **UTC midnight**. The Command Center "imminent/expiring-soon" buckets use `Math.floor((Date.parse(expiresAt) - now) / DAY_MS)` (`command-center.ts:167`), a floored UTC-instant delta; reports' `daysOut` is the same class (`builders.ts`). None read `tenants.timezone`.
+- **Effort:** provisioning input = **trivial**; timezone-aware boundary math = **the real work (small–medium)** — anchor expiry day-boundaries and day-counts to the tenant zone (interpret a date-only expiry as end-of-day tenant-local; compute `daysToExpiry` against tenant-local calendar days).
+- **Lands with:** the provisioning / `dev-seed` work (the only place tz is captured), **before first customer** — deferred from a standalone slice, NOT deferred to "Phase 12 someday."
 
 ### OPS-8 — No provisioning / platform admin UI
 - **What:** The platform shell (fleet/tenants, provisioning, bulk import, billing, support/impersonation) is API-only; `/platform` is a placeholder.
