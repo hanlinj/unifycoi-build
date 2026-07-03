@@ -9,6 +9,14 @@ reasonable engineer might later ask "why did they do it *that* way?"
 
 ---
 
+## Phase 12 — Design system + platform dashboard
+
+### ADR-012-01 · Design substrate = Tailwind v3 + a semantic token layer; preflight OFF (additive)
+- **Decision:** Introduce Tailwind (v3) + a semantic token layer in `tailwind.config.ts` (canvas/surface/border/fg/fg-muted + accent/success/attention/danger, each with subtle/emphasis) — one source of truth replacing the hand-repeated inline Primer hex. Thin primitives in `src/components/ui/*`. **`corePlugins.preflight` is disabled.**
+- **Context:** Slice 1. The design layer was greenfield (100% inline styles, no framework/tokens/primitives). User supplied references: three self-storage ops-dashboard screenshots + Cubby (clean, light, trustworthy B2B) — the authoritative direction — plus one dark-glass/lime board treated as **non-authoritative** (clashes with a trustworthy compliance tool; not adopted).
+- **Why:** The pinned direction (utility layout, bordered cards, status pills, Primer-family palette) maps idiomatically onto Tailwind; shadcn/Radix is heavier than needed and a hand-rolled tokens-module reinvents Tailwind's ergonomics. **Preflight OFF** because the DS is additive this phase — Tailwind's global reset would restyle the un-retrofitted inline-styled tenant pages (they migrate in Slice 9, FENCE: migration-only). Primitives get correct box-sizing via a minimal `globals.css` base rule instead. Because everything routes through tokens, shifting the accent/energy later (e.g. toward the dark board) is a handful of token edits.
+- **Testing:** jest now runs two projects — `node` (existing 762 `*.test.ts`, untouched) and `jsdom` (RTL `*.test.tsx`). Disjoint globs.
+
 ## Phase 11 — Launch-prep (infrastructural)
 
 ### ADR-011-11 · COI expiry boundary = START of the expiry day, tenant-local (not end-of-day)

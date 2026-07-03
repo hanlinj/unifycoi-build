@@ -1,9 +1,10 @@
+import './globals.css';
+import { AppShell } from '@/components/AppShell';
+
 export const metadata = {
   title: 'UnifyCOI',
   description: 'Vendor COI compliance for multi-location self-storage operators',
 };
-
-import { AppShell } from '@/components/AppShell';
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (

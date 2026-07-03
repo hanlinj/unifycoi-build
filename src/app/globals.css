@@ -1,0 +1,17 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* preflight is disabled (see tailwind.config.ts) so the design system is additive. Give
+   design-system components correct box-sizing without resetting the whole (un-retrofitted)
+   app's typography/buttons. Design-system surfaces set their own fg/bg via tokens. */
+@layer base {
+  *,
+  ::before,
+  ::after {
+    box-sizing: border-box;
+  }
+  :root {
+    color-scheme: light;
+  }
+}
