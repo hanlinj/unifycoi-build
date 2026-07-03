@@ -108,6 +108,28 @@ describe('reset round-trip via the notification worker', () => {
     expect(loginResolvingTenant(db, 'admin@acme.test', 'brand-new-pass')).not.toBeNull();
     expect(loginResolvingTenant(db, 'admin@acme.test', 'old-password-1')).toBeNull();
   });
+
+  test('the raw token is scrubbed from payload_json after send (not at rest for the TTL)', async () => {
+    const db = setupTestDb();
+    const t = seedTenant(db);
+    const u = seedTenantUser(db, t.id, { email: 'admin@acme.test', password: 'old-password-1' });
+    requestPasswordReset(db, { email: 'admin@acme.test' }, NOW);
+
+    // Pre-send: the raw token is in the row (the worker needs it to render the link).
+    const before = JSON.parse((db.prepare('SELECT payload_json FROM notifications WHERE recipient_ref = ?').get(u.id) as { payload_json: string }).payload_json);
+    expect(before.reset_path).toContain('token=');
+
+    const mailer = new NoOpMailer();
+    await processDueNotifications(mailer, db, NOW);
+
+    // Post-send: the row is scrubbed — but the delivered email carried the link, so /confirm still works.
+    const after = JSON.parse((db.prepare('SELECT payload_json FROM notifications WHERE recipient_ref = ?').get(u.id) as { payload_json: string }).payload_json);
+    expect(after.reset_path).toBeNull();
+    expect(after.token_scrubbed).toBe(true);
+
+    const raw = rawTokenFromEmail(mailer.sent[0].body);
+    expect(confirmPasswordReset(db, { rawToken: raw, newPassword: 'brand-new-pass' }, NOW).ok).toBe(true);
+  });
 });
 
 // ── confirm guards ──────────────────────────────────────────────────────────────

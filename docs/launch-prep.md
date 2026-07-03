@@ -17,13 +17,13 @@
 
 | Category | Items |
 |---|---:|
-| Security & defensibility | 17 |
+| Security & defensibility | 18 |
 | Performance & scale | 10 |
 | Operational | 13 |
 | Feature completeness | 16 |
 | Testing infrastructure | 6 |
 | Patterns observed (meta) | 6 |
-| **Total** | **68** |
+| **Total** | **69** |
 
 **Top 5 priorities (all before first real customer)**
 
@@ -104,6 +104,13 @@ Self-serve SaaS signup; horizontal/multi-instance scale; real email at volume; t
 - **Trigger:** before first customer (operational necessity).
 - **Effort:** medium.
 - **Approach:** emailed reset-token flow (depends on SEC-1).
+
+### SEC-8b — No IP throttle on the password-reset CONFIRM endpoint *(discovered Phase 11 Slice 3)*
+- **What:** `POST /api/auth/password-reset/confirm` is not rate-limited. Token guessing is infeasible (256-bit token), so this is hardening, not a live hole.
+- **Source:** Phase 11 Slice 3 (`6c2d897`); the REQUEST endpoint shares the login limiter, confirm does not.
+- **Trigger:** cheap hardening / before public exposure at volume.
+- **Effort:** trivial.
+- **Approach:** per-IP throttle on confirm (reuse the Slice 2 limiter with an IP-only key) to blunt confirm-flooding.
 
 ### SEC-9 — No login rate-limiting / lockout / brute-force protection
 - **What:** The login endpoint accepts unlimited attempts.

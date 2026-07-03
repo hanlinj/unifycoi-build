@@ -118,9 +118,18 @@ export async function processDueNotifications(
     if (result.ok) {
       // Persist the ESP message id (when the transport returns one) so the delivery
       // webhook can correlate a bounce/complaint back to this row. NoOp mailer → null.
-      db.prepare(
-        `UPDATE notifications SET status = 'sent', sent_at = ?, claimed_at = NULL, provider_message_id = ? WHERE id = ?`
-      ).run(new Date().toISOString(), result.providerId ?? null, row.id);
+      // Password-reset only: scrub the raw token from the row now that the link has been
+      // delivered (see scrubResetToken) — it must not persist at rest past send.
+      const scrubbed = scrubResetToken(row.payload_json);
+      if (scrubbed !== null) {
+        db.prepare(
+          `UPDATE notifications SET status = 'sent', sent_at = ?, claimed_at = NULL, provider_message_id = ?, payload_json = ? WHERE id = ?`
+        ).run(new Date().toISOString(), result.providerId ?? null, scrubbed, row.id);
+      } else {
+        db.prepare(
+          `UPDATE notifications SET status = 'sent', sent_at = ?, claimed_at = NULL, provider_message_id = ? WHERE id = ?`
+        ).run(new Date().toISOString(), result.providerId ?? null, row.id);
+      }
       // Comms are logged to the audit trail (Audit_Trail.md): fact + reference, no Sensitive.
       logAudit(db, {
         tenantId: row.tenant_id,
@@ -149,10 +158,40 @@ function markFailed(db: Database.Database, row: DueRow, error: string | undefine
     payload = {};
   }
   payload['send_error'] = error ?? 'unknown';
+  // Password-reset only: scrub the raw token on a FAILED send-attempt too, so the goal
+  // ("cleartext only in the send-pending window") holds even when delivery fails and the
+  // row would otherwise linger as 'failed' with the token for the token's full TTL. A
+  // failed reset is undelivered anyway — the user re-requests to get a fresh token.
+  if (payload['type'] === 'password_reset') {
+    payload['reset_path'] = null;
+    payload['token_scrubbed'] = true;
+  }
   db.prepare(`UPDATE notifications SET status = 'failed', claimed_at = NULL, payload_json = ? WHERE id = ?`).run(
     JSON.stringify(payload),
     row.id
   );
+}
+
+/**
+ * Password-reset ONLY (Slice 3 amendment): the raw reset token must ride payload_json so
+ * the worker can render the emailed link — but a reset token takes over an existing account
+ * on /confirm (higher blast radius than an invite token), and payload_json lives in the SAME
+ * DB as the hash-only verifier table, so a raw token sitting there at rest partly undoes the
+ * hash-only property for the token's TTL. Once the link is delivered, null the token-bearing
+ * field. Returns the scrubbed JSON for a reset payload, or null for any other message type
+ * (nothing to scrub). Invite tokens are deliberately untouched — separate risk object.
+ */
+function scrubResetToken(payloadJson: string): string | null {
+  let p: Record<string, unknown>;
+  try {
+    p = JSON.parse(payloadJson) as Record<string, unknown>;
+  } catch {
+    return null;
+  }
+  if (p['type'] !== 'password_reset') return null;
+  p['reset_path'] = null;
+  p['token_scrubbed'] = true;
+  return JSON.stringify(p);
 }
 
 type Resolved =
