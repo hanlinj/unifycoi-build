@@ -1,5 +1,10 @@
 // Migration: 001_baseline (Phase 13 — Postgres cutover)
 //
+// The active baseline src/lib/db/migrate.ts applies. Originally built and proved in Stage 0's
+// db-postgres/ scaffolding (now retired — see git history / ADR-013-01); moved here in Stage 1
+// once db-core actually runs against it. src/migrations/*.sql (the 17 SQLite migrations) stay
+// in place, untouched, as the historical record — nothing runs them anymore.
+//
 // Fresh baseline, NOT a one-for-one port of src/migrations/001-017 (ADR-013-01: the DB is
 // empty, so there is no history to preserve; porting 17 SQLite files forward would also carry
 // their SQLite-isms into Postgres DDL and then need a second cleanup pass). This is the
@@ -15,8 +20,8 @@
 // foundation-only pass; switching to a validating column type is a separate, deliberate call
 // for a later stage, not bundled in here. No new CHECK constraints were added for the several
 // enum-like TEXT columns (documents.state, notifications.status, etc.) that SQLite never
-// enforced either — flagged as a considered-but-deferred opportunity in db-postgres/README.md,
-// not exercised here, to keep this pass a faithful port-with-proper-types, not a redesign.
+// enforced either — flagged as a considered-but-deferred opportunity, not exercised here, to
+// keep this pass a faithful port-with-proper-types, not a redesign.
 //
 // Table/column inventory verified against all 17 files in src/migrations/ directly (not from
 // summary) before writing this.

@@ -1,26 +1,55 @@
 import Database from 'better-sqlite3';
-import fs from 'fs';
-import path from 'path';
 import { randomUUID } from 'crypto';
 import { hashPassword } from '@/lib/auth/password';
 import { hashInviteToken } from '@/lib/auth/invite-token';
 import type { ProcessedExtraction } from '@/lib/extraction/types';
+import type { Db } from '@/lib/db/client';
+import { createEphemeralTestDatabase, dropEphemeralTestDatabase } from '@/lib/db/test-isolation';
 
-export function setupTestDb(): Database.Database {
-  const db = new Database(':memory:');
-  db.pragma('journal_mode = WAL');
-  db.pragma('foreign_keys = ON');
+// Phase 13 migration, Stage 1: setupTestDb()/teardownTestDb() are the new Postgres-based
+// per-test isolation primitives (src/lib/db/test-isolation.ts) — see that file's doc comment
+// for why this is a two-layer scheme (one ephemeral database per test FILE here; sharing one
+// database across the WHOLE jest run needs a jest globalSetup/globalTeardown, deferred until
+// more than this one file uses it — not worth the added machinery for a single consumer yet).
+//
+// Usage (see tests/db-core.pg.test.ts):
+//   let db: Db;
+//   beforeEach(async () => { db = await setupTestDb(); });
+//   afterEach(async () => { await teardownTestDb(db); });
+//   afterAll(async () => { await teardownTestDatabase(); });
+//
+// The seed*()/assign*() helpers below are UNCHANGED (still synchronous, still typed against
+// better-sqlite3's Database.Database) — they belong to modules that haven't converted yet.
+// Any test file calling both setupTestDb() (now async, returns a Kysely Db) and a seed helper
+// (still expects a sync Database.Database) will not compile — expected, per Stage 1's scope:
+// only db-core itself converts this stage.
 
-  const migrationsDir = path.join(process.cwd(), 'src', 'migrations');
-  db.exec(`CREATE TABLE IF NOT EXISTS _migrations (name TEXT PRIMARY KEY, applied_at TEXT NOT NULL)`);
-  const files = fs.readdirSync(migrationsDir).filter((f) => f.endsWith('.sql')).sort();
-  for (const file of files) {
-    const sql = fs.readFileSync(path.join(migrationsDir, file), 'utf-8');
-    db.exec(sql);
-    db.prepare('INSERT OR IGNORE INTO _migrations (name, applied_at) VALUES (?, ?)').run(file, new Date().toISOString());
+let _ephemeral: Promise<{ name: string; db: Db }> | null = null;
+
+async function sharedEphemeralDatabase(): Promise<{ name: string; db: Db }> {
+  if (!_ephemeral) {
+    _ephemeral = createEphemeralTestDatabase();
   }
+  return _ephemeral;
+}
 
-  return db;
+/** Opens a fresh per-test transaction against this file's ephemeral database. Call in beforeEach. */
+export async function setupTestDb(): Promise<Db> {
+  const { db } = await sharedEphemeralDatabase();
+  return db.startTransaction().execute();
+}
+
+/** Rolls back the transaction setupTestDb() returned. Call in afterEach. */
+export async function teardownTestDb(db: Db): Promise<void> {
+  await (db as unknown as { rollback: () => { execute: () => Promise<void> } }).rollback().execute();
+}
+
+/** Drops this file's ephemeral database entirely. Call once, in afterAll. */
+export async function teardownTestDatabase(): Promise<void> {
+  if (!_ephemeral) return;
+  const { name, db } = await _ephemeral;
+  _ephemeral = null;
+  await dropEphemeralTestDatabase(name, db);
 }
 
 export function seedPlatformUser(

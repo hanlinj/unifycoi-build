@@ -22,6 +22,21 @@ export const env = {
   sqlite: {
     path: required('SQLITE_PATH'),
   },
+  // Phase 13 migration, Stage 1: the data layer's real home going forward. `sqlite` above
+  // stays required/read until every downstream module has converted (Stage 10 removes it).
+  // NOT `required()` — only db-core's own code (client.ts, test-isolation.ts) reads this so
+  // far, and most of the 1010-test suite doesn't touch Postgres yet; eagerly requiring it
+  // here would crash every test at env.ts's module-load time, not just the ones that need
+  // it. client.ts's getDb() throws its own clear error if this is empty when actually called.
+  postgres: {
+    databaseUrl: process.env['DATABASE_URL'] ?? '',
+    // Test-isolation harness only (src/lib/db/test-isolation.ts) — not used by the app itself.
+    host: optional('PG_HOST', '127.0.0.1'),
+    port: parseInt(optional('PG_PORT', '5432'), 10),
+    user: optional('PG_USER', 'postgres'),
+    password: optional('PG_PASSWORD', ''),
+    testTemplateDatabase: optional('PG_TEST_TEMPLATE_DATABASE', ''),
+  },
   anthropic: {
     apiKey: process.env['ANTHROPIC_API_KEY'] ?? '',
     visionModelPrimary: process.env['VISION_MODEL_PRIMARY'] ?? 'claude-sonnet-4-6',

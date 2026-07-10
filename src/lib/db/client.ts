@@ -1,33 +1,37 @@
-import Database from 'better-sqlite3';
-import path from 'path';
-import fs from 'fs';
+import { Kysely, PostgresDialect } from 'kysely';
+import { Pool } from 'pg';
 import { env } from '@/lib/env';
 
-let _db: Database.Database | null = null;
+/**
+ * Phase 13 migration, Stage 1: better-sqlite3 → Kysely/Postgres.
+ *
+ * `Kysely<any>` deliberately — there is no schema-wide typed `Database` interface yet. Each
+ * module authors its own typed table interfaces as it converts in later stages; writing all
+ * 24 tables' types here up front would need revisiting per-module anyway, so it's deferred
+ * rather than done twice. `Db` is exported as the shared alias downstream modules import.
+ */
+export type Db = Kysely<any>;
 
-export function getRawDb(): Database.Database {
+let _db: Db | null = null;
+
+export function getDb(): Db {
   if (!_db) {
-    // Honor the ':memory:' sentinel literally — path.resolve() would turn it into a real
-    // on-disk file named ':memory:'. Tests/CI rely on true in-memory semantics.
-    if (env.sqlite.path === ':memory:') {
-      _db = new Database(':memory:');
-    } else {
-      const dbPath = path.resolve(env.sqlite.path);
-      const dir = path.dirname(dbPath);
-      if (!fs.existsSync(dir)) {
-        fs.mkdirSync(dir, { recursive: true });
-      }
-      _db = new Database(dbPath);
+    if (!env.postgres.databaseUrl) {
+      throw new Error(
+        'DATABASE_URL is not set. Postgres is only required for code that actually calls getDb() ' +
+          '— set DATABASE_URL in .env if you are running/testing a converted module.'
+      );
     }
-    _db.pragma('journal_mode = WAL');
-    _db.pragma('foreign_keys = ON');
+    _db = new Kysely<any>({
+      dialect: new PostgresDialect({ pool: new Pool({ connectionString: env.postgres.databaseUrl }) }),
+    });
   }
   return _db;
 }
 
-export function closeDb(): void {
+export async function closeDb(): Promise<void> {
   if (_db) {
-    _db.close();
+    await _db.destroy();
     _db = null;
   }
 }

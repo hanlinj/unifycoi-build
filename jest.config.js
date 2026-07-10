@@ -5,12 +5,24 @@
 const tsTransform = ['ts-jest', {
   tsconfig: { module: 'commonjs', moduleResolution: 'node', jsx: 'react-jsx' },
 }];
+// kysely (Phase 13 migration) ships ESM-only ("type": "module", no CJS build) — its dist
+// files are plain .js, so the ts-jest transform needs allowJs to compile them to CJS too.
+const tsTransformAllowJs = ['ts-jest', {
+  tsconfig: { module: 'commonjs', moduleResolution: 'node', jsx: 'react-jsx', allowJs: true },
+}];
 
 const common = {
   rootDir: '.',
   moduleNameMapper: { '^@/(.*)$': '<rootDir>/src/$1' },
   setupFiles: ['<rootDir>/tests/setup.ts'],
-  transform: { '^.+\\.tsx?$': tsTransform },
+  transform: {
+    'node_modules/kysely/.+\\.js$': tsTransformAllowJs,
+    '^.+\\.tsx?$': tsTransform,
+  },
+  // jest's default ignores all of node_modules — this carves out just kysely so the line
+  // above actually gets a chance to run on it. Purely additive: every other node_modules
+  // package stays ignored as before.
+  transformIgnorePatterns: ['/node_modules/(?!(kysely)/)'],
 };
 
 module.exports = {
