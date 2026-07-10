@@ -1,6 +1,6 @@
-import { CompiledQuery, type ControlledTransaction } from 'kysely';
-import { randomUUID } from 'crypto';
+import { CompiledQuery } from 'kysely';
 import type { Db } from './client';
+import { withTransaction } from './transaction';
 
 /**
  * TenantDB — the only permitted gateway for reads and writes on tenant-scoped tables.
@@ -28,13 +28,13 @@ import type { Db } from './client';
  * Kysely's simple callback-style `.transaction().execute()` does NOT support being called
  * again on an already-open transaction — it throws. Real nesting requires the CONTROLLED
  * transaction API (`db.startTransaction().execute()` + `.savepoint(name)`), so transaction()
- * below ALWAYS uses that API, never the simple callback form — both when opening fresh and
- * when detecting it's already nested (via `this.db.isTransaction`). This is why the cast to
- * `ControlledTransaction` in the nested branch is safe: nothing in this codebase is allowed
- * to construct a TenantDB over a plain callback-style `Transaction` — only over a `Db`
- * (not yet a transaction) or a `ControlledTransaction` this same method (or the test harness's
- * withTestTransaction, built the same way) produced. Breaking that invariant elsewhere would
- * make the cast unsound — don't introduce a `.transaction().execute()` call anywhere that
+ * below delegates to the shared `withTransaction()` helper (src/lib/db/transaction.ts), which
+ * ALWAYS uses that API — both when opening fresh and when detecting it's already nested (via
+ * `db.isTransaction`). Nothing in this codebase is allowed to construct a TenantDB over a
+ * plain callback-style `Transaction` — only over a `Db` (not yet a transaction) or a
+ * `ControlledTransaction` this same helper (or the test harness's withTestTransaction, built
+ * the same way) produced. Breaking that invariant elsewhere would make withTransaction's
+ * internal cast unsound — don't introduce a `.transaction().execute()` call anywhere that
  * hands its callback's `trx` to a TenantDB.
  */
 export class TenantDB {
@@ -124,29 +124,7 @@ export class TenantDB {
    * escapes the enclosing transaction's own eventual commit/rollback.
    */
   async transaction<T>(fn: (tdb: TenantDB) => Promise<T>): Promise<T> {
-    if (this.db.isTransaction) {
-      const savepointName = `sp_${randomUUID().replace(/-/g, '_')}`;
-      const ctrl = this.db as unknown as ControlledTransaction<any>;
-      const nested = await ctrl.savepoint(savepointName).execute();
-      try {
-        const result = await fn(new TenantDB(nested, this.tenantId));
-        await nested.releaseSavepoint(savepointName).execute();
-        return result;
-      } catch (err) {
-        await nested.rollbackToSavepoint(savepointName).execute();
-        throw err;
-      }
-    }
-
-    const trx = await this.db.startTransaction().execute();
-    try {
-      const result = await fn(new TenantDB(trx, this.tenantId));
-      await trx.commit().execute();
-      return result;
-    } catch (err) {
-      await trx.rollback().execute();
-      throw err;
-    }
+    return withTransaction(this.db, (trx) => fn(new TenantDB(trx, this.tenantId)));
   }
 }
 

@@ -4,9 +4,13 @@
 //
 // Tiers (Notifications_and_Communications.md): kind='exception' = immediate (scheduled_for
 // null → next worker tick); kind='digest' = routine, batched by the daily digest builder.
+//
+// Phase 13 migration, Stage 3: converted as a hard dependency of password-reset.ts's
+// requestPasswordReset (the rest of the notifications module — worker/digest/renewal/chase —
+// stays synchronous/SQLite-typed until its own later stage).
 
 import { randomUUID } from 'crypto';
-import type Database from 'better-sqlite3';
+import type { Db } from '@/lib/db/client';
 import { TenantDB } from '@/lib/db/tenant';
 
 export interface QueueNotificationInput {
@@ -19,14 +23,14 @@ export interface QueueNotificationInput {
 }
 
 /** Insert one notification row (status='queued'). Returns its id. */
-export function queueNotification(
-  db: Database.Database,
+export async function queueNotification(
+  db: Db,
   tenantId: string,
   input: QueueNotificationInput
-): string {
+): Promise<string> {
   const tdb = new TenantDB(db, tenantId);
   const id = randomUUID();
-  tdb.insert('notifications', {
+  await tdb.insert('notifications', {
     id,
     recipient_type: input.recipientType,
     recipient_ref: input.recipientRef,
@@ -38,7 +42,7 @@ export function queueNotification(
     payload_json: JSON.stringify(input.payload),
     document_id: input.documentId ?? null,
     claimed_at: null,
-    created_at: new Date().toISOString(),
+    created_at: new Date(),
   });
   return id;
 }
@@ -48,29 +52,31 @@ export function queueNotification(
  * Admin scope is org-wide (Roles_and_Permissions.md), so org-level exceptions
  * (a decline, a rule-change non-compliance) reach all admins. Returns the ids created.
  */
-export function notifyTenantAdmins(
-  db: Database.Database,
+export async function notifyTenantAdmins(
+  db: Db,
   tenantId: string,
   payload: Record<string, unknown>
-): string[] {
+): Promise<string[]> {
   const tdb = new TenantDB(db, tenantId);
-  const admins = tdb.all<{ id: string }>(
-    `SELECT id FROM users WHERE tenant_id = ? AND role = 'admin' AND status != 'disabled'`
+  const admins = await tdb.all<{ id: string }>(
+    `SELECT id FROM users WHERE tenant_id = $1 AND role = 'admin' AND status != 'disabled'`
   );
-  return admins.map((a) =>
-    queueNotification(db, tenantId, {
-      recipientType: 'user',
-      recipientRef: a.id,
-      kind: 'exception',
-      payload,
-    })
+  // Stage 0's catalogued N+1-in-.map() finding: can't await inside .map(), and queueNotification
+  // is now async — Promise.all + an async mapper instead of the old synchronous .map().
+  return Promise.all(
+    admins.map((a) =>
+      queueNotification(db, tenantId, {
+        recipientType: 'user',
+        recipientRef: a.id,
+        kind: 'exception',
+        payload,
+      })
+    )
   );
 }
 
 /** Operator (tenant) display name for vendor-facing From branding. */
-export function getOperatorName(db: Database.Database, tenantId: string): string | null {
-  const row = db.prepare('SELECT name FROM tenants WHERE id = ?').get(tenantId) as
-    | { name: string }
-    | undefined;
+export async function getOperatorName(db: Db, tenantId: string): Promise<string | null> {
+  const row = await db.selectFrom('tenants').select('name').where('id', '=', tenantId).executeTakeFirst();
   return row?.name ?? null;
 }

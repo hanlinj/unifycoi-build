@@ -1,4 +1,5 @@
-import type Database from 'better-sqlite3';
+import { sql } from 'kysely';
+import type { Db } from '@/lib/db/client';
 import { verifyPassword } from '@/lib/auth/password';
 import { issueToken, type TokenPayload } from '@/lib/auth/jwt';
 
@@ -18,33 +19,38 @@ export interface LoginResult {
 /**
  * Attempt login. Pass tenantId to authenticate as a tenant user; omit for platform user.
  * Returns null on any credential/state failure.
+ *
+ * Platform-scoped raw queries (bypasses TenantDB — no tenant context exists yet at login).
+ * Case-insensitive email match: SQLite's `COLLATE NOCASE` → Postgres `lower(email) = lower($)`
+ * (Stage 0's catalogued rework spot) — same ASCII case-folding behavior, not a citext column.
  */
-export function loginWithEmail(
-  db: Database.Database,
+export async function loginWithEmail(
+  db: Db,
   email: string,
   password: string,
   tenantId?: string
-): LoginResult | null {
+): Promise<LoginResult | null> {
   if (!email || !password) return null;
 
   if (tenantId) {
     // Tenant user login
-    const tenant = db
-      .prepare('SELECT id, lifecycle_state FROM tenants WHERE id = ?')
-      .get(tenantId) as { id: string; lifecycle_state: string } | undefined;
+    const tenant = await db
+      .selectFrom('tenants')
+      .select(['id', 'lifecycle_state'])
+      .where('id', '=', tenantId)
+      .executeTakeFirst();
 
     if (!tenant) return null;
     if (tenant.lifecycle_state === 'suspended' || tenant.lifecycle_state === 'offboarded') {
       return null; // tenant access frozen
     }
 
-    const user = db
-      .prepare(
-        "SELECT id, email, name, role, password_hash, status FROM users WHERE tenant_id = ? AND email = ? COLLATE NOCASE"
-      )
-      .get(tenantId, email) as
-      | { id: string; email: string; name: string; role: string; password_hash: string | null; status: string }
-      | undefined;
+    const user = await db
+      .selectFrom('users')
+      .select(['id', 'email', 'name', 'role', 'password_hash', 'status'])
+      .where('tenant_id', '=', tenantId)
+      .where(sql`lower(email)`, '=', email.toLowerCase())
+      .executeTakeFirst();
 
     if (!user || !user.password_hash) return null;
     if (user.status === 'disabled') return null;
@@ -63,13 +69,11 @@ export function loginWithEmail(
   }
 
   // Platform user login
-  const platformUser = db
-    .prepare(
-      'SELECT id, email, name, role, password_hash FROM platform_users WHERE email = ? COLLATE NOCASE'
-    )
-    .get(email) as
-    | { id: string; email: string; name: string; role: string; password_hash: string }
-    | undefined;
+  const platformUser = await db
+    .selectFrom('platform_users')
+    .select(['id', 'email', 'name', 'role', 'password_hash'])
+    .where(sql`lower(email)`, '=', email.toLowerCase())
+    .executeTakeFirst();
 
   if (!platformUser) return null;
   if (!verifyPassword(password, platformUser.password_hash)) return null;
@@ -99,47 +103,53 @@ export function loginWithEmail(
  * verifies. (Email is unique per tenant; the same email in two tenants is rare — first match
  * whose password verifies wins.) An explicit tenantId short-circuits to that tenant.
  */
-export function loginResolvingTenant(
-  db: Database.Database,
+export async function loginResolvingTenant(
+  db: Db,
   email: string,
   password: string,
   tenantId?: string
-): LoginResult | null {
+): Promise<LoginResult | null> {
   if (!email || !password) return null;
   if (tenantId) return loginWithEmail(db, email, password, tenantId);
 
-  const platform = loginWithEmail(db, email, password); // platform path (no tenantId)
+  const platform = await loginWithEmail(db, email, password); // platform path (no tenantId)
   if (platform) return platform;
 
-  const rows = db
-    .prepare('SELECT DISTINCT tenant_id FROM users WHERE email = ? COLLATE NOCASE')
-    .all(email) as { tenant_id: string }[];
+  const rows = await db
+    .selectFrom('users')
+    .distinct()
+    .select('tenant_id')
+    .where(sql`lower(email)`, '=', email.toLowerCase())
+    .execute();
   for (const r of rows) {
-    const res = loginWithEmail(db, email, password, r.tenant_id);
+    const res = await loginWithEmail(db, email, password, r.tenant_id);
     if (res) return res;
   }
   return null;
 }
 
-export function getMeInfo(
-  db: Database.Database,
+export async function getMeInfo(
+  db: Db,
   payload: TokenPayload
-): Record<string, unknown> | null {
+): Promise<Record<string, unknown> | null> {
   if (payload.type === 'platform') {
-    const u = db
-      .prepare('SELECT id, email, name, role, created_at FROM platform_users WHERE id = ?')
-      .get(payload.sub) as { id: string; email: string; name: string; role: string; created_at: string } | undefined;
+    const u = await db
+      .selectFrom('platform_users')
+      .select(['id', 'email', 'name', 'role', 'created_at'])
+      .where('id', '=', payload.sub)
+      .executeTakeFirst();
     if (!u) return null;
     return { ...u, type: 'platform' };
   }
 
   // tenant user (including impersonation)
   if (!payload.tenantId) return null;
-  const u = db
-    .prepare('SELECT id, email, name, role, status, created_at FROM users WHERE id = ? AND tenant_id = ?')
-    .get(payload.sub, payload.tenantId) as
-    | { id: string; email: string; name: string; role: string; status: string; created_at: string }
-    | undefined;
+  const u = await db
+    .selectFrom('users')
+    .select(['id', 'email', 'name', 'role', 'status', 'created_at'])
+    .where('id', '=', payload.sub)
+    .where('tenant_id', '=', payload.tenantId)
+    .executeTakeFirst();
 
   if (payload.impersonatedBy) {
     // Synthetic impersonation session may not have a real sub; return synthetic info
@@ -156,6 +166,6 @@ export function getMeInfo(
   }
 
   if (!u) return null;
-  const tenant = db.prepare('SELECT name FROM tenants WHERE id = ?').get(payload.tenantId) as { name: string } | undefined;
+  const tenant = await db.selectFrom('tenants').select('name').where('id', '=', payload.tenantId).executeTakeFirst();
   return { ...u, type: 'tenant', tenantId: payload.tenantId, tenant_name: tenant?.name ?? null };
 }

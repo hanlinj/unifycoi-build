@@ -7,7 +7,7 @@
 // see peekResetToken's docstring for the (small, flagged) trade-off.
 
 import { NextResponse } from 'next/server';
-import { getRawDb } from '@/lib/db/client';
+import { getDb } from '@/lib/db/client';
 import { ok, badRequest } from '@/lib/api';
 import { peekResetToken } from '@/lib/services/password-reset';
 
@@ -18,5 +18,5 @@ export async function GET(request: Request): Promise<NextResponse> {
   const token = new URL(request.url).searchParams.get('token');
   if (!token) return badRequest('token is required');
 
-  return ok(peekResetToken(getRawDb(), token));
+  return ok(await peekResetToken(getDb(), token));
 }

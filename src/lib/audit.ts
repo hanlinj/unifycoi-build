@@ -1,5 +1,5 @@
 import { randomUUID } from 'crypto';
-import type Database from 'better-sqlite3';
+import type { Db } from '@/lib/db/client';
 import { TenantDB } from '@/lib/db/tenant';
 
 export interface AuditEventInput {
@@ -12,9 +12,9 @@ export interface AuditEventInput {
   payload?: Record<string, unknown> | null;
 }
 
-export function logAudit(db: Database.Database, event: AuditEventInput): void {
+export async function logAudit(db: Db, event: AuditEventInput): Promise<void> {
   const tdb = new TenantDB(db, event.tenantId);
-  tdb.insert('audit_events', {
+  await tdb.insert('audit_events', {
     id: randomUUID(),
     actor_type: event.actorType,
     actor_id: event.actorId ?? null,
@@ -22,6 +22,6 @@ export function logAudit(db: Database.Database, event: AuditEventInput): void {
     target_type: event.targetType ?? null,
     target_id: event.targetId ?? null,
     payload_json: event.payload ? JSON.stringify(event.payload) : null,
-    created_at: new Date().toISOString(),
+    created_at: new Date(),
   });
 }

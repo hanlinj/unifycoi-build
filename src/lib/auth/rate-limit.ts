@@ -6,9 +6,13 @@
 // within the window, count(scope) >= max(scope) means blocked. Blocked attempts are NOT
 // recorded, so a quiet window ages out and the soft lock self-lifts. A successful login
 // clears the email scope; the IP scope is a rolling window and survives a single success.
+//
+// created_at is a real `timestamptz` now (Stage 3) — the window math is a true timestamp
+// comparison, not the SQLite-era string-lexicographic comparison migration 010's own comment
+// flagged as fragile.
 
 import { randomUUID } from 'crypto';
-import type Database from 'better-sqlite3';
+import type { Db } from '@/lib/db/client';
 import { env } from '@/lib/env';
 
 export interface LoginRateConfig {
@@ -47,22 +51,23 @@ function normEmail(email: string): string {
  * When blocked, the block lifts once enough of the oldest failures age out of the window
  * to drop the in-window count below `max` — that is the failure at index (len - max).
  */
-function evalScope(
-  db: Database.Database,
+async function evalScope(
+  db: Db,
   scopeType: 'email' | 'ip',
   scopeKey: string,
-  windowStartIso: string,
+  windowStart: Date,
   max: number,
   windowSeconds: number,
   nowMs: number
-): number {
-  const rows = db
-    .prepare(
-      `SELECT created_at FROM login_attempts
-       WHERE scope_type = ? AND scope_key = ? AND created_at > ?
-       ORDER BY created_at ASC`
-    )
-    .all(scopeType, scopeKey, windowStartIso) as { created_at: string }[];
+): Promise<number> {
+  const rows = await db
+    .selectFrom('login_attempts')
+    .select('created_at')
+    .where('scope_type', '=', scopeType)
+    .where('scope_key', '=', scopeKey)
+    .where('created_at', '>', windowStart)
+    .orderBy('created_at', 'asc')
+    .execute();
 
   if (rows.length < max) return 0;
   const pivot = rows[rows.length - max]; // oldest failure that must age out to reach max-1
@@ -71,30 +76,31 @@ function evalScope(
 }
 
 /** Check BEFORE attempting a login. Blocked if either the email OR the IP scope is over. */
-export function checkLoginRate(
-  db: Database.Database,
+export async function checkLoginRate(
+  db: Db,
   key: LoginRateKey,
   now: Date = new Date(),
   cfg: LoginRateConfig = loginRateConfig()
-): RateDecision {
+): Promise<RateDecision> {
   const nowMs = now.getTime();
-  const windowStartIso = new Date(nowMs - cfg.windowSeconds * 1000).toISOString();
+  const windowStart = new Date(nowMs - cfg.windowSeconds * 1000);
 
-  const emailRetry = evalScope(db, 'email', normEmail(key.email), windowStartIso, cfg.maxPerEmail, cfg.windowSeconds, nowMs);
-  const ipRetry = evalScope(db, 'ip', key.ip, windowStartIso, cfg.maxPerIp, cfg.windowSeconds, nowMs);
+  const emailRetry = await evalScope(db, 'email', normEmail(key.email), windowStart, cfg.maxPerEmail, cfg.windowSeconds, nowMs);
+  const ipRetry = await evalScope(db, 'ip', key.ip, windowStart, cfg.maxPerIp, cfg.windowSeconds, nowMs);
 
   const retryAfterSeconds = Math.max(emailRetry, ipRetry);
   return { allowed: retryAfterSeconds === 0, retryAfterSeconds };
 }
 
 /** Record ONE failed attempt against both the email and IP scopes. */
-export function recordLoginFailure(db: Database.Database, key: LoginRateKey, now: Date = new Date()): void {
-  const iso = now.toISOString();
-  const stmt = db.prepare(
-    `INSERT INTO login_attempts (id, scope_type, scope_key, created_at) VALUES (?, ?, ?, ?)`
-  );
-  stmt.run(randomUUID(), 'email', normEmail(key.email), iso);
-  stmt.run(randomUUID(), 'ip', key.ip, iso);
+export async function recordLoginFailure(db: Db, key: LoginRateKey, now: Date = new Date()): Promise<void> {
+  await db
+    .insertInto('login_attempts')
+    .values([
+      { id: randomUUID(), scope_type: 'email', scope_key: normEmail(key.email), created_at: now },
+      { id: randomUUID(), scope_type: 'ip', scope_key: key.ip, created_at: now },
+    ])
+    .execute();
 }
 
 /**
@@ -103,6 +109,6 @@ export function recordLoginFailure(db: Database.Database, key: LoginRateKey, now
  * Deliberately does NOT touch the IP scope — the rolling IP window must survive one
  * success so a valid login can't wipe an attacker's IP count.
  */
-export function clearLoginFailuresForEmail(db: Database.Database, email: string): void {
-  db.prepare(`DELETE FROM login_attempts WHERE scope_type = 'email' AND scope_key = ?`).run(normEmail(email));
+export async function clearLoginFailuresForEmail(db: Db, email: string): Promise<void> {
+  await db.deleteFrom('login_attempts').where('scope_type', '=', 'email').where('scope_key', '=', normEmail(email)).execute();
 }

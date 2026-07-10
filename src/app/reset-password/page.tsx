@@ -7,7 +7,7 @@
 // self-fetch, same convention as the fleet/provisioning pages) so the right state renders on
 // first paint, never flashing a password field for a dead token.
 
-import { getRawDb } from '@/lib/db/client';
+import { getDb } from '@/lib/db/client';
 import { peekResetToken, type TokenPeek } from '@/lib/services/password-reset';
 import { CredentialSetForm } from './CredentialSetForm';
 import { RequestNewLinkForm } from './RequestNewLinkForm';
@@ -15,9 +15,9 @@ import * as s from './styles';
 
 export const dynamic = 'force-dynamic';
 
-export default function ResetPasswordPage({ searchParams }: { searchParams: { token?: string } }) {
+export default async function ResetPasswordPage({ searchParams }: { searchParams: { token?: string } }) {
   const token = searchParams.token;
-  const peek: TokenPeek = token ? peekResetToken(getRawDb(), token) : { status: 'invalid' };
+  const peek: TokenPeek = token ? await peekResetToken(getDb(), token) : { status: 'invalid' };
 
   if (peek.status === 'invalid') {
     return (

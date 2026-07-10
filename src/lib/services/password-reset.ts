@@ -17,9 +17,16 @@
 //
 // Reset does NOT invalidate live JWT sessions this phase (stateless JWT; 8h expiry is the
 // bound). token_version session-invalidation is deferred to Phase 12.
+//
+// Phase 13 migration, Stage 3: these are platform-level/cross-tenant raw queries (no tenant
+// context exists yet at the point a token is looked up by hash alone), so — same as auth.ts —
+// they use Kysely's query builder directly rather than TenantDB. Email match: SQLite's
+// `COLLATE NOCASE` → Postgres `lower(email) = lower($)` (Stage 0's catalogued rework spot).
 
 import { randomUUID } from 'crypto';
-import type Database from 'better-sqlite3';
+import { sql } from 'kysely';
+import type { Db } from '@/lib/db/client';
+import { withTransaction } from '@/lib/db/transaction';
 import { hashPassword } from '@/lib/auth/password';
 import { generateResetToken, hashResetToken } from '@/lib/auth/reset-token';
 import { queueNotification } from '@/lib/notifications/queue';
@@ -40,12 +47,12 @@ interface ResettableUser {
  * same DB order login uses. Multi-tenant-email ambiguity inherits login's first-match
  * behavior (named in the checkpoint). Platform users are out of scope this phase.
  */
-function resolveResettableUser(db: Database.Database, email: string): ResettableUser | null {
-  const rows = db
-    .prepare(
-      `SELECT id, tenant_id, password_hash, status FROM users WHERE email = ? COLLATE NOCASE`
-    )
-    .all(email) as { id: string; tenant_id: string; password_hash: string | null; status: string }[];
+async function resolveResettableUser(db: Db, email: string): Promise<ResettableUser | null> {
+  const rows = await db
+    .selectFrom('users')
+    .select(['id', 'tenant_id', 'password_hash', 'status'])
+    .where(sql`lower(email)`, '=', email.toLowerCase())
+    .execute();
   for (const r of rows) {
     if (r.status !== 'disabled' && r.password_hash) return { id: r.id, tenant_id: r.tenant_id };
   }
@@ -73,28 +80,30 @@ function resolveResettableUser(db: Database.Database, email: string): Resettable
  * audit records that a reset was requested, not the credential itself (same principle as the
  * dev-gated logDevInviteUrl never being reachable in production).
  */
-export function requestPasswordReset(
-  db: Database.Database,
+export async function requestPasswordReset(
+  db: Db,
   input: { email: string },
   now: Date = new Date()
-): void {
+): Promise<void> {
   const { rawToken, tokenHash } = generateResetToken(); // computed regardless (timing symmetry)
-  const user = resolveResettableUser(db, input.email);
+  const user = await resolveResettableUser(db, input.email);
   if (!user) return; // unknown / disabled / platform-only → silently no-op (no enumeration)
 
-  db.prepare(
-    `INSERT INTO password_reset_tokens (id, tenant_id, user_id, token_hash, expires_at, consumed_at, created_at, purpose)
-     VALUES (?, ?, ?, ?, ?, NULL, ?, 'reset')`
-  ).run(
-    randomUUID(),
-    user.tenant_id,
-    user.id,
-    tokenHash,
-    new Date(now.getTime() + RESET_TTL_MS).toISOString(),
-    now.toISOString()
-  );
+  await db
+    .insertInto('password_reset_tokens')
+    .values({
+      id: randomUUID(),
+      tenant_id: user.tenant_id,
+      user_id: user.id,
+      token_hash: tokenHash,
+      expires_at: new Date(now.getTime() + RESET_TTL_MS),
+      consumed_at: null,
+      created_at: now,
+      purpose: 'reset',
+    })
+    .execute();
 
-  logAudit(db, {
+  await logAudit(db, {
     tenantId: user.tenant_id,
     actorType: 'system',
     actorId: 'password-reset-request',
@@ -105,7 +114,7 @@ export function requestPasswordReset(
 
   // A reset is just another notification type — queued to the internal user, sent by the
   // Slice 1 worker with internal (UnifyCOI) From. The raw token rides in the link only.
-  queueNotification(db, user.tenant_id, {
+  await queueNotification(db, user.tenant_id, {
     recipientType: 'user',
     recipientRef: user.id,
     kind: 'exception', // action-needed → immediate
@@ -120,20 +129,29 @@ export function requestPasswordReset(
  * NOT queue a notification: the wizard surfaces the raw link directly to the operator, who
  * sends it out-of-band at their own pace (white-glove onboarding, not an emailed reset).
  */
-export function issueInviteToken(
-  db: Database.Database,
+export async function issueInviteToken(
+  db: Db,
   input: { tenantId: string; userId: string },
   now: Date = new Date()
-): { rawToken: string; expiresAt: string } {
+): Promise<{ rawToken: string; expiresAt: string }> {
   const { rawToken, tokenHash } = generateResetToken();
-  const expiresAt = new Date(now.getTime() + INVITE_TTL_MS).toISOString();
+  const expiresAt = new Date(now.getTime() + INVITE_TTL_MS);
 
-  db.prepare(
-    `INSERT INTO password_reset_tokens (id, tenant_id, user_id, token_hash, expires_at, consumed_at, created_at, purpose)
-     VALUES (?, ?, ?, ?, ?, NULL, ?, 'invite')`
-  ).run(randomUUID(), input.tenantId, input.userId, tokenHash, expiresAt, now.toISOString());
+  await db
+    .insertInto('password_reset_tokens')
+    .values({
+      id: randomUUID(),
+      tenant_id: input.tenantId,
+      user_id: input.userId,
+      token_hash: tokenHash,
+      expires_at: expiresAt,
+      consumed_at: null,
+      created_at: now,
+      purpose: 'invite',
+    })
+    .execute();
 
-  return { rawToken, expiresAt };
+  return { rawToken, expiresAt: expiresAt.toISOString() };
 }
 
 const BILLING_SETUP_TTL_MS = 90 * 24 * 60 * 60 * 1000; // ~90d — operator-paced, same spirit as invites
@@ -147,20 +165,29 @@ const BILLING_SETUP_TTL_MS = 90 * 24 * 60 * 60 * 1000; // ~90d — operator-pace
  * mid-entry, so nothing here ever sets consumed_at. Whether setup is "done" is read off the
  * tenant's lifecycle_state by the caller — same status-is-authoritative principle as Slice 4a.
  */
-export function issueBillingSetupToken(
-  db: Database.Database,
+export async function issueBillingSetupToken(
+  db: Db,
   input: { tenantId: string; userId: string },
   now: Date = new Date()
-): { rawToken: string; expiresAt: string } {
+): Promise<{ rawToken: string; expiresAt: string }> {
   const { rawToken, tokenHash } = generateResetToken();
-  const expiresAt = new Date(now.getTime() + BILLING_SETUP_TTL_MS).toISOString();
+  const expiresAt = new Date(now.getTime() + BILLING_SETUP_TTL_MS);
 
-  db.prepare(
-    `INSERT INTO password_reset_tokens (id, tenant_id, user_id, token_hash, expires_at, consumed_at, created_at, purpose)
-     VALUES (?, ?, ?, ?, ?, NULL, ?, 'billing_setup')`
-  ).run(randomUUID(), input.tenantId, input.userId, tokenHash, expiresAt, now.toISOString());
+  await db
+    .insertInto('password_reset_tokens')
+    .values({
+      id: randomUUID(),
+      tenant_id: input.tenantId,
+      user_id: input.userId,
+      token_hash: tokenHash,
+      expires_at: expiresAt,
+      consumed_at: null,
+      created_at: now,
+      purpose: 'billing_setup',
+    })
+    .execute();
 
-  return { rawToken, expiresAt };
+  return { rawToken, expiresAt: expiresAt.toISOString() };
 }
 
 export type BillingSetupTokenStatus = 'valid' | 'expired' | 'invalid';
@@ -176,16 +203,18 @@ export interface BillingSetupTokenPeek {
  * page is meant to be revisited (declined card, closed tab) until the tenant actually activates,
  * which the caller checks via lifecycle_state, not via this function.
  */
-export function resolveBillingSetupToken(
-  db: Database.Database,
+export async function resolveBillingSetupToken(
+  db: Db,
   rawToken: string,
   now: Date = new Date()
-): BillingSetupTokenPeek {
-  const row = db
-    .prepare(`SELECT tenant_id, expires_at, purpose FROM password_reset_tokens WHERE token_hash = ?`)
-    .get(hashResetToken(rawToken)) as { tenant_id: string; expires_at: string; purpose: string } | undefined;
+): Promise<BillingSetupTokenPeek> {
+  const row = await db
+    .selectFrom('password_reset_tokens')
+    .select(['tenant_id', 'expires_at', 'purpose'])
+    .where('token_hash', '=', hashResetToken(rawToken))
+    .executeTakeFirst();
   if (!row || row.purpose !== 'billing_setup') return { status: 'invalid' };
-  if (new Date(row.expires_at).getTime() <= now.getTime()) return { status: 'expired' };
+  if (row.expires_at.getTime() <= now.getTime()) return { status: 'expired' };
   return { status: 'valid', tenantId: row.tenant_id };
 }
 
@@ -213,29 +242,31 @@ export interface TokenPeek {
  * The raw token is an unguessable 256-bit value, so the marginal oracle value to an attacker
  * is negligible — but it IS a real, deliberate trade for the UX this page needs.
  */
-export function peekResetToken(
-  db: Database.Database,
+export async function peekResetToken(
+  db: Db,
   rawToken: string,
   now: Date = new Date()
-): TokenPeek {
-  const row = db
-    .prepare(
-      `SELECT user_id, tenant_id, expires_at, consumed_at FROM password_reset_tokens WHERE token_hash = ? AND purpose != 'billing_setup'`
-    )
-    .get(hashResetToken(rawToken)) as
-    | { user_id: string; tenant_id: string; expires_at: string; consumed_at: string | null }
-    | undefined;
+): Promise<TokenPeek> {
+  const row = await db
+    .selectFrom('password_reset_tokens')
+    .select(['user_id', 'tenant_id', 'expires_at', 'consumed_at'])
+    .where('token_hash', '=', hashResetToken(rawToken))
+    .where('purpose', '!=', 'billing_setup')
+    .executeTakeFirst();
   if (!row) return { status: 'invalid' };
 
-  const user = db
-    .prepare(`SELECT status FROM users WHERE id = ? AND tenant_id = ?`)
-    .get(row.user_id, row.tenant_id) as { status: string } | undefined;
-  const tenant = db.prepare(`SELECT name FROM tenants WHERE id = ?`).get(row.tenant_id) as { name: string } | undefined;
+  const user = await db
+    .selectFrom('users')
+    .select('status')
+    .where('id', '=', row.user_id)
+    .where('tenant_id', '=', row.tenant_id)
+    .executeTakeFirst();
+  const tenant = await db.selectFrom('tenants').select('name').where('id', '=', row.tenant_id).executeTakeFirst();
   const userStatus = user?.status;
   const tenantName = tenant?.name;
 
   if (row.consumed_at) return { status: 'consumed', userStatus, tenantName };
-  if (new Date(row.expires_at).getTime() <= now.getTime()) return { status: 'expired', userStatus, tenantName };
+  if (row.expires_at.getTime() <= now.getTime()) return { status: 'expired', userStatus, tenantName };
   if (!user || !tenant) return { status: 'invalid' }; // defensive; FK integrity should prevent this
   return { status: 'valid', userId: row.user_id, tenantId: row.tenant_id, userStatus, tenantName };
 }
@@ -248,46 +279,52 @@ export type ConfirmResult =
  * Confirm a reset: validate the token, set the new password, consume this token, and
  * invalidate all other outstanding tokens for that user.
  */
-export function confirmPasswordReset(
-  db: Database.Database,
+export async function confirmPasswordReset(
+  db: Db,
   input: { rawToken: string; newPassword: string },
   now: Date = new Date()
-): ConfirmResult {
+): Promise<ConfirmResult> {
   if (!isPasswordValid(input.newPassword)) {
     return { ok: false, reason: 'weak_password' };
   }
 
-  const row = db
-    .prepare(
-      `SELECT id, tenant_id, user_id, expires_at, consumed_at FROM password_reset_tokens WHERE token_hash = ? AND purpose != 'billing_setup'`
-    )
-    .get(hashResetToken(input.rawToken)) as
-    | { id: string; tenant_id: string; user_id: string; expires_at: string; consumed_at: string | null }
-    | undefined;
+  const row = await db
+    .selectFrom('password_reset_tokens')
+    .select(['id', 'tenant_id', 'user_id', 'expires_at', 'consumed_at'])
+    .where('token_hash', '=', hashResetToken(input.rawToken))
+    .where('purpose', '!=', 'billing_setup')
+    .executeTakeFirst();
 
   if (!row) return { ok: false, reason: 'invalid_token' };
   if (row.consumed_at) return { ok: false, reason: 'invalid_token' }; // single-use
-  if (new Date(row.expires_at).getTime() <= now.getTime()) return { ok: false, reason: 'invalid_token' };
+  if (row.expires_at.getTime() <= now.getTime()) return { ok: false, reason: 'invalid_token' };
 
-  const nowIso = now.toISOString();
-  const tx = db.transaction(() => {
+  await withTransaction(db, async (trx) => {
     // Setting a password consumes the "invited" (no-credential) state too — this same token
     // machinery backs both password-reset (already active) and invite-accept (first login),
     // so an invited user who lands here via their invite link becomes active in one step.
-    db.prepare(
-      `UPDATE users SET password_hash = ?, status = CASE WHEN status = 'invited' THEN 'active' ELSE status END
-       WHERE id = ? AND tenant_id = ?`
-    ).run(hashPassword(input.newPassword), row.user_id, row.tenant_id);
+    await trx
+      .updateTable('users')
+      .set({
+        password_hash: hashPassword(input.newPassword),
+        status: sql`CASE WHEN status = 'invited' THEN 'active' ELSE status END`,
+      })
+      .where('id', '=', row.user_id)
+      .where('tenant_id', '=', row.tenant_id)
+      .execute();
     // Consume this token and invalidate every other outstanding reset/invite token for the
     // user — a password change invalidates all of those. Billing-setup tokens are excluded:
     // they're a different purpose (never "consumed" in this sense; gated on lifecycle_state,
     // not consumed_at) and shouldn't be touched by an unrelated credential change.
-    db.prepare(
-      `UPDATE password_reset_tokens SET consumed_at = ?
-       WHERE tenant_id = ? AND user_id = ? AND consumed_at IS NULL AND purpose != 'billing_setup'`
-    ).run(nowIso, row.tenant_id, row.user_id);
+    await trx
+      .updateTable('password_reset_tokens')
+      .set({ consumed_at: now })
+      .where('tenant_id', '=', row.tenant_id)
+      .where('user_id', '=', row.user_id)
+      .where('consumed_at', 'is', null)
+      .where('purpose', '!=', 'billing_setup')
+      .execute();
   });
-  tx();
 
   return { ok: true, userId: row.user_id, tenantId: row.tenant_id };
 }

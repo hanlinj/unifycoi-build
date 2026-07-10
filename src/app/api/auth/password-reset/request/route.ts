@@ -3,7 +3,7 @@
 // {email, ip} key. Cookie-less (unauthenticated) — must be CSRF-exempt in Slice 4.
 
 import { NextResponse } from 'next/server';
-import { getRawDb } from '@/lib/db/client';
+import { getDb } from '@/lib/db/client';
 import { ok, badRequest, tooManyRequests, clientIp } from '@/lib/api';
 import { checkLoginRate, recordLoginFailure } from '@/lib/auth/rate-limit';
 import { requestPasswordReset } from '@/lib/services/password-reset';
@@ -23,15 +23,15 @@ export async function POST(request: Request): Promise<NextResponse> {
   const { email } = body as Record<string, unknown>;
   if (typeof email !== 'string' || !email) return badRequest('email is required');
 
-  const db = getRawDb();
+  const db = getDb();
   const ip = clientIp(request);
 
   // Same throttle as login: a reset request counts against the {email, ip} key, so
   // reset-spam is bounded and pools with failed logins. Generic 429 — no factor revealed.
-  const decision = checkLoginRate(db, { email, ip });
+  const decision = await checkLoginRate(db, { email, ip });
   if (!decision.allowed) return tooManyRequests(decision.retryAfterSeconds);
-  recordLoginFailure(db, { email, ip });
+  await recordLoginFailure(db, { email, ip });
 
-  requestPasswordReset(db, { email }); // no-op when the email doesn't resolve
+  await requestPasswordReset(db, { email }); // no-op when the email doesn't resolve
   return ok({ message: GENERIC }, 200); // identical regardless of existence
 }
