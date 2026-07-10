@@ -2,10 +2,10 @@ import React from 'react';
 import { ArrowUpRight } from 'lucide-react';
 import { cn } from './cn';
 
-/** Section panel — the large rounded container (radius-panel, soft layered shadow). */
+/** Section panel — the large rounded container. Hairline border only, no decorative shadow. */
 export function Panel({ className, children, ...rest }: React.HTMLAttributes<HTMLDivElement>) {
   return (
-    <section className={cn('rounded-panel border border-border bg-surface p-6 shadow-panel', className)} {...rest}>
+    <section className={cn('rounded-panel border border-border bg-surface p-6', className)} {...rest}>
       {children}
     </section>
   );
@@ -42,7 +42,7 @@ export interface StatCardProps {
   delta?: React.ReactNode;
   /** delta color intent (default muted; success = up/green, danger = needs-action). */
   deltaTone?: 'muted' | 'success' | 'danger';
-  /** The lime hero card (one per row). */
+  /** Selected/highlighted card (one per row) — blue border + blue value, not a filled block. */
   feature?: boolean;
   className?: string;
 }
@@ -53,32 +53,32 @@ const DELTA: Record<NonNullable<StatCardProps['deltaTone']>, string> = {
   danger: 'text-danger',
 };
 
-/** KPI stat card. `feature` = the lime hero metric; others are white with a corner arrow badge. */
+/** KPI stat card. `feature` = the selected metric (blue border + blue value); others are neutral. */
 export function StatCard({ label, value, delta, deltaTone = 'muted', feature, className }: StatCardProps) {
   return (
     <div
       className={cn(
-        'relative flex min-h-[130px] flex-col justify-between rounded-card p-[18px]',
-        feature ? 'bg-accent shadow-[0_12px_30px_-14px_rgba(207,240,74,0.9)]' : 'border border-border bg-surface',
+        'relative flex min-h-[130px] flex-col justify-between rounded-card border bg-surface p-[18px]',
+        feature ? 'border-accent' : 'border-border',
         className
       )}
     >
       <span
         className={cn(
-          'absolute right-4 top-4 grid h-[34px] w-[34px] place-items-center rounded-full',
-          feature ? 'bg-[rgba(24,26,12,0.12)]' : 'border border-border bg-surface-2'
+          'absolute right-4 top-4 grid h-[34px] w-[34px] place-items-center rounded-full border',
+          feature ? 'border-transparent bg-accent-soft' : 'border-border bg-surface-2'
         )}
       >
-        <ArrowUpRight size={15} strokeWidth={2.5} className={feature ? 'text-accent-ink' : 'text-fg-muted'} />
+        <ArrowUpRight size={15} strokeWidth={2.5} className={feature ? 'text-accent' : 'text-fg-muted'} />
       </span>
-      <div className={cn('text-[11px] font-bold uppercase tracking-[0.09em]', feature ? 'text-[rgba(24,26,12,0.62)]' : 'text-fg-muted')}>
+      <div className="text-[11px] font-bold uppercase tracking-[0.09em] text-fg-muted">
         {label}
       </div>
-      <div className={cn('text-[34px] font-extrabold leading-none tracking-[-0.03em] tabular-nums', feature ? 'text-accent-ink' : 'text-fg')}>
+      <div className={cn('text-[34px] font-extrabold leading-none tracking-[-0.03em] tabular-nums', feature ? 'text-accent' : 'text-fg')}>
         {value}
       </div>
       {delta != null && (
-        <div className={cn('flex items-center gap-1 text-xs font-semibold', feature ? 'text-accent-ink opacity-75' : DELTA[deltaTone])}>
+        <div className={cn('flex items-center gap-1 text-xs font-semibold', feature ? 'text-accent' : DELTA[deltaTone])}>
           {delta}
         </div>
       )}

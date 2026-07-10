@@ -1,5 +1,5 @@
-// Design-system primitives (Phase 12 Slice 1). One import surface for the UI kit.
-// Tokens + look come from refdoc/unifycoi-design-system.html (lime + graphite ops theme).
+// Design-system primitives (Phase 12 Slice 1, restored blue palette — ADR-012-11). One import
+// surface for the UI kit. Tokens + look come from refdoc/unifycoi-design-system.html.
 export { cn } from './cn';
 export { Button, type ButtonProps, type ButtonVariant, type ButtonSize } from './Button';
 export { Input, Textarea, Select, FormField, type FormFieldProps } from './Field';

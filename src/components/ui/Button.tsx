@@ -1,8 +1,8 @@
 import React from 'react';
 import { cn } from './cn';
 
-// Variants per the design system: primary = graphite action (provision/create);
-// accent = lime brand highlight (the key affirmative CTA, e.g. Approve); danger; outline; ghost.
+// Variants: primary/accent both resolve to the single restored blue accent (no second action
+// color) — kept as two variant names for call-site stability, not two colors.
 export type ButtonVariant = 'primary' | 'accent' | 'danger' | 'outline' | 'ghost';
 export type ButtonSize = 'sm' | 'md';
 
@@ -12,9 +12,9 @@ export interface ButtonProps extends React.ButtonHTMLAttributes<HTMLButtonElemen
 }
 
 const VARIANT: Record<ButtonVariant, string> = {
-  primary: 'bg-action text-white shadow-raise hover:bg-black',
-  accent: 'bg-accent text-accent-ink font-bold shadow-[0_6px_16px_-8px_rgba(207,240,74,0.9)] hover:brightness-[1.02]',
-  danger: 'bg-danger text-white hover:bg-[#d24638]',
+  primary: 'bg-accent text-white hover:bg-accent-emphasis',
+  accent: 'bg-accent text-white font-bold hover:bg-accent-emphasis',
+  danger: 'bg-danger text-white hover:bg-danger-emphasis',
   outline: 'bg-surface text-fg border-border-strong hover:bg-surface-2',
   ghost: 'bg-transparent text-fg-muted hover:bg-surface-2 hover:text-fg',
 };

@@ -65,7 +65,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           <div style={{ fontWeight: 600, fontSize: 14 }}>{me?.tenant_name ?? 'UnifyCOI'}</div>
           <div style={{ flex: 1 }} />
           <button onClick={() => window.dispatchEvent(new CustomEvent('uc:open-invite'))}
-            style={{ border: 'none', background: '#1f883d', color: 'white', borderRadius: 6, padding: '6px 14px', fontSize: 13, fontWeight: 600, cursor: 'pointer' }}>
+            style={{ border: 'none', background: '#0969da', color: 'white', borderRadius: 6, padding: '6px 14px', fontSize: 13, fontWeight: 600, cursor: 'pointer' }}>
             + Invite vendor
           </button>
           <button aria-label="Search" title="Search (⌘K)" onClick={() => window.dispatchEvent(new CustomEvent('uc:open-search'))}

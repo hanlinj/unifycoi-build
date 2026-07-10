@@ -16,7 +16,7 @@ export interface TabsProps {
   className?: string;
 }
 
-/** Segmented tabs (pill container; active tab is a raised surface card). Matches the spec. */
+/** Segmented tabs (pill container; active tab is a plain surface card, no shadow). */
 export function Tabs({ tabs, value, onChange, className }: TabsProps) {
   return (
     <div role="tablist" className={cn('inline-flex gap-1 rounded-ctl bg-surface-2 p-1', className)}>
@@ -31,7 +31,7 @@ export function Tabs({ tabs, value, onChange, className }: TabsProps) {
             onClick={() => onChange(t.id)}
             className={cn(
               'inline-flex items-center gap-2 rounded-[9px] px-[14px] py-2 text-[13px] font-semibold transition-all duration-100',
-              active ? 'bg-surface text-fg shadow-raise' : 'text-fg-muted hover:text-fg'
+              active ? 'bg-surface text-fg' : 'text-fg-muted hover:text-fg'
             )}
           >
             {t.label}

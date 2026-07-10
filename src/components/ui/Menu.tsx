@@ -39,7 +39,7 @@ export function Menu({ trigger, children, align = 'right', className }: MenuProp
           role="menu"
           onClick={() => setOpen(false)}
           className={cn(
-            'absolute z-20 mt-1 min-w-[160px] overflow-hidden rounded-ctl border border-border bg-surface py-1 shadow-panel',
+            'absolute z-20 mt-1 min-w-[160px] overflow-hidden rounded-ctl border border-border bg-surface py-1 shadow-overlay',
             align === 'right' ? 'right-0' : 'left-0'
           )}
         >

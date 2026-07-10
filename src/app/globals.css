@@ -2,44 +2,54 @@
 @tailwind components;
 @tailwind utilities;
 
-/* Design-system tokens — verbatim from refdoc/unifycoi-design-system.html (the authoritative
-   spec). This :root is the single source of truth; tailwind.config.ts maps utilities to these
-   vars. "Lime + graphite ops theme." */
+/* Design-system tokens (Phase 12 Slice 1, restored — ADR-012-11 reverses ADR-012-01's lime +
+   graphite theme). Values are Slice 1's original palette (commit 368e6e8): one blue accent
+   (#0969da), Primer-family neutrals. `action`/`info` are aliased to `accent` below — the lime
+   era's separate dark "action" and cornflower "info" colors are retired; there is only one
+   accent color now. tailwind.config.ts maps utilities to these vars. */
 :root {
   /* surfaces */
-  --canvas: #EDECEF;
+  --canvas: #F6F8FA;
   --surface: #FFFFFF;
-  --surface-2: #F5F5F7;
-  --border: #E8E8EC;
-  --border-strong: #DEDEE4;
+  --surface-2: #EEF1F4;
+  --border: #D0D7DE;
+  --border-strong: #D0D7DE; /* Slice 1 had one border shade, not a separate "strong" tier */
+  --border-control: #DAE1E8; /* softer/lighter — form inputs only (polish pass), not hairlines */
 
   /* text */
-  --fg: #191A1E;
-  --fg-muted: #8B8C93;
+  --fg: #1F2328;
+  --fg-muted: #57606A;
 
-  /* brand + semantic */
-  --accent: #CFF04A;        /* lime — the brand highlight */
-  --accent-ink: #181A0C;    /* text on lime */
-  --accent-soft: #F1FADA;
-  --action: #191A1E;        /* primary action (dark) */
-  --info: #6E8BE8;          /* cornflower blue */
-  --info-ink: #3B57BE;
-  --info-soft: #EAEFFC;
-  --success: #2FA26A;
-  --success-soft: #E4F5EC;
-  --attention: #D79A2A;
-  --attention-soft: #FBF2DA;
-  --danger: #E0574C;
-  --danger-soft: #FCE7E4;
+  /* brand + semantic — ONE blue */
+  --accent: #0969DA;
+  --accent-emphasis: #0550AE;
+  --accent-ink: #FFFFFF;    /* text on solid accent fills */
+  --accent-soft: #DDF4FF;
+  --action: var(--accent);  /* alias — lime era's separate dark "action" color, retired */
+  --info: var(--accent);    /* alias — lime era's separate cornflower "info" color, retired */
+  --info-ink: var(--accent-emphasis);
+  --info-soft: var(--accent-soft);
+  --success: #1F883D;
+  --success-soft: #DAFBE1;
+  --attention: #9A6700;
+  --attention-soft: #FFF8C5;
+  --danger: #CF222E;
+  --danger-emphasis: #A40E26;
+  --danger-soft: #FFEBE9;
 
-  /* radii + elevation */
-  --radius-panel: 24px;
-  --radius-card: 18px;
-  --radius-ctl: 12px;
+  /* radii — one step softer than Slice 1's 0.5rem (polish pass); pill stays fully round */
+  --radius-panel: 12px;
+  --radius-card: 10px;
+  --radius-ctl: 10px;
   --radius-pill: 999px;
-  --shadow-panel: 0 1px 2px rgba(17, 18, 22, 0.04), 0 14px 34px -18px rgba(17, 18, 22, 0.16);
-  --shadow-raise: 0 1px 2px rgba(17, 18, 22, 0.05), 0 8px 22px -10px rgba(17, 18, 22, 0.2);
-  --ring: 0 0 0 4px rgba(111, 139, 232, 0.28);
+
+  /* elevation — decorative shadows retired (separation is hairlines + whitespace); a genuinely
+     floating overlay (Modal / Menu dropdown) keeps one minimal functional shadow, Slice 1's own
+     `overlay` value */
+  --shadow-overlay: 0 8px 24px rgba(27, 31, 36, 0.2);
+  --ring: 0 0 0 4px rgba(9, 105, 218, 0.28);
+  /* gentler ring for form-input focus only — keyboard focus elsewhere keeps the crisper --ring */
+  --ring-soft: 0 0 0 3px rgba(9, 105, 218, 0.18);
 }
 
 /* preflight is OFF (tailwind.config.ts) so the design system is additive — the un-retrofitted
@@ -66,11 +76,9 @@
   }
 }
 
-/* The ambient ops canvas (lime + blue radial washes). Applied to platform-shell / DS surfaces
-   via .ds-canvas — NOT the global body, so the tenant app's own backgrounds are unaffected. */
+/* Flat page canvas for platform-shell / DS surfaces (`.ds-canvas`) — NOT the global body, so
+   the tenant app's own backgrounds are unaffected. No gradient wash: separation is hairlines +
+   whitespace, not decoration. */
 .ds-canvas {
-  background:
-    radial-gradient(1100px 520px at 88% -8%, rgba(207, 240, 74, 0.16), transparent 60%),
-    radial-gradient(900px 500px at -6% 8%, rgba(110, 139, 232, 0.1), transparent 55%),
-    var(--canvas);
+  background: var(--canvas);
 }

@@ -24,8 +24,8 @@ export function PlatformShell({ userName, userRole, children }: { userName: stri
     <div className="ds-canvas flex min-h-screen font-sans text-fg">
       <nav aria-label="Platform" className="flex w-[236px] flex-none flex-col gap-1 border-r border-border bg-surface px-3 py-5">
         <div className="mb-5 flex items-center gap-2.5 px-2">
-          <span className="grid h-9 w-9 place-items-center rounded-ctl bg-action shadow-raise">
-            <Hexagon size={18} strokeWidth={2} className="text-accent" />
+          <span className="grid h-9 w-9 place-items-center rounded-ctl bg-action">
+            <Hexagon size={18} strokeWidth={2} className="text-white" />
           </span>
           <div>
             <div className="text-[15px] font-extrabold leading-none tracking-[-0.02em]">UnifyCOI</div>
@@ -55,7 +55,7 @@ export function PlatformShell({ userName, userRole, children }: { userName: stri
                 active ? 'bg-accent-soft text-fg' : 'text-fg-muted hover:bg-surface-2 hover:text-fg'
               )}
             >
-              <Icon size={17} strokeWidth={2} className={active ? 'text-fg' : ''} />
+              <Icon size={17} strokeWidth={2} className={active ? 'text-accent' : ''} />
               {item.label}
             </a>
           );

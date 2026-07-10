@@ -1,7 +1,7 @@
 'use client';
 
-// Design-system gallery (Phase 12 Slice 1) — eyeball every primitive in the lime + graphite
-// ops theme (refdoc/unifycoi-design-system.html). Dev/reference surface, not linked in nav.
+// Design-system gallery (Phase 12 Slice 1, restored blue palette — ADR-012-11) — eyeball every
+// primitive (refdoc/unifycoi-design-system.html). Dev/reference surface, not linked in nav.
 
 import React from 'react';
 import { AlertTriangle, Clock, FileText, Hexagon } from 'lucide-react';
@@ -29,8 +29,8 @@ export default function GalleryPage() {
       <div className="mx-auto max-w-[1120px] px-6 py-10">
         <header className="mb-7 flex items-start justify-between gap-6">
           <div className="flex items-center gap-3">
-            <span className="grid h-10 w-10 place-items-center rounded-ctl bg-action shadow-raise">
-              <Hexagon size={20} strokeWidth={2} className="text-accent" />
+            <span className="grid h-10 w-10 place-items-center rounded-ctl bg-action">
+              <Hexagon size={20} strokeWidth={2} className="text-white" />
             </span>
             <div>
               <h1 className="text-[22px] font-extrabold leading-none tracking-[-0.02em]">UnifyCOI · Design system</h1>
@@ -38,7 +38,7 @@ export default function GalleryPage() {
             </div>
           </div>
           <span className="inline-flex items-center gap-1.5 rounded-pill bg-accent px-3 py-[7px] text-xs font-bold text-accent-ink">
-            <span className="h-1.5 w-1.5 rounded-full bg-accent-ink" /> Lime ops theme
+            <span className="h-1.5 w-1.5 rounded-full bg-accent-ink" /> Blue ops theme
           </span>
         </header>
 

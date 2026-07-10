@@ -6,58 +6,57 @@
 <title>UnifyCOI — Design System</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:ital,wght@0,400;0,500;0,600;0,700;0,800;1,500&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&display=swap" rel="stylesheet">
 <style>
   :root{
     /* ---- surfaces ---- */
-    --canvas:#EDECEF;
+    --canvas:#F6F8FA;
     --surface:#FFFFFF;
-    --surface-2:#F5F5F7;
-    --border:#E8E8EC;
-    --border-strong:#DEDEE4;
+    --surface-2:#EEF1F4;
+    --border:#D0D7DE;
+    --border-strong:#D0D7DE;
+    --border-control:#DAE1E8;   /* softer/lighter — form inputs only */
 
     /* ---- text ---- */
-    --fg:#191A1E;
-    --fg-muted:#8B8C93;
+    --fg:#1F2328;
+    --fg-muted:#57606A;
 
     /* ---- brand + semantic ---- */
-    --accent:#CFF04A;          /* lime — the brand highlight */
-    --accent-ink:#181A0C;      /* text on lime */
-    --accent-soft:#F1FADA;
-    --action:#191A1E;          /* primary action (dark) */
-    --info:#6E8BE8;            /* cornflower blue */
-    --info-ink:#3B57BE;
-    --info-soft:#EAEFFC;
-    --success:#2FA26A;
-    --success-soft:#E4F5EC;
-    --attention:#D79A2A;
-    --attention-soft:#FBF2DA;
-    --danger:#E0574C;
-    --danger-soft:#FCE7E4;
+    --accent:#0969DA;           /* the one blue */
+    --accent-emphasis:#0550AE;
+    --accent-ink:#FFFFFF;       /* text on solid accent fills */
+    --accent-soft:#DDF4FF;
+    --action:var(--accent);     /* alias — no second action color */
+    --info:var(--accent);       /* alias — no second "info" blue */
+    --info-ink:var(--accent-emphasis);
+    --info-soft:var(--accent-soft);
+    --success:#1F883D;
+    --success-soft:#DAFBE1;
+    --attention:#9A6700;
+    --attention-soft:#FFF8C5;
+    --danger:#CF222E;
+    --danger-emphasis:#A40E26;
+    --danger-soft:#FFEBE9;
 
     /* ---- form ---- */
-    --radius-panel:24px;
-    --radius-card:18px;
-    --radius-ctl:12px;
+    --radius-panel:12px;
+    --radius-card:10px;
+    --radius-ctl:10px;
     --radius-pill:999px;
 
-    --shadow-panel:0 1px 2px rgba(17,18,22,.04), 0 14px 34px -18px rgba(17,18,22,.16);
-    --shadow-raise:0 1px 2px rgba(17,18,22,.05), 0 8px 22px -10px rgba(17,18,22,.20);
-
-    --ring:0 0 0 4px rgba(111,139,232,.28);
+    --shadow-overlay:0 8px 24px rgba(27,31,36,.2);
+    --ring:0 0 0 4px rgba(9,105,218,.28);
+    --ring-soft:0 0 0 3px rgba(9,105,218,.18); /* form-input focus only */
   }
 
   *{box-sizing:border-box;}
   html{-webkit-text-size-adjust:100%;}
   body{
     margin:0;
-    background:
-      radial-gradient(1100px 520px at 88% -8%, rgba(207,240,74,.16), transparent 60%),
-      radial-gradient(900px 500px at -6% 8%, rgba(110,139,232,.10), transparent 55%),
-      var(--canvas);
+    background:var(--canvas);
     color:var(--fg);
-    font-family:"Plus Jakarta Sans",-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
-    font-feature-settings:"cv11","ss01","tnum";
+    font-family:"Manrope",-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+    font-feature-settings:"tnum";
     -webkit-font-smoothing:antialiased;
     line-height:1.5;
   }
@@ -68,8 +67,8 @@
   .masthead{display:flex;align-items:flex-start;justify-content:space-between;gap:24px;margin-bottom:28px;flex-wrap:wrap;}
   .brand{display:flex;align-items:center;gap:12px;}
   .logomark{
-    width:40px;height:40px;border-radius:12px;background:var(--action);
-    display:grid;place-items:center;flex:none;box-shadow:var(--shadow-raise);
+    width:40px;height:40px;border-radius:var(--radius-ctl);background:var(--action);
+    display:grid;place-items:center;flex:none;
   }
   .logomark svg{display:block;}
   .brand h1{font-size:22px;font-weight:800;letter-spacing:-.02em;margin:0;line-height:1;}
@@ -84,7 +83,7 @@
   .panel{
     background:var(--surface);border:1px solid var(--border);
     border-radius:var(--radius-panel);padding:24px 26px 28px;
-    box-shadow:var(--shadow-panel);margin-bottom:22px;
+    margin-bottom:22px;
   }
   .eyebrow{
     font-size:11px;font-weight:700;letter-spacing:.12em;text-transform:uppercase;
@@ -96,8 +95,7 @@
   .swatches{display:flex;flex-wrap:wrap;gap:22px;}
   .swatch{display:flex;flex-direction:column;gap:9px;align-items:flex-start;}
   .swatch .chip{
-    width:60px;height:60px;border-radius:16px;border:1px solid rgba(17,18,22,.06);
-    box-shadow:inset 0 0 0 1px rgba(255,255,255,.4);
+    width:60px;height:60px;border-radius:12px;border:1px solid rgba(17,18,22,.06);
   }
   .swatch .name{font-size:12px;font-weight:600;color:var(--fg);}
   .swatch .hex{font-size:11px;color:var(--fg-muted);font-weight:500;letter-spacing:.01em;margin-top:-6px;}
@@ -107,15 +105,15 @@
   .btn{
     font-family:inherit;font-weight:600;font-size:14px;border:1px solid transparent;
     padding:11px 18px;border-radius:var(--radius-ctl);cursor:pointer;line-height:1;
-    display:inline-flex;align-items:center;gap:8px;transition:transform .12s ease, box-shadow .12s ease, background .12s ease;
+    display:inline-flex;align-items:center;gap:8px;transition:transform .12s ease, background .12s ease;
   }
   .btn:active{transform:translateY(1px);}
-  .btn-primary{background:var(--action);color:#fff;box-shadow:var(--shadow-raise);}
-  .btn-primary:hover{background:#000;}
-  .btn-accent{background:var(--accent);color:var(--accent-ink);box-shadow:0 6px 16px -8px rgba(207,240,74,.9);font-weight:700;}
-  .btn-accent:hover{filter:brightness(1.02);}
+  .btn-primary{background:var(--accent);color:#fff;}
+  .btn-primary:hover{background:var(--accent-emphasis);}
+  .btn-accent{background:var(--accent);color:#fff;font-weight:700;}
+  .btn-accent:hover{background:var(--accent-emphasis);}
   .btn-danger{background:var(--danger);color:#fff;}
-  .btn-danger:hover{background:#d24638;}
+  .btn-danger:hover{background:var(--danger-emphasis);}
   .btn-outline{background:var(--surface);color:var(--fg);border-color:var(--border-strong);}
   .btn-outline:hover{background:var(--surface-2);}
   .btn-ghost{background:transparent;color:var(--fg-muted);}
@@ -129,14 +127,14 @@
   .field .req{color:var(--danger);margin-left:2px;}
   .input,.select{
     width:100%;font-family:inherit;font-size:14px;color:var(--fg);background:var(--surface);
-    border:1px solid var(--border-strong);border-radius:var(--radius-ctl);padding:11px 14px;
-    transition:border-color .12s ease, box-shadow .12s ease;
+    border:1px solid var(--border-control);border-radius:var(--radius-ctl);padding:12px 16px;
+    transition:border-color .2s ease-out, box-shadow .2s ease-out;
   }
   .input::placeholder{color:#B7B8BE;}
-  .input:focus,.select:focus{outline:none;border-color:var(--info);box-shadow:var(--ring);}
-  .select{appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 24 24' fill='none' stroke='%238B8C93' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'/%3E%3C/svg%3E");background-repeat:no-repeat;background-position:right 14px center;padding-right:40px;}
+  .input:focus,.select:focus{outline:none;border-color:var(--accent);box-shadow:var(--ring-soft);}
+  .select{appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 24 24' fill='none' stroke='%2357606A' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'/%3E%3C/svg%3E");background-repeat:no-repeat;background-position:right 14px center;padding-right:40px;}
   .hint{font-size:12px;color:var(--fg-muted);margin-top:7px;}
-  .field.error .input{border-color:var(--danger);box-shadow:0 0 0 4px rgba(224,87,76,.16);}
+  .field.error .input{border-color:var(--danger);box-shadow:0 0 0 4px rgba(207,34,46,.16);}
   .err{font-size:12px;color:var(--danger);margin-top:7px;font-weight:500;}
 
   /* ---------- stat cards ---------- */
@@ -145,18 +143,17 @@
     background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-card);
     padding:18px 18px 16px;position:relative;min-height:130px;display:flex;flex-direction:column;justify-content:space-between;
   }
-  .stat.feature{background:var(--accent);border-color:transparent;box-shadow:0 12px 30px -14px rgba(207,240,74,.9);}
+  .stat.feature{border-color:var(--accent);}
   .stat .k{font-size:11px;font-weight:700;letter-spacing:.09em;text-transform:uppercase;color:var(--fg-muted);}
-  .stat.feature .k{color:rgba(24,26,12,.62);}
-  .stat .v{font-size:34px;font-weight:800;letter-spacing:-.03em;line-height:1;}
-  .stat.feature .v{color:var(--accent-ink);}
+  .stat .v{font-size:34px;font-weight:800;letter-spacing:-.03em;line-height:1;color:var(--fg);}
+  .stat.feature .v{color:var(--accent);}
   .stat .delta{font-size:12px;font-weight:600;color:var(--success);display:flex;align-items:center;gap:4px;}
-  .stat.feature .delta{color:var(--accent-ink);opacity:.75;}
+  .stat.feature .delta{color:var(--accent);}
   .arrow-badge{
     position:absolute;top:16px;right:16px;width:34px;height:34px;border-radius:50%;
-    display:grid;place-items:center;background:rgba(24,26,12,.12);
+    display:grid;place-items:center;background:var(--surface-2);border:1px solid var(--border);
   }
-  .stat:not(.feature) .arrow-badge{background:var(--surface-2);border:1px solid var(--border);}
+  .stat.feature .arrow-badge{background:var(--accent-soft);border-color:transparent;}
 
   /* ---------- action / command center ---------- */
   .cc-title{font-size:15px;font-weight:700;margin:0 0 14px;}
@@ -193,8 +190,8 @@
     padding:8px 14px;border-radius:9px;cursor:pointer;display:inline-flex;align-items:center;gap:8px;transition:.12s ease;
   }
   .tab .count{background:rgba(139,140,147,.16);color:var(--fg-muted);font-size:11px;font-weight:700;padding:2px 7px;border-radius:var(--radius-pill);}
-  .tab.active{background:var(--surface);color:var(--fg);box-shadow:var(--shadow-raise);}
-  .tab.active .count{background:var(--accent);color:var(--accent-ink);}
+  .tab.active{background:var(--surface);color:var(--fg);}
+  .tab.active .count{background:var(--accent);color:#fff;}
 
   /* ---------- table ---------- */
   .tbl{width:100%;border-collapse:collapse;font-size:14px;}
@@ -209,34 +206,37 @@
   .tbl .vend{font-weight:600;}
   .tbl .trade{color:var(--fg-muted);}
   .tbl .exp{color:var(--fg);font-variant-numeric:tabular-nums;}
+  .tbl .amt{color:var(--fg);font-variant-numeric:tabular-nums;text-align:right;}
   .kebab{color:#C3C4CA;font-weight:700;letter-spacing:1px;cursor:pointer;text-align:right;}
 
   /* ---------- alerts ---------- */
+  /* status-pill treatment, not a saturated banner: pale tint + colored icon + the same
+     darker tone the pills use for text — no border. */
   .alerts{display:flex;flex-direction:column;gap:12px;}
-  .alert{border-radius:var(--radius-card);padding:15px 18px;border:1px solid transparent;display:flex;gap:13px;align-items:flex-start;}
+  .alert{border-radius:var(--radius-card);padding:15px 18px;display:flex;gap:13px;align-items:flex-start;}
   .alert .a-ico{flex:none;margin-top:1px;}
   .alert h4{margin:0 0 3px;font-size:14px;font-weight:700;}
   .alert p{margin:0;font-size:13px;}
-  .alert.info{background:var(--info-soft);border-color:rgba(110,139,232,.22);}
-  .alert.info h4{color:var(--info-ink);} .alert.info p{color:#5568B4;} .alert.info .a-ico{color:var(--info);}
-  .alert.ok{background:var(--success-soft);border-color:rgba(47,162,106,.22);}
-  .alert.ok h4{color:#1E7A4D;} .alert.ok p{color:#3B8F63;} .alert.ok .a-ico{color:var(--success);}
-  .alert.warn{background:var(--attention-soft);border-color:rgba(215,154,42,.28);}
-  .alert.warn h4{color:#8A6412;} .alert.warn p{color:#9A7420;} .alert.warn .a-ico{color:var(--attention);}
-  .alert.bad{background:var(--danger-soft);border-color:rgba(224,87,76,.24);}
-  .alert.bad h4{color:#B23A2E;} .alert.bad p{color:#B85045;} .alert.bad .a-ico{color:var(--danger);}
+  .alert.info{background:var(--info-soft);}
+  .alert.info h4,.alert.info p{color:var(--info-ink);} .alert.info .a-ico{color:var(--info);}
+  .alert.ok{background:var(--success-soft);}
+  .alert.ok h4,.alert.ok p{color:var(--success);} .alert.ok .a-ico{color:var(--success);}
+  .alert.warn{background:var(--attention-soft);}
+  .alert.warn h4,.alert.warn p{color:var(--attention);} .alert.warn .a-ico{color:var(--attention);}
+  .alert.bad{background:var(--danger-soft);}
+  .alert.bad h4,.alert.bad p{color:var(--danger);} .alert.bad .a-ico{color:var(--danger);}
 
   /* ---------- modal preview ---------- */
   .modal-stage{
-    background:
-      radial-gradient(600px 300px at 50% 0%, rgba(110,139,232,.10), transparent 60%),
-      var(--surface-2);
+    background:var(--surface-2);
     border:1px solid var(--border);border-radius:var(--radius-card);
     min-height:340px;display:grid;place-items:center;padding:40px 20px;
   }
   .modal{
-    width:100%;max-width:420px;background:var(--surface);border-radius:20px;
-    box-shadow:0 24px 60px -20px rgba(17,18,22,.4);border:1px solid var(--border);overflow:hidden;
+    /* the one deliberate elevation shadow in this system — a genuinely floating overlay,
+       not decoration on flat content */
+    width:100%;max-width:420px;background:var(--surface);border-radius:var(--radius-panel);
+    box-shadow:var(--shadow-overlay);border:1px solid var(--border);overflow:hidden;
   }
   .modal-head{display:flex;align-items:center;justify-content:space-between;padding:20px 22px 0;}
   .modal-head h3{margin:0;font-size:16px;font-weight:700;}
@@ -271,32 +271,31 @@
   <header class="masthead">
     <div class="brand">
       <span class="logomark" aria-hidden="true">
-        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#CFF04A" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#FFFFFF" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
           <path d="M12 2 3 7v10l9 5 9-5V7z"/><path d="M12 22V12"/><path d="m3 7 9 5 9-5"/>
         </svg>
       </span>
       <div>
         <h1>UnifyCOI · Design system</h1>
-        <div class="sub">Phase 12 · Slice 1 — tokens + primitives. Light B2B ops direction.</div>
+        <div class="sub">Phase 12 · Slice 1 (restored) — tokens + primitives. Light B2B ops direction.</div>
       </div>
     </div>
-    <span class="badge-soft"><span class="dot"></span>Lime ops theme</span>
+    <span class="badge-soft"><span class="dot"></span>Blue ops theme</span>
   </header>
 
   <!-- TOKENS -->
   <section class="panel">
     <p class="eyebrow">Tokens</p>
     <div class="swatches">
-      <div class="swatch"><span class="chip" style="background:#EDECEF"></span><span class="name">canvas</span><span class="hex">#EDECEF</span></div>
+      <div class="swatch"><span class="chip" style="background:#F6F8FA"></span><span class="name">canvas</span><span class="hex">#F6F8FA</span></div>
       <div class="swatch"><span class="chip" style="background:#FFFFFF"></span><span class="name">surface</span><span class="hex">#FFFFFF</span></div>
-      <div class="swatch"><span class="chip" style="background:#E8E8EC"></span><span class="name">border</span><span class="hex">#E8E8EC</span></div>
-      <div class="swatch"><span class="chip" style="background:#191A1E"></span><span class="name">fg</span><span class="hex">#191A1E</span></div>
-      <div class="swatch"><span class="chip" style="background:#8B8C93"></span><span class="name">fg-muted</span><span class="hex">#8B8C93</span></div>
-      <div class="swatch"><span class="chip" style="background:#CFF04A"></span><span class="name">accent</span><span class="hex">#CFF04A</span></div>
-      <div class="swatch"><span class="chip" style="background:#6E8BE8"></span><span class="name">info</span><span class="hex">#6E8BE8</span></div>
-      <div class="swatch"><span class="chip" style="background:#2FA26A"></span><span class="name">success</span><span class="hex">#2FA26A</span></div>
-      <div class="swatch"><span class="chip" style="background:#D79A2A"></span><span class="name">attention</span><span class="hex">#D79A2A</span></div>
-      <div class="swatch"><span class="chip" style="background:#E0574C"></span><span class="name">danger</span><span class="hex">#E0574C</span></div>
+      <div class="swatch"><span class="chip" style="background:#D0D7DE"></span><span class="name">border</span><span class="hex">#D0D7DE</span></div>
+      <div class="swatch"><span class="chip" style="background:#1F2328"></span><span class="name">fg</span><span class="hex">#1F2328</span></div>
+      <div class="swatch"><span class="chip" style="background:#57606A"></span><span class="name">fg-muted</span><span class="hex">#57606A</span></div>
+      <div class="swatch"><span class="chip" style="background:#0969DA"></span><span class="name">accent (the one blue)</span><span class="hex">#0969DA</span></div>
+      <div class="swatch"><span class="chip" style="background:#1F883D"></span><span class="name">success</span><span class="hex">#1F883D</span></div>
+      <div class="swatch"><span class="chip" style="background:#9A6700"></span><span class="name">attention</span><span class="hex">#9A6700</span></div>
+      <div class="swatch"><span class="chip" style="background:#CF222E"></span><span class="name">danger</span><span class="hex">#CF222E</span></div>
     </div>
   </section>
 
@@ -346,7 +345,7 @@
     <div class="stats">
       <div class="stat feature">
         <span class="arrow-badge">
-          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#181A0C" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="7" y1="17" x2="17" y2="7"/><polyline points="7 7 17 7 17 17"/></svg>
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#0969DA" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="7" y1="17" x2="17" y2="7"/><polyline points="7 7 17 7 17 17"/></svg>
         </span>
         <div class="k">Compliant vendors</div>
         <div class="v">94%</div>
@@ -354,7 +353,7 @@
       </div>
       <div class="stat">
         <span class="arrow-badge">
-          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#8B8C93" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="7" y1="17" x2="17" y2="7"/><polyline points="7 7 17 7 17 17"/></svg>
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#57606A" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="7" y1="17" x2="17" y2="7"/><polyline points="7 7 17 7 17 17"/></svg>
         </span>
         <div class="k">Expiring ≤30d</div>
         <div class="v">7</div>
@@ -362,7 +361,7 @@
       </div>
       <div class="stat">
         <span class="arrow-badge">
-          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#8B8C93" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="7" y1="17" x2="17" y2="7"/><polyline points="7 7 17 7 17 17"/></svg>
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#57606A" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="7" y1="17" x2="17" y2="7"/><polyline points="7 7 17 7 17 17"/></svg>
         </span>
         <div class="k">Awaiting review</div>
         <div class="v">12</div>
@@ -370,7 +369,7 @@
       </div>
       <div class="stat">
         <span class="arrow-badge">
-          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#8B8C93" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="7" y1="17" x2="17" y2="7"/><polyline points="7 7 17 7 17 17"/></svg>
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#57606A" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="7" y1="17" x2="17" y2="7"/><polyline points="7 7 17 7 17 17"/></svg>
         </span>
         <div class="k">Expired</div>
         <div class="v">2</div>
@@ -496,7 +495,7 @@
     </div>
   </section>
 
-  <p class="note">UnifyCOI design system · Plus Jakarta Sans · lime + graphite ops theme</p>
+  <p class="note">UnifyCOI design system · Manrope · clean, light B2B ops theme — one blue accent</p>
 
 </div>
 </body>

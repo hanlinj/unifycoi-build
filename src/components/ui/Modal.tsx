@@ -34,7 +34,7 @@ export function Modal({ open, onClose, title, children, footer, className }: Mod
         role="dialog"
         aria-modal="true"
         aria-label={title}
-        className={cn('w-full max-w-[420px] overflow-hidden rounded-[20px] border border-border bg-surface shadow-[0_24px_60px_-20px_rgba(17,18,22,0.4)]', className)}
+        className={cn('w-full max-w-[420px] overflow-hidden rounded-panel border border-border bg-surface shadow-overlay', className)}
         onClick={(e) => e.stopPropagation()}
       >
         {title && (
