@@ -1,6 +1,6 @@
 // Platform (super-admin) sidebar — SEPARATE from the tenant nav (invariant #12). Pure + tested.
-// Only "Tenants" is built in Slice 2; the rest are shown as planned/disabled (NOT dead links —
-// they never navigate) and get enabled as their slices land (Provisioning=Slice 5, Billing=8, …).
+// "Tenants" (Slice 2) and "Provisioning" (Slice 4) are built; the rest are shown as
+// planned/disabled (NOT dead links — they never navigate) and get enabled as their slices land.
 // Full intended set per Platform_Super_Admin_Console.md.
 
 export interface PlatformNavItem {
@@ -12,7 +12,7 @@ export interface PlatformNavItem {
 
 export const PLATFORM_NAV: PlatformNavItem[] = [
   { label: 'Tenants', href: '/platform', icon: 'building' },
-  { label: 'Provisioning', href: '/platform/provisioning', icon: 'plus-circle', soon: true },
+  { label: 'Provisioning', href: '/platform/provisioning', icon: 'plus-circle' },
   { label: 'Billing', href: '/platform/billing', icon: 'credit-card', soon: true },
   { label: 'Health', href: '/platform/health', icon: 'activity', soon: true },
   { label: 'Settings', href: '/platform/settings', icon: 'settings', soon: true },

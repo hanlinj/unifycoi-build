@@ -1,13 +1,13 @@
-// Phase 12 · Slice 3 — provisioning backend + billing-attach. Node project.
+// Phase 12 · Slice 3/4 — provisioning backend + billing-attach + wizard credential model.
 // Proves the audited DB transaction (tenant + first Admin + locations + template + timezone),
 // the DB-commit / Stripe-call boundary (partial-failure = recoverable, no orphan), atomic
-// rollback, timezone required+stored (OPS-7 input), and the Stripe idempotency key.
+// rollback, timezone required+stored (OPS-7 input), slug required+unique (Slice 4), the
+// invite/deferred-credential admin (Slice 4), and the Stripe idempotency key.
 
 import { setupTestDb, seedPlatformUser, seedTemplate } from './helpers';
 import { TenantDB } from '@/lib/db/tenant';
 import { provisionTenant, type ProvisionInput } from '@/lib/services/provisioning';
 import { listTenants, getTenantById } from '@/lib/services/tenants';
-import { loginResolvingTenant } from '@/lib/services/auth';
 import * as locationsSvc from '@/lib/services/locations';
 import type { BillingProvider } from '@/lib/billing/provider';
 
@@ -27,8 +27,9 @@ class FakeBilling implements BillingProvider {
 function baseInput(templateId: string, over: Partial<ProvisionInput> = {}): ProvisionInput {
   return {
     name: 'Storage Star',
+    slug: 'storage-star',
     timezone: 'America/Los_Angeles',
-    firstAdmin: { email: 'admin@storagestar.test', name: 'Avery Admin', password: 'correct-horse-1' },
+    firstAdmin: { email: 'admin@storagestar.test', name: 'Avery Admin' },
     locations: [{ name: 'Main St' }, { name: 'Oak Ave', address: '2 Oak' }],
     templateId,
     ...over,
@@ -45,20 +46,29 @@ function setup() {
 afterEach(() => jest.restoreAllMocks());
 
 describe('provisionTenant · happy path', () => {
-  test('creates tenant (provisioning + timezone) + first Admin + locations + template, all audited; billing attached', async () => {
+  test('creates tenant (provisioning + timezone + slug) + invited first Admin + locations + template, all audited; billing attached', async () => {
     const { db, platform, tplId } = setup();
     const billing = new FakeBilling();
     const res = await provisionTenant(db, baseInput(tplId), platform.id, billing);
 
-    // Tenant: provisioning state, timezone stored (OPS-7 input wired)
+    // Tenant: provisioning state, timezone + slug stored (OPS-7 input + Slice 4 wired)
     const t = getTenantById(db, res.tenant.id)!;
     expect(t.lifecycle_state).toBe('provisioning');
+    expect(t.slug).toBe('storage-star');
     const tzRow = db.prepare('SELECT timezone FROM tenants WHERE id = ?').get(res.tenant.id) as { timezone: string };
     expect(tzRow.timezone).toBe('America/Los_Angeles');
 
-    // First Admin: active + can log in (created WITH a password)
+    // First Admin: created INVITED, no password — the wizard never handles a password. An
+    // invite token is minted immediately at provision time (Slice 4) and verifies.
     expect(res.adminUserId).toBeTruthy();
-    expect(loginResolvingTenant(db, 'admin@storagestar.test', 'correct-horse-1')).not.toBeNull();
+    const adminRow = db.prepare('SELECT status, password_hash FROM users WHERE id = ?').get(res.adminUserId) as {
+      status: string;
+      password_hash: string | null;
+    };
+    expect(adminRow.status).toBe('invited');
+    expect(adminRow.password_hash).toBeNull();
+    expect(res.invite.rawToken).toBeTruthy();
+    expect(res.invite.inviteUrl).toContain(res.invite.rawToken);
 
     // Locations + template applied
     expect(res.locationIds).toHaveLength(2);
@@ -122,7 +132,7 @@ describe('provisionTenant · atomic rollback', () => {
   });
 });
 
-describe('provisionTenant · validation (OPS-7 input + guards)', () => {
+describe('provisionTenant · validation (OPS-7 input + slug + billing guards)', () => {
   test('an invalid timezone is rejected before any write', async () => {
     const { db, platform, tplId } = setup();
     await expect(provisionTenant(db, baseInput(tplId, { timezone: 'Not/AZone' }), platform.id, new FakeBilling())).rejects.toMatchObject({ status: 400 });
@@ -136,8 +146,19 @@ describe('provisionTenant · validation (OPS-7 input + guards)', () => {
     const { db, platform } = setup();
     await expect(provisionTenant(db, baseInput('nope-template'), platform.id, new FakeBilling())).rejects.toMatchObject({ status: 400 });
   });
-  test('a weak first-admin password is rejected', async () => {
+  test('a malformed slug (uppercase/spaces) is rejected before any write', async () => {
     const { db, platform, tplId } = setup();
-    await expect(provisionTenant(db, baseInput(tplId, { firstAdmin: { email: 'a@b.test', name: 'A', password: 'short' } }), platform.id, new FakeBilling())).rejects.toMatchObject({ status: 400 });
+    await expect(provisionTenant(db, baseInput(tplId, { slug: 'Not A Slug' }), platform.id, new FakeBilling())).rejects.toMatchObject({ status: 400 });
+    expect(listTenants(db)).toHaveLength(0);
+  });
+  test('a missing slug is rejected', async () => {
+    const { db, platform, tplId } = setup();
+    await expect(provisionTenant(db, baseInput(tplId, { slug: '' }), platform.id, new FakeBilling())).rejects.toMatchObject({ status: 400 });
+  });
+  test('a duplicate slug is rejected with 409, fails loud before any write (no half-written tenant)', async () => {
+    const { db, platform, tplId } = setup();
+    await provisionTenant(db, baseInput(tplId), platform.id, new FakeBilling());
+    await expect(provisionTenant(db, baseInput(tplId, { name: 'Storage Star Two' }), platform.id, new FakeBilling())).rejects.toMatchObject({ status: 409 });
+    expect(listTenants(db)).toHaveLength(1);
   });
 });

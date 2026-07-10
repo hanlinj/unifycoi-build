@@ -11,17 +11,18 @@ import { PLATFORM_NAV, isPlatformItemActive } from '@/lib/platform-nav';
 import type { Tenant } from '@/lib/services/tenants';
 
 const mk = (i: number, over: Partial<Tenant> = {}): Tenant => ({
-  id: `t${i}`, name: `Tenant ${i}`, lifecycle_state: 'active', monthly_rate_cents: 9000,
+  id: `t${i}`, name: `Tenant ${i}`, slug: `tenant-${i}`, lifecycle_state: 'active', monthly_rate_cents: 9000,
   created_at: '2026-06-01T00:00:00.000Z', ...over,
 });
 
 // ── platform nav (pure) ──────────────────────────────────────────────────────
 
 describe('platform nav', () => {
-  test('Tenants is built; Provisioning/Billing/Health/Settings are planned (soon)', () => {
+  test('Tenants and Provisioning are built; Billing/Health/Settings are planned (soon)', () => {
     const byLabel = Object.fromEntries(PLATFORM_NAV.map((i) => [i.label, i]));
     expect(byLabel['Tenants'].soon).toBeUndefined();
-    for (const l of ['Provisioning', 'Billing', 'Health', 'Settings']) expect(byLabel[l].soon).toBe(true);
+    expect(byLabel['Provisioning'].soon).toBeUndefined();
+    for (const l of ['Billing', 'Health', 'Settings']) expect(byLabel[l].soon).toBe(true);
   });
   test('Tenants owns the fleet + tenant-detail routes', () => {
     expect(isPlatformItemActive('/platform', '/platform')).toBe(true);

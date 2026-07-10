@@ -81,6 +81,11 @@ export const env = {
     environment: process.env['NODE_ENV'] ?? 'development',
     logLevel: process.env['LOG_LEVEL'] ?? 'info',
   },
+  app: {
+    // Base origin for links surfaced to users (invite links, vendor tokens). Same fallback
+    // dev-seed already uses.
+    baseUrl: optional('APP_BASE_URL', 'http://localhost:3000'),
+  },
   auth: {
     jwtSecret: required('JWT_SECRET'),
     jwtExpiresIn: optional('JWT_EXPIRES_IN', '8h'),

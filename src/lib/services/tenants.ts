@@ -7,6 +7,7 @@ import { issueToken } from '@/lib/auth/jwt';
 export interface Tenant {
   id: string;
   name: string;
+  slug: string | null;
   lifecycle_state: string;
   monthly_rate_cents: number;
   created_at: string;
@@ -14,8 +15,21 @@ export interface Tenant {
 
 export interface CreateTenantInput {
   name: string;
+  slug?: string; // unique tenant identifier (Slice 4). Optional here; provisioning REQUIRES + validates it.
   monthlyRateCents?: number;
   timezone?: string; // IANA zone (OPS-7). Optional here; provisioning REQUIRES + validates it.
+}
+
+const SLUG_RE = /^[a-z0-9]+(-[a-z0-9]+)*$/;
+
+/** True if `slug` is well-formed: lowercase alphanumerics separated by single hyphens. */
+export function isValidSlug(slug: string): boolean {
+  return !!slug && SLUG_RE.test(slug);
+}
+
+/** True if `slug` is already in use by another tenant. Pre-check for the wizard's Tenant step. */
+export function isSlugTaken(db: Database.Database, slug: string): boolean {
+  return !!db.prepare('SELECT 1 FROM tenants WHERE slug = ?').get(slug);
 }
 
 export interface UpdateTenantInput {
@@ -40,9 +54,19 @@ export function createTenant(
   const now = new Date().toISOString();
   const rate = input.monthlyRateCents ?? 9000;
 
-  db.prepare(
-    'INSERT INTO tenants (id, name, lifecycle_state, monthly_rate_cents, timezone, created_at) VALUES (?, ?, ?, ?, ?, ?)'
-  ).run(id, input.name.trim(), 'provisioning', rate, input.timezone ?? null, now);
+  // Backstop to the wizard's slug-uniqueness pre-check: a UNIQUE constraint violation here
+  // (e.g. a race between two concurrent provisions) surfaces as a clean 409, not a raw
+  // SQLite error deep in the transaction.
+  try {
+    db.prepare(
+      'INSERT INTO tenants (id, name, slug, lifecycle_state, monthly_rate_cents, timezone, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)'
+    ).run(id, input.name.trim(), input.slug ?? null, 'provisioning', rate, input.timezone ?? null, now);
+  } catch (err) {
+    if ((err as { code?: string }).code === 'SQLITE_CONSTRAINT_UNIQUE' && input.slug) {
+      throw Object.assign(new Error(`Slug "${input.slug}" is already in use`), { status: 409 });
+    }
+    throw err;
+  }
 
   // Initial billing snapshot (0 locations) and requirement settings defaults
   const tdb = new TenantDB(db, id);
@@ -61,16 +85,16 @@ export function createTenant(
     payload: { name: input.name },
   });
 
-  return db.prepare('SELECT id, name, lifecycle_state, monthly_rate_cents, created_at FROM tenants WHERE id = ?').get(id) as Tenant;
+  return db.prepare('SELECT id, name, slug, lifecycle_state, monthly_rate_cents, created_at FROM tenants WHERE id = ?').get(id) as Tenant;
 }
 
 export function listTenants(db: Database.Database): Tenant[] {
-  return db.prepare('SELECT id, name, lifecycle_state, monthly_rate_cents, created_at FROM tenants ORDER BY created_at DESC').all() as Tenant[];
+  return db.prepare('SELECT id, name, slug, lifecycle_state, monthly_rate_cents, created_at FROM tenants ORDER BY created_at DESC').all() as Tenant[];
 }
 
 export function getTenantById(db: Database.Database, tenantId: string): Tenant | null {
   return (
-    (db.prepare('SELECT id, name, lifecycle_state, monthly_rate_cents, created_at FROM tenants WHERE id = ?').get(tenantId) as Tenant | undefined) ?? null
+    (db.prepare('SELECT id, name, slug, lifecycle_state, monthly_rate_cents, created_at FROM tenants WHERE id = ?').get(tenantId) as Tenant | undefined) ?? null
   );
 }
 

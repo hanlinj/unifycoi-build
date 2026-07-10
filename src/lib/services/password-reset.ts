@@ -1,4 +1,7 @@
-// Password reset (SEC-8). Emailed single-use token flow.
+// Password reset (SEC-8) and invite-accept (Slice 4). One table (password_reset_tokens), one
+// crypto primitive (reset-token.ts). Reset and invite tokens are interchangeable through
+// confirmPasswordReset — status (invited/active) is the authoritative signal for copy, not
+// which flow minted the token.
 //
 // Request:  resolve email → tenant user (SAME first-match order as login's tenant scan),
 //           issue a hashed token, and queue a 'password_reset' notification — the reset
@@ -6,7 +9,7 @@
 //           bespoke send. Enumeration-safe: the caller returns an identical response whether
 //           or not the email resolves; this function just no-ops when it doesn't.
 // Confirm:  verify hash + not expired + not consumed → set the new password → consume the
-//           token AND invalidate every other outstanding token for that user.
+//           token AND invalidate every other outstanding reset/invite token for that user.
 //
 // Reset does NOT invalidate live JWT sessions this phase (stateless JWT; 8h expiry is the
 // bound). token_version session-invalidation is deferred to Phase 12.
@@ -19,6 +22,7 @@ import { queueNotification } from '@/lib/notifications/queue';
 
 const RESET_TTL_MS = 60 * 60 * 1000; // ~1h
 const MIN_PASSWORD_LENGTH = 8;
+const INVITE_TTL_MS = 7 * 24 * 60 * 60 * 1000; // ~7d — white-glove onboarding pace, not urgent
 
 interface ResettableUser {
   id: string;
@@ -79,6 +83,29 @@ export function requestPasswordReset(
   });
 }
 
+/**
+ * Issue a first-login credential-set token for a just-provisioned (invited, no password)
+ * admin — reuses password_reset_tokens/generateResetToken verbatim (same hash-at-rest, same
+ * expiry shape) rather than a parallel token system. Unlike requestPasswordReset, this does
+ * NOT queue a notification: the wizard surfaces the raw link directly to the operator, who
+ * sends it out-of-band at their own pace (white-glove onboarding, not an emailed reset).
+ */
+export function issueInviteToken(
+  db: Database.Database,
+  input: { tenantId: string; userId: string },
+  now: Date = new Date()
+): { rawToken: string; expiresAt: string } {
+  const { rawToken, tokenHash } = generateResetToken();
+  const expiresAt = new Date(now.getTime() + INVITE_TTL_MS).toISOString();
+
+  db.prepare(
+    `INSERT INTO password_reset_tokens (id, tenant_id, user_id, token_hash, expires_at, consumed_at, created_at)
+     VALUES (?, ?, ?, ?, ?, NULL, ?)`
+  ).run(randomUUID(), input.tenantId, input.userId, tokenHash, expiresAt, now.toISOString());
+
+  return { rawToken, expiresAt };
+}
+
 export type ConfirmResult =
   | { ok: true; userId: string; tenantId: string }
   | { ok: false; reason: 'invalid_token' | 'weak_password' };
@@ -110,13 +137,15 @@ export function confirmPasswordReset(
 
   const nowIso = now.toISOString();
   const tx = db.transaction(() => {
-    db.prepare(`UPDATE users SET password_hash = ? WHERE id = ? AND tenant_id = ?`).run(
-      hashPassword(input.newPassword),
-      row.user_id,
-      row.tenant_id
-    );
-    // Consume this token and invalidate every other outstanding token for the user — a
-    // password change invalidates all outstanding reset tokens.
+    // Setting a password consumes the "invited" (no-credential) state too — this same token
+    // machinery backs both password-reset (already active) and invite-accept (first login),
+    // so an invited user who lands here via their invite link becomes active in one step.
+    db.prepare(
+      `UPDATE users SET password_hash = ?, status = CASE WHEN status = 'invited' THEN 'active' ELSE status END
+       WHERE id = ? AND tenant_id = ?`
+    ).run(hashPassword(input.newPassword), row.user_id, row.tenant_id);
+    // Consume this token and invalidate every other outstanding reset/invite token for the
+    // user — a password change invalidates all of those.
     db.prepare(
       `UPDATE password_reset_tokens SET consumed_at = ?
        WHERE tenant_id = ? AND user_id = ? AND consumed_at IS NULL`
