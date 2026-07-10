@@ -22,3 +22,8 @@ data/
 *.log
 .vscode/
 .idea/
+
+# Session/harness tooling — not product
+.agents/
+.claude/
+skills-lock.json
