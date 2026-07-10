@@ -10,7 +10,7 @@ import { LoginForm } from './LoginForm';
 
 export const dynamic = 'force-dynamic';
 
-export default function LoginPage() {
+export default function LoginPage({ searchParams }: { searchParams: { notice?: string } }) {
   const token = cookies().get(SESSION_COOKIE)?.value;
   // Compute the landing inside the try (verify can throw); redirect OUTSIDE it so Next's
   // NEXT_REDIRECT isn't swallowed by the catch.
@@ -30,7 +30,7 @@ export default function LoginPage() {
       <div style={{ width: 360, background: 'white', border: '1px solid #d0d7de', borderRadius: 10, padding: 28 }}>
         <h1 style={{ margin: '0 0 4px', fontSize: 20, fontWeight: 700 }}>UnifyCOI</h1>
         <p style={{ margin: '0 0 20px', fontSize: 13, color: '#57606a' }}>Sign in to your account.</p>
-        <LoginForm />
+        <LoginForm notice={searchParams.notice} />
       </div>
     </main>
   );

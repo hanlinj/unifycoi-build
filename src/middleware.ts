@@ -92,7 +92,8 @@ function allowedOrigins(): string[] {
 }
 
 export const config = {
-  // Include /api/* (so CSRF can see API mutations); still exclude /login, the public /v/*
-  // vendor flow, Next internals, and common static files.
-  matcher: ['/((?!login|v/|_next/|favicon.ico|robots.txt).*)'],
+  // Include /api/* (so CSRF can see API mutations); still exclude /login, /reset-password
+  // (unauthenticated, token-in-URL landing page — the token IS the credential, like /v/*), the
+  // public /v/* vendor flow, Next internals, and common static files.
+  matcher: ['/((?!login|reset-password|v/|_next/|favicon.ico|robots.txt).*)'],
 };

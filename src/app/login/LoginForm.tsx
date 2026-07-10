@@ -2,7 +2,15 @@
 
 import { useState } from 'react';
 
-export function LoginForm() {
+// First instance of a post-redirect flash convention in this app (Slice 4a): a fixed set of
+// known notice codes, not a generic message-passing system — keep it to this small mapping
+// rather than growing a query-string-driven CMS.
+const NOTICE_COPY: Record<string, string> = {
+  activated: 'Account activated — sign in with your new password.',
+  reset: 'Password updated — sign in with your new password.',
+};
+
+export function LoginForm({ notice }: { notice?: string } = {}) {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [error, setError] = useState<string | null>(null);
@@ -32,8 +40,14 @@ export function LoginForm() {
   }
 
   const input: React.CSSProperties = { width: '100%', padding: '9px 12px', borderRadius: 6, border: '1px solid #d0d7de', fontSize: 14, marginTop: 4 };
+  const noticeText = notice ? NOTICE_COPY[notice] : undefined;
   return (
     <form onSubmit={submit} style={{ display: 'grid', gap: 14 }}>
+      {noticeText && (
+        <p role="status" style={{ margin: 0, padding: '9px 12px', borderRadius: 6, background: '#dafbe1', color: '#1a7f37', fontSize: 13, fontWeight: 600 }}>
+          {noticeText}
+        </p>
+      )}
       <label style={{ fontSize: 13, fontWeight: 600 }}>
         Email
         <input type="email" autoComplete="username" required value={email} onChange={(e) => setEmail(e.target.value)} style={input} />

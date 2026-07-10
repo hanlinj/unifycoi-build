@@ -10,6 +10,9 @@
 //           or not the email resolves; this function just no-ops when it doesn't.
 // Confirm:  verify hash + not expired + not consumed → set the new password → consume the
 //           token AND invalidate every other outstanding reset/invite token for that user.
+// Peek:     read-only pre-check (Slice 4a) for the /reset-password landing page — distinguishes
+//           invalid/expired/consumed/valid WITHOUT consuming the token, so the page can render
+//           status-appropriate copy before ever showing a password field.
 //
 // Reset does NOT invalidate live JWT sessions this phase (stateless JWT; 8h expiry is the
 // bound). token_version session-invalidation is deferred to Phase 12.
@@ -19,9 +22,9 @@ import type Database from 'better-sqlite3';
 import { hashPassword } from '@/lib/auth/password';
 import { generateResetToken, hashResetToken } from '@/lib/auth/reset-token';
 import { queueNotification } from '@/lib/notifications/queue';
+import { isPasswordValid } from '@/lib/auth/password-policy';
 
 const RESET_TTL_MS = 60 * 60 * 1000; // ~1h
-const MIN_PASSWORD_LENGTH = 8;
 const INVITE_TTL_MS = 7 * 24 * 60 * 60 * 1000; // ~7d — white-glove onboarding pace, not urgent
 
 interface ResettableUser {
@@ -106,6 +109,58 @@ export function issueInviteToken(
   return { rawToken, expiresAt };
 }
 
+export interface TokenPeek {
+  status: 'valid' | 'expired' | 'consumed' | 'invalid';
+  userId?: string;
+  tenantId?: string;
+  /** The target user's status ('invited' | 'active' | 'disabled') — the credential-set landing
+   *  page branches its copy on THIS, not on token origin (the table carries no reset/invite
+   *  discriminator, and status is the more correct signal: token-origin is just history). */
+  userStatus?: string;
+  tenantName?: string;
+}
+
+/**
+ * Read-only pre-check for the credential-set landing page (Slice 4a): distinguishes invalid /
+ * expired / consumed / valid WITHOUT consuming the token, so the page can render
+ * status-appropriate copy (and the right dead-end) before ever showing a password field.
+ * confirmPasswordReset (the write path) deliberately collapses all three failure cases into
+ * 'invalid_token' — that's a separate, intentional choice (see its docstring); this function
+ * exists precisely to give the landing page the finer-grained read that the write path doesn't
+ * expose.
+ *
+ * Note (flagged, not hidden): this reveals slightly more about a token's history than the
+ * confirm endpoint does (e.g. "this token existed and was already used" vs a flat "invalid").
+ * The raw token is an unguessable 256-bit value, so the marginal oracle value to an attacker
+ * is negligible — but it IS a real, deliberate trade for the UX this page needs.
+ */
+export function peekResetToken(
+  db: Database.Database,
+  rawToken: string,
+  now: Date = new Date()
+): TokenPeek {
+  const row = db
+    .prepare(
+      `SELECT user_id, tenant_id, expires_at, consumed_at FROM password_reset_tokens WHERE token_hash = ?`
+    )
+    .get(hashResetToken(rawToken)) as
+    | { user_id: string; tenant_id: string; expires_at: string; consumed_at: string | null }
+    | undefined;
+  if (!row) return { status: 'invalid' };
+
+  const user = db
+    .prepare(`SELECT status FROM users WHERE id = ? AND tenant_id = ?`)
+    .get(row.user_id, row.tenant_id) as { status: string } | undefined;
+  const tenant = db.prepare(`SELECT name FROM tenants WHERE id = ?`).get(row.tenant_id) as { name: string } | undefined;
+  const userStatus = user?.status;
+  const tenantName = tenant?.name;
+
+  if (row.consumed_at) return { status: 'consumed', userStatus, tenantName };
+  if (new Date(row.expires_at).getTime() <= now.getTime()) return { status: 'expired', userStatus, tenantName };
+  if (!user || !tenant) return { status: 'invalid' }; // defensive; FK integrity should prevent this
+  return { status: 'valid', userId: row.user_id, tenantId: row.tenant_id, userStatus, tenantName };
+}
+
 export type ConfirmResult =
   | { ok: true; userId: string; tenantId: string }
   | { ok: false; reason: 'invalid_token' | 'weak_password' };
@@ -119,7 +174,7 @@ export function confirmPasswordReset(
   input: { rawToken: string; newPassword: string },
   now: Date = new Date()
 ): ConfirmResult {
-  if (!input.newPassword || input.newPassword.length < MIN_PASSWORD_LENGTH) {
+  if (!isPasswordValid(input.newPassword)) {
     return { ok: false, reason: 'weak_password' };
   }
 
