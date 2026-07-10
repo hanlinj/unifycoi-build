@@ -1,6 +1,7 @@
-// Phase 12 · Slice 4 — Provisioning wizard UI. RTL/jsdom.
+// Phase 12 · Slice 4/5a — Provisioning wizard UI. RTL/jsdom.
 // Proves the step flow + the submit-blocking validation gates (timezone reject, slug
-// collision) and the invite/no-password credential model.
+// collision), the invite/no-password credential model, and the automatic-billing two-commit
+// UX (partial failure surfaces "Retry billing", never a dead-end toast).
 
 import React from 'react';
 import { render, screen, waitFor } from '@testing-library/react';
@@ -88,6 +89,74 @@ describe('ProvisioningWizard · Tenant step + slug gate', () => {
   });
 });
 
+describe('ProvisioningWizard · Billing fields (rate + setup fee, Slice 5a)', () => {
+  test('rate is prefilled ($90) so Next is not blocked by it; an invalid rate blocks Next', async () => {
+    mockFetch({ checkSlug: () => ({ available: true }) });
+    render(<ProvisioningWizard templates={TEMPLATES} />);
+    const next = screen.getByRole('button', { name: 'Next' });
+
+    await userEvent.type(screen.getByLabelText(/^Organization\ name/), 'Acme Storage');
+    await waitFor(() => expect(next).toBeEnabled());
+
+    await userEvent.clear(screen.getByLabelText(/^Per-location rate/));
+    await userEvent.type(screen.getByLabelText(/^Per-location rate/), 'not-a-number');
+    expect(screen.getByText(/non-negative amount/)).toBeInTheDocument();
+    expect(next).toBeDisabled();
+
+    await userEvent.clear(screen.getByLabelText(/^Per-location rate/));
+    await userEvent.type(screen.getByLabelText(/^Per-location rate/), '75');
+    expect(next).toBeEnabled();
+  });
+
+  test('setup fee is optional (blank is fine); an invalid value blocks Next', async () => {
+    mockFetch({ checkSlug: () => ({ available: true }) });
+    render(<ProvisioningWizard templates={TEMPLATES} />);
+    const next = screen.getByRole('button', { name: 'Next' });
+
+    await userEvent.type(screen.getByLabelText(/^Organization\ name/), 'Acme Storage');
+    await waitFor(() => expect(next).toBeEnabled()); // blank setup fee never blocked it
+
+    await userEvent.type(screen.getByLabelText(/^One-time setup fee/), 'garbage');
+    expect(screen.getByText(/leave blank for none/)).toBeInTheDocument();
+    expect(next).toBeDisabled();
+  });
+
+  test('the Review step computes rate × location count, and the submit body carries cents', async () => {
+    const calls = mockFetch({ checkSlug: () => ({ available: true }), provision: () => ({ status: 201, body: { data: { tenant: { id: 't3', name: 'Acme Storage', slug: 'acme-storage' }, adminUserId: 'u3', locationIds: [], billing: { attached: true, customerId: 'c', setupIntentClientSecret: 's', subscriptionId: 'sub_t3' } } } }) });
+    render(<ProvisioningWizard templates={TEMPLATES} />);
+    const next = screen.getByRole('button', { name: 'Next' });
+
+    await userEvent.type(screen.getByLabelText(/^Organization\ name/), 'Acme Storage');
+    await waitFor(() => expect(next).toBeEnabled());
+    await userEvent.clear(screen.getByLabelText(/^Per-location rate/));
+    await userEvent.type(screen.getByLabelText(/^Per-location rate/), '75');
+    await userEvent.type(screen.getByLabelText(/^One-time setup fee/), '250');
+    await userEvent.click(next); // -> admin
+    await userEvent.type(screen.getByLabelText(/^Admin\ name/), 'Avery Admin');
+    await userEvent.type(screen.getByLabelText(/^Admin\ email/), 'admin@acme.test');
+    await userEvent.click(screen.getByRole('button', { name: 'Next' })); // -> locations
+    await userEvent.type(screen.getByLabelText('Location 1 name'), 'Main St');
+    await userEvent.click(screen.getByRole('button', { name: 'Next' })); // -> template
+    await userEvent.click(screen.getByRole('button', { name: 'Next' })); // -> timezone
+    await userEvent.type(screen.getByLabelText(/^Tenant\ timezone/), 'America/Chicago');
+    await userEvent.tab();
+    await userEvent.click(screen.getByRole('button', { name: 'Next' })); // -> review
+
+    // The line is split across several inline JSX text nodes — match on the containing <dd>'s
+    // full text rather than a single node.
+    const billingDd = screen.getByText('Billing').nextElementSibling;
+    expect(billingDd?.textContent).toMatch(/\$75\/location × 1 = \$75\/mo/);
+    expect(billingDd?.textContent).toMatch(/\+\$250 one-time setup fee/);
+
+    await userEvent.click(screen.getByRole('button', { name: 'Provision this tenant' }));
+    await waitFor(() => expect(calls.some((c) => c.url.endsWith('/api/platform/provision'))).toBe(true));
+    const provisionCall = calls.find((c) => c.url.endsWith('/api/platform/provision'))!;
+    const body = JSON.parse(provisionCall.init!.body as string);
+    expect(body.monthlyRateCents).toBe(7500);
+    expect(body.setupFeeCents).toBe(25000);
+  });
+});
+
 describe('ProvisioningWizard · Admin step (invite, not password)', () => {
   test('renders name + email only — no password field anywhere', async () => {
     const next = await fillTenantStep();
@@ -129,5 +198,86 @@ describe('ProvisioningWizard · Timezone gate', () => {
     await userEvent.tab();
     expect(screen.queryByText(/valid IANA timezone/)).not.toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Next' })).toBeEnabled();
+  });
+});
+
+describe('ProvisioningWizard · Review, Provision, and the two-commit billing UX', () => {
+  async function toReviewStep() {
+    const next = await fillTenantStep();
+    await waitFor(() => expect(next).toBeEnabled());
+    await userEvent.click(next);
+    await userEvent.type(screen.getByLabelText(/^Admin\ name/), 'Avery Admin');
+    await userEvent.type(screen.getByLabelText(/^Admin\ email/), 'admin@acme.test');
+    await userEvent.click(screen.getByRole('button', { name: 'Next' }));
+    await userEvent.click(screen.getByRole('button', { name: 'Next' })); // locations -> template
+    await userEvent.click(screen.getByRole('button', { name: 'Next' })); // template -> timezone
+    await userEvent.type(screen.getByLabelText(/^Tenant\ timezone/), 'America/Chicago');
+    await userEvent.tab();
+    await userEvent.click(screen.getByRole('button', { name: 'Next' })); // -> review
+  }
+
+  test('billing attach failure shows "Tenant provisioned · billing attach failed" with a Retry billing action; success flips the alert', async () => {
+    await toReviewStep();
+    mockFetch({
+      checkSlug: () => ({ available: true }),
+      provision: () => ({
+        status: 201,
+        body: {
+          data: {
+            tenant: { id: 't1', name: 'Acme Storage', slug: 'acme-storage' },
+            adminUserId: 'u1',
+            locationIds: [],
+            billing: { attached: false, customerId: null, setupIntentClientSecret: null, subscriptionId: null, error: 'stripe unavailable' },
+          },
+        },
+      }),
+      retryBilling: () => ({ status: 200, body: { data: { attached: true, customerId: 'cus_t1', setupIntentClientSecret: 'seti_t1_secret', subscriptionId: 'sub_t1' } } }),
+    });
+
+    await userEvent.click(screen.getByRole('button', { name: 'Provision this tenant' }));
+
+    expect(await screen.findByText('Tenant provisioned · billing attach failed')).toBeInTheDocument();
+    expect(screen.getByText(/stripe unavailable/)).toBeInTheDocument();
+    // The tenant IS live — never a dead-end error toast. No invite link renders here anymore
+    // (Slice 5a: activation + invite issuance moved to the invoice.paid webhook).
+    expect(screen.getByText(/Awaiting first payment/)).toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole('button', { name: 'Retry billing' }));
+    expect(await screen.findByText('Subscription created')).toBeInTheDocument();
+    expect(screen.queryByText('Tenant provisioned · billing attach failed')).not.toBeInTheDocument();
+  });
+
+  test('billing attach success on the first try shows the success alert directly', async () => {
+    await toReviewStep();
+    mockFetch({
+      checkSlug: () => ({ available: true }),
+      provision: () => ({
+        status: 201,
+        body: {
+          data: {
+            tenant: { id: 't2', name: 'Acme Storage', slug: 'acme-storage' },
+            adminUserId: 'u2',
+            locationIds: [],
+            billing: { attached: true, customerId: 'cus_t2', setupIntentClientSecret: 'seti_t2_secret', subscriptionId: 'sub_t2' },
+          },
+        },
+      }),
+    });
+
+    await userEvent.click(screen.getByRole('button', { name: 'Provision this tenant' }));
+    expect(await screen.findByText('Subscription created')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Retry billing' })).not.toBeInTheDocument();
+  });
+
+  test('a 409 from provision (slug taken between Tenant step and submit) surfaces inline, not a crash', async () => {
+    await toReviewStep();
+    mockFetch({
+      checkSlug: () => ({ available: false }), // final-guard re-check fails
+    });
+
+    await userEvent.click(screen.getByRole('button', { name: 'Provision this tenant' }));
+    expect(await screen.findByText(/no longer available/)).toBeInTheDocument();
+    // Bounced back to the Tenant step for a fix, not stuck on Review.
+    expect(screen.getByLabelText(/^Organization\ name/)).toBeInTheDocument();
   });
 });

@@ -58,7 +58,11 @@ function recordBillingSnapshot(db: Database.Database, tenantId: string): void {
   if (!tenant) return;
   const tdb = new TenantDB(db, tenantId);
   const { count } = tdb.get<{ count: number }>("SELECT COUNT(*) as count FROM locations WHERE tenant_id = ? AND status = 'active'")!;
-  const last = tdb.get<{ billable_locations: number }>('SELECT billable_locations FROM billing_snapshots WHERE tenant_id = ? ORDER BY created_at DESC LIMIT 1');
+  // rowid, not created_at: two locations created in the same millisecond (e.g. provisioning's
+  // batch) would tie on the ISO-string timestamp and resolve arbitrarily; rowid is a reliable,
+  // monotonically-increasing insertion-order tiebreaker (Slice 5a — this flag drives the
+  // billing quantity-sync worker's trigger).
+  const last = tdb.get<{ billable_locations: number }>('SELECT billable_locations FROM billing_snapshots WHERE tenant_id = ? ORDER BY rowid DESC LIMIT 1');
   const changed = !last || last.billable_locations !== count ? 1 : 0;
   tdb.insert('billing_snapshots', {
     id: randomUUID(),

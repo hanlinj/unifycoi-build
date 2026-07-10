@@ -8,18 +8,21 @@ import { NoOpMailer } from '@/lib/notifications/mailer';
 import { queueNotification } from '@/lib/notifications/queue';
 import { startAllWorkers, stopAllWorkers } from '@/lib/workers/bootstrap';
 import { runDigestCycle, localHourInZone } from '@/lib/notifications/digest';
+import { NoOpBillingProvider } from '@/lib/billing/provider';
 
 // ── startAllWorkers ───────────────────────────────────────────────────────────────
 
 describe('startAllWorkers', () => {
-  test('starts all three workers and returns stoppable handles', () => {
+  test('starts all workers (incl. billing sync, Slice 5a) and returns stoppable handles', () => {
     const db = setupTestDb();
     const mailer = new NoOpMailer();
 
-    const handles = startAllWorkers(mailer, db);
+    const handles = startAllWorkers(mailer, db, new NoOpBillingProvider());
     expect(typeof handles.notification.stop).toBe('function');
     expect(typeof handles.digest.stop).toBe('function');
     expect(typeof handles.retention.stop).toBe('function');
+    expect(typeof handles.auditExport.stop).toBe('function');
+    expect(typeof handles.billingSync.stop).toBe('function');
 
     // Stopping must not throw, and leaves no live timers (they are unref'd anyway).
     expect(() => stopAllWorkers(handles)).not.toThrow();

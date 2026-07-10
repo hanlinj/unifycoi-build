@@ -13,9 +13,10 @@ export async function register() {
     seedTemplates(db);
 
     // Start the in-process background workers (notification sender, daily digest cycle,
-    // retention sweep). Dynamic imports keep them out of the edge bundle.
+    // retention sweep, billing quantity sync). Dynamic imports keep them out of the edge bundle.
     const { defaultMailer } = await import('@/lib/notifications/mailer');
+    const { defaultBillingProvider } = await import('@/lib/billing/stripe');
     const { startAllWorkers } = await import('@/lib/workers/bootstrap');
-    startAllWorkers(defaultMailer, db);
+    startAllWorkers(defaultMailer, db, defaultBillingProvider);
   }
 }

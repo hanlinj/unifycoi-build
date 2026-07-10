@@ -74,6 +74,13 @@ export const env = {
     // works without real Stripe. Publishable key is for the Slice-5 wizard's Elements card entry.
     stripeSecretKey: process.env['STRIPE_SECRET_KEY'] ?? '',
     stripePublishableKey: process.env['STRIPE_PUBLISHABLE_KEY'] ?? '',
+    // Slice 5a: automatic billing (ADR-012-05). Empty → the invoice.paid webhook route fails
+    // closed (503) since it can't verify signatures without a secret.
+    stripeWebhookSecret: process.env['STRIPE_WEBHOOK_SECRET'] ?? '',
+    // Quantity-sync worker poll cadence — location-count changes aren't time-sensitive (the
+    // next billing cycle is weeks away at minimum), so this defaults slower than the
+    // notification worker's.
+    syncWorkerPollSeconds: parseInt(process.env['BILLING_SYNC_WORKER_POLL_SECONDS'] ?? '300', 10),
   },
   observability: {
     // Sentry (OPS-12). Empty DSN → capture is a pino-only no-op (dev/test/CI).

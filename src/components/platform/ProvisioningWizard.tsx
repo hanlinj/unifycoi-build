@@ -1,19 +1,23 @@
 'use client';
 
 // The New Client Provisioning wizard (Phase 12 · Slice 4 — OPS-8 UI over the Slice 3 backend).
-// Tenant(name/slug) → Admin(name/email, no password) → Locations → Requirements template →
-// Timezone → Review → Provision → Billing attach.
+// Tenant(name/slug/rate/setup-fee) → Admin(name/email, no password) → Locations →
+// Requirements template → Timezone → Review → Provision → Billing attach.
 //
-// Credential model: the wizard never handles a password. The first Admin is created invited,
-// and an invite token is minted immediately at provision time — the Result screen below shows
-// the raw link for the operator to send out-of-band.
+// Credential model: the wizard never handles a password. The first Admin is created invited.
+//
+// Activation-on-payment (Slice 5a, ADR-012-05): billing is now an automatic Stripe
+// subscription — rate × location count, recurring, no manual monthly action. The Admin invite
+// is issued when the tenant's first invoice is actually PAID (the invoice.paid webhook), not
+// at provision time — so the Result screen below can no longer show a ready invite link; that
+// waits until the tenant activates.
 //
 // Two-commit shape: Provision (the audited DB transaction) and Billing attach (customer +
-// SetupIntent) are independent, separately retryable steps — POST /api/platform/provision
-// returns billing.attached=false on a Stripe failure WITHOUT failing the whole request (the
-// tenant is live, just unbilled). The Result panel shows that state explicitly and offers
-// "Retry billing", which calls the exact same attachBilling() the initial attempt used (via
-// /retry-billing) — never a dead end.
+// SetupIntent + subscription) are independent, separately retryable steps — POST
+// /api/platform/provision returns billing.attached=false on a Stripe failure WITHOUT failing
+// the whole request (the tenant is live, just unbilled). The Result panel shows that state
+// explicitly and offers "Retry billing", which calls the exact same attachBilling() the
+// initial attempt used (via /retry-billing) — never a dead end.
 
 import React from 'react';
 import { Panel, Card, CardBody, Button, Input, Select, FormField, Alert, Badge } from '@/components/ui';
@@ -34,14 +38,26 @@ interface ProvisionResponse {
   adminUserId: string;
   locationIds: string[];
   billing: BillingAttachResponse;
-  invite: { rawToken: string; inviteUrl: string; expiresAt: string };
 }
 
 interface BillingAttachResponse {
   attached: boolean;
   customerId: string | null;
   setupIntentClientSecret: string | null;
+  subscriptionId: string | null;
   error?: string;
+}
+
+/** "$90" / "90.5" → 9000 / 9050 cents. Returns null for blank/invalid input. */
+function dollarsToCents(raw: string): number | null {
+  const trimmed = raw.trim();
+  if (!trimmed) return null;
+  const n = Number(trimmed);
+  if (!Number.isFinite(n) || n < 0) return null;
+  return Math.round(n * 100);
+}
+function centsToDollarsLabel(cents: number): string {
+  return `$${(cents / 100).toLocaleString('en-US', { minimumFractionDigits: 0, maximumFractionDigits: 2 })}`;
 }
 
 const STEPS = ['tenant', 'admin', 'locations', 'template', 'timezone', 'review'] as const;
@@ -75,6 +91,8 @@ export function ProvisioningWizard({ templates }: { templates: WizardTemplate[] 
   const [slug, setSlug] = React.useState('');
   const [slugTouched, setSlugTouched] = React.useState(false);
   const [slugStatus, setSlugStatus] = React.useState<SlugStatus>('idle');
+  const [rateDollars, setRateDollars] = React.useState('90');
+  const [setupFeeDollars, setSetupFeeDollars] = React.useState('');
 
   const [adminName, setAdminName] = React.useState('');
   const [adminEmail, setAdminEmail] = React.useState('');
@@ -116,8 +134,14 @@ export function ProvisioningWizard({ templates }: { templates: WizardTemplate[] 
   const tzValid = isValidTimeZone(timezone);
   const tzError = tzTouched && !tzValid ? 'Enter a valid IANA timezone, e.g. America/Chicago.' : null;
 
+  const rateCents = dollarsToCents(rateDollars);
+  const setupFeeBlank = !setupFeeDollars.trim();
+  const setupFeeCents = setupFeeBlank ? null : dollarsToCents(setupFeeDollars);
+  const setupFeeValid = setupFeeBlank || setupFeeCents !== null;
+  const activeLocationCount = locations.filter((l) => l.name.trim()).length;
+
   const canAdvance: Record<Step, boolean> = {
-    tenant: !!name.trim() && slugStatus === 'available',
+    tenant: !!name.trim() && slugStatus === 'available' && rateCents !== null && setupFeeValid,
     admin: !!adminName.trim() && EMAIL_RE.test(adminEmail),
     locations: true, // manual entry is optional at this step
     template: !!templateId,
@@ -168,6 +192,8 @@ export function ProvisioningWizard({ templates }: { templates: WizardTemplate[] 
         firstAdmin: { name: adminName.trim(), email: adminEmail.trim() },
         locations: locations.filter((l) => l.name.trim()).map((l) => ({ name: l.name.trim(), address: l.address.trim() || undefined })),
         templateId,
+        monthlyRateCents: rateCents ?? undefined,
+        setupFeeCents: setupFeeCents ?? undefined,
       };
       const provisionRes = await fetch('/api/platform/provision', {
         method: 'POST',
@@ -212,26 +238,24 @@ export function ProvisioningWizard({ templates }: { templates: WizardTemplate[] 
       <div className="mx-auto max-w-[720px] px-6 py-8">
         <Panel>
           <div className="mb-5 flex items-center gap-2.5">
-            <Badge tone="success">Provisioned</Badge>
+            <Badge tone="info">Awaiting first payment</Badge>
             <h1 className="text-[19px] font-extrabold tracking-[-0.02em]">{result.tenant.name}</h1>
           </div>
 
-          <FormField
-            label="Admin invite link"
-            help="Send this to the first Admin so they can set their own password."
-          >
-            <Input readOnly value={result.invite.inviteUrl} onFocus={(e) => e.currentTarget.select()} />
-          </FormField>
+          <p className="mb-5 text-sm text-fg-muted">
+            The tenant is provisioned and the recurring subscription is set up. Once a first payment goes through, the
+            tenant activates automatically and the Admin&rsquo;s invite goes out automatically.
+          </p>
 
           <div className="mt-5">
             {result.billing.attached ? (
-              <Alert tone="success" title="Billing attached">
-                Stripe customer {result.billing.customerId} — card on file.
+              <Alert tone="success" title="Subscription created">
+                Stripe customer {result.billing.customerId}, subscription {result.billing.subscriptionId} — billed automatically, rate × location count, next cycle reflects any location changes.
               </Alert>
             ) : (
               <>
                 <Alert tone="attention" title="Tenant provisioned · billing attach failed">
-                  {result.billing.error ?? 'Stripe was unreachable.'} The tenant is live and unaffected — billing can be retried any time.
+                  {result.billing.error ?? 'Stripe was unreachable.'} The tenant is live and unaffected — billing can be retried any time; activation still waits on a paid invoice either way.
                 </Alert>
                 <div className="mt-3">
                   <Button variant="primary" size="sm" onClick={handleRetryBilling} disabled={retrying}>
@@ -293,6 +317,22 @@ export function ProvisioningWizard({ templates }: { templates: WizardTemplate[] 
                 help={slugStatus === 'checking' ? 'Checking availability…' : slugStatus === 'available' ? 'Available.' : 'Unique identifier for this tenant.'}
               >
                 <Input id="w-slug" value={slug} onChange={(e) => { setSlugTouched(true); setSlug(e.target.value); }} aria-invalid={slugStatus === 'taken' || slugStatus === 'error'} />
+              </FormField>
+              <FormField
+                label="Per-location rate ($/month)"
+                required
+                htmlFor="w-rate"
+                error={rateCents === null ? 'Enter a non-negative amount.' : null}
+              >
+                <Input id="w-rate" inputMode="decimal" value={rateDollars} onChange={(e) => setRateDollars(e.target.value)} aria-invalid={rateCents === null} />
+              </FormField>
+              <FormField
+                label="One-time setup fee ($, optional)"
+                htmlFor="w-setup-fee"
+                error={!setupFeeValid ? 'Enter a non-negative amount, or leave blank for none.' : null}
+                help="Charged once, on the first invoice only."
+              >
+                <Input id="w-setup-fee" inputMode="decimal" placeholder="None" value={setupFeeDollars} onChange={(e) => setSetupFeeDollars(e.target.value)} aria-invalid={!setupFeeValid} />
               </FormField>
             </div>
           )}
@@ -366,9 +406,18 @@ export function ProvisioningWizard({ templates }: { templates: WizardTemplate[] 
                 <dt className="text-fg-muted">Organization</dt><dd className="font-semibold">{name} <span className="text-fg-muted">({slug})</span></dd>
                 <dt className="text-fg-muted">Admin</dt><dd>{adminName} — {adminEmail}</dd>
                 <dt className="text-fg-muted">Locations</dt>
-                <dd>{locations.filter((l) => l.name.trim()).length === 0 ? 'None yet' : locations.filter((l) => l.name.trim()).map((l) => l.name).join(', ')}</dd>
+                <dd>{activeLocationCount === 0 ? 'None yet' : locations.filter((l) => l.name.trim()).map((l) => l.name).join(', ')}</dd>
                 <dt className="text-fg-muted">Template</dt><dd>{templates.find((t) => t.id === templateId)?.name ?? '—'}</dd>
                 <dt className="text-fg-muted">Timezone</dt><dd>{timezone}</dd>
+                <dt className="text-fg-muted">Billing</dt>
+                <dd>
+                  {rateCents !== null && (
+                    <>
+                      {centsToDollarsLabel(rateCents)}/location × {activeLocationCount} = <span className="font-semibold">{centsToDollarsLabel(rateCents * activeLocationCount)}/mo</span>, recurring automatically
+                      {setupFeeCents ? <> · +{centsToDollarsLabel(setupFeeCents)} one-time setup fee</> : null}
+                    </>
+                  )}
+                </dd>
               </dl>
             </div>
           )}
