@@ -17,10 +17,22 @@ export default async function LocationsPage() {
   if (res.status === 401) redirect('/login');
   const locations = (res.ok ? ((await res.json()).data as Loc[]) : []) ?? [];
 
+  const meRes = await fetch(`${base}/api/auth/me`, { headers: { Authorization: h.get('Authorization') ?? '', Cookie: cookies().toString() }, cache: 'no-store' });
+  const callerRole = meRes.ok ? ((await meRes.json()).data as { role?: string })?.role : undefined;
+
   return (
     <div style={{ maxWidth: 860, margin: '0 auto', padding: '32px 24px', fontFamily: 'system-ui, sans-serif', color: '#24292f' }}>
-      <h1 style={{ margin: '0 0 4px', fontSize: 24, fontWeight: 700 }}>Locations</h1>
-      <p style={{ margin: '0 0 20px', fontSize: 13, color: '#57606a' }}>Facilities in your scope. Open one to see its compliance record.</p>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
+        <div>
+          <h1 style={{ margin: '0 0 4px', fontSize: 24, fontWeight: 700 }}>Locations</h1>
+          <p style={{ margin: '0 0 20px', fontSize: 13, color: '#57606a' }}>Facilities in your scope. Open one to see its compliance record.</p>
+        </div>
+        {callerRole === 'admin' && (
+          <a href="/locations/add" style={{ padding: '6px 12px', borderRadius: 6, border: 'none', background: '#0969da', color: 'white', fontWeight: 600, fontSize: 12, textDecoration: 'none', whiteSpace: 'nowrap' }}>
+            Add locations
+          </a>
+        )}
+      </div>
       {locations.length === 0 ? <p style={{ fontSize: 13, color: '#57606a' }}>No locations in your scope.</p> : (
         <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 14 }}>
           <thead><tr style={{ background: '#f6f8fa', textAlign: 'left' }}>

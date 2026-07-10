@@ -8,6 +8,16 @@
 > Current state · Trigger · Effort · Recommended approach.** Trigger vocabulary: *before first
 > customer · before 5 · before 50 · if perf surfaces · customer-signal-only (never if not validated).*
 > Effort: *trivial / small / medium / large.*
+>
+> **⚠ Maintenance note (added Phase 12, 2026-07-09):** this document was updated for Phase 12's
+> provisioning/billing slices (OPS-7, OPS-8, OPS-10, TEST-1 resolved; SEC-18, OPS-14 added; see
+> below) but had **never been touched across the entirety of Phase 11** despite that phase
+> closing several still-"open" items below by memory (SEC-1 Resend ESP, SEC-8 password reset,
+> SEC-9 login rate-limiting, OPS-12 Sentry/observability, SEC-16 decrypt-failure alerting all
+> shipped Phase 11 per commit history) — those are flagged inline where found in this pass, but
+> **this was not a full Phase-11 re-audit**; treat any Phase-11-era item without an explicit
+> ✅/inline update below as *unverified-stale*, not confirmed-open, until someone checks it against
+> current code.
 
 ---
 
@@ -17,29 +27,31 @@
 
 | Category | Items |
 |---|---:|
-| Security & defensibility | 18 |
+| Security & defensibility | 19 |
 | Performance & scale | 10 |
-| Operational | 13 |
+| Operational | 14 |
 | Feature completeness | 16 |
 | Testing infrastructure | 6 |
 | Patterns observed (meta) | 6 |
-| **Total** | **69** |
+| **Total** | **71** |
 
-**Top 5 priorities (all before first real customer)**
+**Top priorities remaining (Phase 12 update, 2026-07-09)** — closed items struck from the original
+top-5; the two genuine blockers left from that original list are Phase-11-era and marked stale
+per the note above, not re-verified in this pass:
 
-1. **No real email (ESP).** The Mailer is a logged no-op — *no vendor or admin email is ever actually sent.* The entire chase/notification/invite value proposition is invisible to real users until this lands. (SEC-1 / OPS-1)
-2. **No password reset, no rate-limiting, no lockout.** Login is verify-only. A user who forgets a password cannot recover; the login endpoint has no brute-force protection. (SEC-8, SEC-9)
-3. **No provisioning path for non-engineers.** The platform shell is API-only — a tenant, its locations, and its first Admin must be created via raw API calls/scripts. Fine for an engineer-run design partner; a blocker otherwise. (OPS-8)
-4. **Retention marks only; no purge, no legal-hold, no offboard anchors.** 7-year marking works, but hard-delete, legal-hold override, and vendor-removal/tenant-offboard retention anchors are unbuilt — a problem the first time a customer (or regulator) asks to delete or preserve data. (SEC-3, SEC-4, SEC-5)
-5. **Operational blind spots: single-instance workers, secrets in env, no error monitoring.** Running >1 app instance double-runs the digest/retention workers; keys live in env; nothing alerts on failures (including `export.sensitive_decrypt_failed`). (OPS-6, OPS-12, OPS-13, SEC-13)
+1. ~~No provisioning path for non-engineers~~ — **✅ closed, Phase 12 Slice 4** (OPS-8: real wizard UI).
+2. ~~Billing is a manual reference~~ — **✅ closed (reversed to automatic), Phase 12 Slices 5a/5a.1** (OPS-10, ADR-012-05).
+3. **Retention marks only; no purge, no legal-hold, no offboard anchors.** Still open, not touched by Phase 12. (SEC-3, SEC-4, SEC-5)
+4. **Operational blind spots: single-instance workers.** Still open. Secrets-in-env is now the *confirmed intentional* posture, not a gap (ADR-012-07) — drop from this bullet. (OPS-6)
+5. *(Unverified-stale, check before trusting)* No real email / no password reset / no login rate-limiting — memory says Phase 11 closed all three (SEC-1, SEC-8, SEC-9); this document was never updated to reflect that. Verify against current code before treating any of them as still open.
 
 **What the build IS ready for**
 
-A **single design partner / pilot, engineer-provisioned, single app instance, modest scale** (tens of locations, hundreds of vendors). The core loop is complete and trustworthy end to end: invite → tokenized vendor upload (save-and-resume, image→PDF) → AI verification (Vision, forced structured output, deterministic rules engine, 9/9 eval) → Admin approve/reject/correct with required reasoning → exception-first Command Center + Manager Home → eager renewal/expiration chase → six reports (CSV/PDF) → defensible audit export (Sensitive opt-in, decrypt-proven). **Tenant isolation is structural, Sensitive data is encrypted at rest and never leaks in any surface/report/export by default (decrypt-proven, non-vacuous), and the audit trail is append-only and attributed.**
+A **single design partner / pilot, engineer-provisioned, single app instance, modest scale** (tens of locations, hundreds of vendors). The core loop is complete and trustworthy end to end: invite → tokenized vendor upload (save-and-resume, image→PDF) → AI verification (Vision, forced structured output, deterministic rules engine, 9/9 eval) → Admin approve/reject/correct with required reasoning → exception-first Command Center + Manager Home → eager renewal/expiration chase → six reports (CSV/PDF) → defensible audit export (Sensitive opt-in, decrypt-proven). **Tenant isolation is structural, Sensitive data is encrypted at rest and never leaks in any surface/report/export by default (decrypt-proven, non-vacuous), and the audit trail is append-only and attributed.** As of Phase 12: **an operator can provision a tenant through a real UI and actually collect a real card from a real customer** — the two biggest "not ready" items from the original audit are closed.
 
 **What the build is NOT ready for**
 
-Self-serve SaaS signup; horizontal/multi-instance scale; real email at volume; tenants needing data purge or legal hold; large orgs (1000s of locations — IN-list scope queries, single-file SQLite); mobile-field-heavy Store Manager usage (desktop-first, no responsive collapse despite MISSION's mobile-first intent for field roles); platform-staff self-service (no platform UI); multi-policy vendors (single COI track per vendor).
+Self-serve SaaS signup; horizontal/multi-instance scale; real email at volume (pending Phase-11-staleness verification above); tenants needing data purge or legal hold; large orgs (1000s of locations — IN-list scope queries, single-file SQLite); mobile-field-heavy Store Manager usage (desktop-first, no responsive collapse despite MISSION's mobile-first intent for field roles); multi-policy vendors (single COI track per vendor); bulk CSV import / in-panel invite management in the platform UI (still API-only — Slice 5b).
 
 ---
 
@@ -168,6 +180,14 @@ Self-serve SaaS signup; horizontal/multi-instance scale; real email at volume; t
 - **Effort:** small.
 - **Approach:** route the event to ops alerting (also OPS-5).
 
+### SEC-18 — `requestPasswordReset` emits no audit event *(discovered Phase 12 Slices 4a/5a/5a.1, still open)*
+- **What:** `requestPasswordReset` (`src/lib/services/password-reset.ts`) issues a token and queues the reset-email notification, but never calls `logAudit`. Every *other* credential-adjacent action in this codebase is audited — token issuance for invites (`admin.invite_issued`), the lifecycle flip on activation, even the billing-setup token's issuance rides inside an already-audited `attachBilling` call — but a plain password-reset request leaves no trail at all.
+- **Source:** Flagged repeatedly across Phase 12 Slices 4a, 5a, and 5a.1 as a carried-forward ledger item; never banked into this document until now, and never fixed (each slice confirmed it was still true and moved on, since fixing it wasn't in scope for any of those slices).
+- **Current state:** confirmed by direct code read — zero `logAudit` calls anywhere in `requestPasswordReset`. `confirmPasswordReset` (the completion) is also silent; only the surrounding notification (`password_reset` type) and its own delivery-webhook audit events exist.
+- **Why it's a real gap, not cosmetic:** a defensibility review or incident investigation ("did someone request a reset for this account, and when?") has nothing to query for a plain reset — only for invite/activation paths, which happen to route through functions that already audit for other reasons.
+- **Trigger:** before a defensibility/security review; small enough to close before go-live rather than carry further.
+- **Effort:** trivial (one `logAudit` call, `actorType: 'system'`, mirroring the pattern already used everywhere else in this file).
+
 ### SEC-17 — No address-level suppression on hard bounce / spam complaint *(discovered Phase 11 Slice 1)*
 - **What:** The Resend delivery webhook (`18853a5`) marks a bounced/complained notification and audits it, but nothing adds the recipient address to a suppression list — a future send to a known-bad or complained address is not blocked.
 - **Source:** Phase 11 Slice 1; `src/lib/notifications/resend-webhook.ts`.
@@ -284,7 +304,7 @@ Self-serve SaaS signup; horizontal/multi-instance scale; real email at volume; t
 - **Effort:** medium.
 - **Approach:** leader election or extract workers to a single dedicated process / real queue.
 
-### OPS-7 — Tenant timezone: provisioning input + timezone-aware expiry boundary math  🚩 **FIRST-CUSTOMER BLOCKER**
+### OPS-7 — Tenant timezone: provisioning input + timezone-aware expiry boundary math  ✅ RESOLVED
 - **What:** Two halves. (a) `tenants.timezone` must be a **required, validated** input at provisioning (today nullable → UTC fallback). (b) The COI-expiry **boundary math** must evaluate against the tenant's local day, not UTC.
 - **Source:** Phase 7 B (`51bcffb`); investigated end of Phase 11.
 - **Why this is a BLOCKER, not hardening:** a compliance product's core promise is being right at the COI-expiry boundary. "Expires this week" / the day-0 expired-flip computed in UTC is **off by up to a day** at the edges for a non-UTC customer — e.g. a US-Pacific tenant's day-0 flip fires at UTC-midnight of the expiry date, which is ~5pm the *previous* day Pacific, marking a vendor expired while (locally) coverage is still valid. Off-by-a-day at the compliance boundary is a correctness bug in the product's reason to exist, not cosmetic. This is distinct from the SEC-17 / SEC-8b / login-attempts-pruning items, which are hardening.
@@ -293,26 +313,24 @@ Self-serve SaaS signup; horizontal/multi-instance scale; real email at volume; t
   - **Boundary MATH is UTC/date-only today — NOT tz-aware.** The renewal ladder + day-0 job anchor to `Date.parse(expirationDate)` (`renewal.ts:82,171`) — a date-only expiry parses as **UTC midnight**. The Command Center "imminent/expiring-soon" buckets use `Math.floor((Date.parse(expiresAt) - now) / DAY_MS)` (`command-center.ts:167`), a floored UTC-instant delta; reports' `daysOut` is the same class (`builders.ts`). None read `tenants.timezone`.
 - **Effort:** provisioning input = **trivial**; timezone-aware boundary math = **the real work (small–medium)**.
 - **✅ MATH HALF RESOLVED — Phase 11 Slice 6 (`expiryBoundaryMs`, `src/lib/time/zone.ts`).** All three sites (renewal ladder + day-0 flip, Command Center `daysToExpiry`, reports `daysOut`) now resolve the boundary in the tenant's timezone. **Semantics = START of the expiry day, tenant-local** (spec-aligned: "Expired the moment the date passes / safest compliance posture" — the alternative "valid-through / end-of-day-local" was NOT chosen; it would change UTC behavior and diverge from the spec). A date-only expiry anchors to 00:00 tenant-local; a full-ISO expiry is honored as-is. UTC/null tenant is a byte-identical no-op (zero existing-test changes). Proven Pacific/Tokyo/UTC in `tests/phase11-tz-expiry.test.ts`.
-- **🚩 INPUT HALF STILL GATES.** This slice only makes the math correct *once a timezone is present*. Capturing `tenants.timezone` at provisioning (required + validated) is **still deferred to the provisioning/`dev-seed` work** (uncommitted, out of scope here). **Until it lands, a tenant with no explicit timezone falls back to UTC** (per `expiryBoundaryMs` / the digest convention) — so a non-UTC customer provisioned without a timezone still gets UTC boundaries. The blocker is **half-closed**: math correct, input not yet enforced. **Lands with provisioning, before first customer** — NOT "Phase 12 someday."
+- **✅ INPUT HALF RESOLVED — Phase 12 Slice 4 (`provisionTenant`, `src/lib/services/provisioning.ts`).** `timezone` is now a required field validated via `isValidTimeZone` before any write — provisioning `bad()`s (400) on missing/invalid, never silently defaults to UTC. Both halves closed: a tenant provisioned from this point forward has correct boundary math from day one. (A tenant provisioned before this landed, or via the raw `dev-seed` script, can still have no timezone — that's historical data, not a live gap.)
 
-### OPS-8 — No provisioning / platform admin UI
+### OPS-8 — No provisioning / platform admin UI  ✅ RESOLVED
 - **What:** The platform shell (fleet/tenants, provisioning, bulk import, billing, support/impersonation) is API-only; `/platform` is a placeholder.
 - **Source:** Phase 10 B (`3a46501`), `src/app/platform/page.tsx`.
-- **Current state:** platform APIs (`/api/platform/*`) exist and work; no UI.
-- **Trigger:** before first customer (someone must provision; an engineer can via API for a design partner).
-- **Effort:** large (full shell) / small (rely on API + scripts for a pilot).
-- **Approach:** build the platform shell when moving beyond engineer-run provisioning.
+- **Current state (Phase 10):** platform APIs (`/api/platform/*`) exist and work; no UI.
+- **✅ RESOLVED — Phase 12 Slices 3–4.** A real provisioning wizard (`src/components/platform/ProvisioningWizard.tsx`, `/platform/provisioning`) walks Tenant(name/slug/rate/setup-fee) → Admin(name/email, invite-only — no password ever handled in the app) → Locations → Requirements template → Timezone → Review → Provision → Billing attach, with a live slug-uniqueness pre-check and a "Retry billing" affordance for a partial Stripe failure. The nav chip flipped from disabled to live. **Bulk import UI ✅ built — Phase 12 Slice 5b, Feature 1** (see ADR-012-08): an editable store+manager table, typed or filled by a .csv/.xlsx upload, in both the wizard's Locations step and a new tenant-Admin `/locations/add` screen. **In-panel invite send/resend is still not built** — Slice 5b, Feature 2, next.
 
 ### OPS-9 — Org Settings UI not built
 - **What:** Admins can't edit org name/branding/approval routing/notification defaults via UI.
 - **Source:** Phase 10 (Path C deferral), `Client_Org_Settings.md`.
 - **Current state:** tenant name/billing-rate editable via API (`tenant.settings_changed` audited); no UI.
-- **Trigger:** before 5. **Effort:** medium.
+- **Trigger:** before 5. **Effort:** medium. **Still open** — untouched by Phase 12's provisioning/billing slices.
 
-### OPS-10 — Billing is manual
-- **What:** Location-count × $90 is computed/snapshotted but billing is a manual reference.
+### OPS-10 — Billing: reversed from manual to automatic  ✅ RESOLVED (by deliberate spec deviation)
+- **What (original):** Location-count × $90 was computed/snapshotted but billing was a manual reference — an operator had to charge each tenant by hand every cycle.
 - **Source:** Platform Systems & Tenancy spec; billing snapshots (Phase 2/7).
-- **Trigger:** before 5. **Effort:** medium.
+- **✅ REVERSED — Phase 12 Slices 5a + 5a.1 (ADR-012-05, `docs/decisions.md`).** Owner-directed deviation from the spec's "billing is manual" framing (which this item's own "before 5 / medium" framing had assumed would stay true) — billing is now a **real, automatic Stripe subscription**: rate × current location count, a one-time setup fee on the first invoice only, quantity synced to location-count changes effective next cycle (proration off), and a **Stripe Elements card-entry page** (`/billing/setup`) so the operator can actually collect a real card from a real customer — closing the loop that made the whole chain inert (a SetupIntent existed since Phase 12 Slice 3 with no UI ever consuming it). Verified against real Stripe test mode end-to-end: card → charge → forwarded `invoice.paid` webhook → tenant activation → Admin invite issued. **Known gap carried into Slice 5b:** once activated, there is still no admin-panel view to retrieve or resend either link (billing-setup or credential-invite) after their one-time display — see the new OPS-14 below.
 
 ### OPS-11 — Impersonation flow has no UI
 - **What:** The token model carries `impersonatedBy` and `getMeInfo` handles it, but there's no platform "impersonate" action or the persistent banner the spec requires.
@@ -330,6 +348,15 @@ Self-serve SaaS signup; horizontal/multi-instance scale; real email at volume; t
 - **Source:** Phase 1.
 - **Trigger:** before first customer. **Effort:** small.
 - **Approach:** secret manager (and pair with SEC-13 rotation).
+- **SUPERSEDED — Phase 12 Slice 5a.1.** Doppler is no longer the plan; the owner confirmed secrets (including the Stripe keys) live in `.env` going forward, not a secret manager. `.env` confirmed gitignored and never committed to history (checked `git log --all -- .env`, empty). This item's "before first customer" trigger is explicitly waived by owner decision — re-open only if that changes.
+
+### OPS-14 — No way to retrieve/resend the billing-setup or credential-invite link after first display *(discovered Phase 12 Slice 5a.1)*
+- **What:** Both tokenized links the operator needs to hand a customer — the billing-setup link (`/billing/setup?token=...`, Slice 5a.1) and the credential-invite link (`/reset-password?token=...`, Slice 4/5a) — are shown exactly once (in the wizard's Result screen, or nowhere at all in the invite's case, since it's issued asynchronously by the `invoice.paid` webhook after the wizard has already finished). If the operator loses the billing link before sending it, or needs to resend the invite, there is no UI to regenerate or look either one up.
+- **Source:** Phase 12 Slice 5a.1 (`docs/decisions.md` ADR-012-06 names the token infrastructure; this is the missing UI on top of it).
+- **Current state:** both tokens are fully re-issuable via existing service functions (`issueBillingSetupToken`, `issueInviteToken`) and both are revisitable/idempotent by design (a billing-setup link never expires-on-use; a redelivered invite would just need a fresh token minted) — the gap is purely UI/route, not data model.
+- **Trigger:** before 5 (a lost link today means a direct DB/API poke, same as the pre-existing invite-resend gap noted in Slice 5a's ledger).
+- **Effort:** small–medium.
+- **Approach:** banked explicitly as Slice 5b scope (per the Slice 5a.1 brief: "bulk import, invite management... gates no revenue") — a tenant-detail action ("Resend billing link" / "Resend invite") that calls the existing issuance functions and displays the result the same way the wizard does today.
 
 ---
 
@@ -418,11 +445,10 @@ Self-serve SaaS signup; horizontal/multi-instance scale; real email at volume; t
 
 ## Testing infrastructure
 
-### TEST-1 — No React render harness for pages/components
+### TEST-1 — No React render harness for pages/components  ✅ RESOLVED
 - **What:** Pages/components are largely untested at render level; logic is extracted to pure functions + API handlers which *are* tested.
 - **Source:** every phase ("no render harness"); Phase 10 D added one `renderToStaticMarkup` test + enabled `jsx` in jest.
-- **Trigger:** before 50 / before heavy UI work. **Effort:** medium.
-- **Approach:** React Testing Library + jsdom environment.
+- **✅ RESOLVED — Phase 12 Slice 1.** A second Jest project (`jsdom`, disjoint `*.test.tsx` glob from the `node` project's `*.test.ts`) runs React Testing Library against real component trees — used extensively through Slices 4/4a/5a/5a.1 (the provisioning wizard's every validation gate, the reset-password and billing-setup pages' dead-end/happy branches, the CardEntryForm's entered/declined/abandoned states with Stripe.js mocked). Async Server Components (page.tsx files that `await` a DB/Stripe call) are tested by awaiting the component function directly to get its returned element, then handing that to `react-dom/server` — documented as the working pattern in `tests/phase12-billing-setup.test.ts` for the next agent who hits an async-component test.
 
 ### TEST-2 — No true cross-process / session-boundary tests
 - **What:** Workers + FSM + save-and-resume are tested in-process (the "no client storage" proof is architectural, not a real second process).
