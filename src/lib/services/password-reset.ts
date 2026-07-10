@@ -24,6 +24,7 @@ import { hashPassword } from '@/lib/auth/password';
 import { generateResetToken, hashResetToken } from '@/lib/auth/reset-token';
 import { queueNotification } from '@/lib/notifications/queue';
 import { isPasswordValid } from '@/lib/auth/password-policy';
+import { logAudit } from '@/lib/audit';
 
 const RESET_TTL_MS = 60 * 60 * 1000; // ~1h
 const INVITE_TTL_MS = 7 * 24 * 60 * 60 * 1000; // ~7d — white-glove onboarding pace, not urgent
@@ -55,6 +56,22 @@ function resolveResettableUser(db: Database.Database, email: string): Resettable
  * Issue a reset token + queue the email IFF the email resolves. Always does the token-hash
  * work (even for an unknown email) so the crypto term doesn't diverge; see the checkpoint's
  * timing note for the residual (the DB writes only happen on the found path).
+ *
+ * Audit (SEC-18): logs `password_reset.requested` ONLY on the match path, attributed to the
+ * matched user — never on a no-match. This is not a style choice: audit_events.tenant_id is
+ * NOT NULL (tenant isolation is structural, invariant #2), and a no-match request has no tenant
+ * to attribute an event to (the email doesn't resolve to any account, anywhere). There is
+ * nowhere honest to put a "no-match" row without either inventing a sentinel tenant (a worse
+ * hack than not logging) or weakening that NOT NULL constraint (a bigger, unrelated change).
+ * This preserves enumeration-safety by construction, not by restraint: the HTTP response this
+ * function's caller sends back is identical match-or-not either way (unchanged from Slice 4a),
+ * and the audit event is never reflected in that response — it's an internal record an
+ * authenticated Admin can see only for THEIR OWN tenant's users, not a probe surface an
+ * anonymous requester can query. actorType is 'system' (no authenticated actor exists — the
+ * requester isn't logged in), actorId is a fixed descriptive string, same convention as
+ * activateTenantOnFirstPayment's 'stripe-webhook'. The payload carries no token/hash/expiry —
+ * audit records that a reset was requested, not the credential itself (same principle as the
+ * dev-gated logDevInviteUrl never being reachable in production).
  */
 export function requestPasswordReset(
   db: Database.Database,
@@ -76,6 +93,15 @@ export function requestPasswordReset(
     new Date(now.getTime() + RESET_TTL_MS).toISOString(),
     now.toISOString()
   );
+
+  logAudit(db, {
+    tenantId: user.tenant_id,
+    actorType: 'system',
+    actorId: 'password-reset-request',
+    eventType: 'password_reset.requested',
+    targetType: 'user',
+    targetId: user.id,
+  });
 
   // A reset is just another notification type — queued to the internal user, sent by the
   // Slice 1 worker with internal (UnifyCOI) From. The raw token rides in the link only.

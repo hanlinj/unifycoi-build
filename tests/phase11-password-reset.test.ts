@@ -81,6 +81,67 @@ describe('requestPasswordReset', () => {
     requestPasswordReset(db, { email: 'gone@acme.test' }, NOW);
     expect((db.prepare('SELECT COUNT(*) c FROM password_reset_tokens').get() as { c: number }).c).toBe(0);
   });
+
+  // ── audit (SEC-18) ────────────────────────────────────────────────────────────
+
+  test('a matching email logs password_reset.requested, attributed to the matched user', () => {
+    const db = setupTestDb();
+    const t = seedTenant(db);
+    const u = seedTenantUser(db, t.id, { email: 'admin@acme.test', password: 'old-password-1' });
+    requestPasswordReset(db, { email: 'admin@acme.test' }, NOW);
+
+    const event = db.prepare(
+      "SELECT tenant_id, actor_type, target_type, target_id, payload_json FROM audit_events WHERE event_type = 'password_reset.requested'"
+    ).get() as { tenant_id: string; actor_type: string; target_type: string; target_id: string; payload_json: string | null };
+
+    expect(event).toMatchObject({ tenant_id: t.id, actor_type: 'system', target_type: 'user', target_id: u.id });
+  });
+
+  test('an unknown email logs NO audit event at all — not a "no-match" row either (enumeration-safe by construction: audit_events.tenant_id is NOT NULL and a no-match has no tenant to attribute to)', () => {
+    const db = setupTestDb();
+    seedTenant(db);
+    requestPasswordReset(db, { email: 'nobody@nowhere.test' }, NOW);
+    const count = (db.prepare("SELECT COUNT(*) c FROM audit_events WHERE event_type = 'password_reset.requested'").get() as { c: number }).c;
+    expect(count).toBe(0);
+  });
+
+  test('a disabled user (a real account, but not resettable) also logs no audit event, same as no token being issued', () => {
+    const db = setupTestDb();
+    const t = seedTenant(db);
+    seedTenantUser(db, t.id, { email: 'gone@acme.test', password: 'x', status: 'disabled' });
+    requestPasswordReset(db, { email: 'gone@acme.test' }, NOW);
+    const count = (db.prepare("SELECT COUNT(*) c FROM audit_events WHERE event_type = 'password_reset.requested'").get() as { c: number }).c;
+    expect(count).toBe(0);
+  });
+
+  test('the audit payload never carries the raw token, its hash, or the expiry — action is recorded, not the credential', () => {
+    const db = setupTestDb();
+    const t = seedTenant(db);
+    const u = seedTenantUser(db, t.id, { email: 'admin@acme.test', password: 'old-password-1' });
+    requestPasswordReset(db, { email: 'admin@acme.test' }, NOW);
+
+    const event = db.prepare("SELECT payload_json FROM audit_events WHERE event_type = 'password_reset.requested'").get() as { payload_json: string | null };
+    const rows = tokenRow(db, u.id);
+    const rawTokenHash = rows[0].token_hash;
+
+    // No payload at all is the strongest guarantee — nothing to leak. Assert that explicitly,
+    // and additionally confirm the stored hash never appears anywhere in the row as a defense
+    // in depth against a future accidental payload addition.
+    expect(event.payload_json).toBeNull();
+    expect(JSON.stringify(event)).not.toContain(rawTokenHash);
+  });
+
+  test('response is identical for a known vs unknown email regardless of the audit event (enumeration-safety is a response-shape guarantee, unaffected by internal audit logging)', async () => {
+    const db = setupTestDb();
+    const t = seedTenant(db);
+    seedTenantUser(db, t.id, { email: 'admin@acme.test', password: 'old-password-1' });
+
+    // Both calls succeed identically from the caller's perspective (void return, no throw) —
+    // the audit event is an internal side effect never reflected back to the requester, so it
+    // cannot become a new oracle for "which emails are real" no matter which path fires.
+    expect(() => requestPasswordReset(db, { email: 'admin@acme.test' }, NOW)).not.toThrow();
+    expect(() => requestPasswordReset(db, { email: 'nobody@nowhere.test' }, NOW)).not.toThrow();
+  });
 });
 
 // ── round-trip through the REAL worker ──────────────────────────────────────────
