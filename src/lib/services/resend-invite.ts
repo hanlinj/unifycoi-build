@@ -6,6 +6,7 @@ import { randomUUID } from 'crypto';
 import type Database from 'better-sqlite3';
 import { TenantDB } from '@/lib/db/tenant';
 import { generateInviteToken } from '@/lib/auth/invite-token';
+import { logDevInviteUrl } from '@/lib/dev/log-invite-url';
 import { queueNotification } from '@/lib/notifications/queue';
 import { logAudit } from '@/lib/audit';
 
@@ -37,6 +38,7 @@ export function resendInvite(
   if (!vendor.contact_email) throw new ResendInviteError('Vendor has no contact email to resend to', 'NO_EMAIL');
 
   const { rawToken, tokenHash } = generateInviteToken();
+  logDevInviteUrl(rawToken, `resent onboarding invite · ${vendor.business_name ?? 'vendor'}`);
   const inviteId = randomUUID();
   const now = new Date().toISOString();
   const expiresAt = new Date(Date.now() + INVITE_LIFETIME_MS).toISOString();

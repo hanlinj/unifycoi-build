@@ -8,6 +8,7 @@
     "start": "next start",
     "migrate": "dotenv -- tsx src/lib/db/migrate.ts",
     "eval": "dotenv -- tsx scripts/eval-test-dataset.ts",
+    "seed:dev": "dotenv -- tsx scripts/dev-seed.ts",
     "test": "jest"
   },
   "dependencies": {

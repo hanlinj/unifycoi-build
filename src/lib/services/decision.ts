@@ -6,6 +6,7 @@ import type Database from 'better-sqlite3';
 import { TenantDB } from '@/lib/db/tenant';
 import { logAudit } from '@/lib/audit';
 import { generateInviteToken } from '@/lib/auth/invite-token';
+import { logDevInviteUrl } from '@/lib/dev/log-invite-url';
 import { notifyTenantAdmins } from '@/lib/notifications/queue';
 
 const CORRECTION_INVITE_LIFETIME_MS = 14 * 24 * 60 * 60 * 1000;
@@ -220,6 +221,7 @@ export function applyDecision(input: DecisionInput): DecisionResult {
   }
 
   const { rawToken, tokenHash } = generateInviteToken();
+  logDevInviteUrl(rawToken, 'correction request');
   const inviteId = randomUUID();
   const expiresAt = new Date(Date.now() + CORRECTION_INVITE_LIFETIME_MS).toISOString();
 

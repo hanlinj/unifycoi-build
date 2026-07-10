@@ -3,6 +3,7 @@ import type Database from 'better-sqlite3';
 import { TenantDB } from '@/lib/db/tenant';
 import { logAudit } from '@/lib/audit';
 import { generateInviteToken } from '@/lib/auth/invite-token';
+import { logDevInviteUrl } from '@/lib/dev/log-invite-url';
 
 // Single shared trade enum (see src/lib/trades.ts) — re-exported for existing importers.
 export { VALID_TRADES } from '@/lib/trades';
@@ -70,6 +71,7 @@ export function createVendorInvite(
   }
 
   const { rawToken, tokenHash } = generateInviteToken();
+  logDevInviteUrl(rawToken, `onboarding invite · ${input.businessName}`);
   const vendorId = randomUUID();
   const inviteId = randomUUID();
   const now = new Date().toISOString();
