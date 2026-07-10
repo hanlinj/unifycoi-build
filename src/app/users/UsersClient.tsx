@@ -76,12 +76,14 @@ export function InviteUserForm({ callerRole, regions, locations }: { callerRole:
 
 // ── Per-row actions: deactivate / reactivate + edit scope ─────────────────────────────────
 
-export function UserRowActions({ user, regions, locations }: { user: { id: string; role: string; status: string; regionIds: string[]; locationIds: string[] }; regions: Opt[]; locations: Opt[] }) {
+export function UserRowActions({ user, regions, locations }: { user: { id: string; role: string; status: string; inviteSentAt: string | null; regionIds: string[]; locationIds: string[] }; regions: Opt[]; locations: Opt[] }) {
   const [editing, setEditing] = useState(false);
   const [regionIds, setRegionIds] = useState(user.regionIds);
   const [locationIds, setLocationIds] = useState(user.locationIds);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+  const [inviteUrl, setInviteUrl] = useState<string | null>(null);
+  const [copied, setCopied] = useState(false);
 
   async function patch(body: Record<string, unknown>) {
     setBusy(true); setErr(null);
@@ -92,6 +94,25 @@ export function UserRowActions({ user, regions, locations }: { user: { id: strin
       setErr((b as { error?: string }).error ?? `Error ${res.status}`);
     } catch { setErr('Network error.'); } finally { setBusy(false); }
   }
+  async function sendInvite() {
+    setBusy(true); setErr(null);
+    try {
+      const res = await fetch(`/api/users/${user.id}/send-invite`, { method: 'POST' });
+      const b = await res.json().catch(() => ({}));
+      if (res.ok) { setInviteUrl((b as { data: { inviteUrl: string } }).data.inviteUrl); return; }
+      setErr((b as { error?: string }).error ?? `Error ${res.status}`);
+    } catch { setErr('Network error.'); } finally { setBusy(false); }
+  }
+  async function copyInviteUrl() {
+    if (!inviteUrl) return;
+    try {
+      await navigator.clipboard.writeText(inviteUrl);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch {
+      // Clipboard API unavailable — the link is still visible/selectable below.
+    }
+  }
   const toggle = (arr: string[], set: (v: string[]) => void, id: string) => set(arr.includes(id) ? arr.filter((x) => x !== id) : [...arr, id]);
 
   return (
@@ -101,6 +122,17 @@ export function UserRowActions({ user, regions, locations }: { user: { id: strin
         : <button disabled={busy} onClick={() => { if (confirm('Deactivate this user? They will be blocked from signing in. History is retained.')) patch({ status: 'disabled' }); }} style={{ ...btn, background: 'white', color: '#cf222e', border: '1px solid #cf222e' }}>Deactivate</button>}
       {(user.role === 'district_manager' || user.role === 'store_manager') && (
         <button disabled={busy} onClick={() => setEditing((v) => !v)} style={{ ...btn, background: 'white', color: '#24292f', border: '1px solid #d0d7de' }}>{editing ? 'Cancel' : 'Edit scope'}</button>
+      )}
+      {user.status === 'invited' && (
+        <button disabled={busy} onClick={sendInvite} style={{ ...btn, background: 'white', color: '#0969da', border: '1px solid #0969da' }}>
+          {busy ? 'Sending…' : user.inviteSentAt ? 'Resend invite' : 'Send invite'}
+        </button>
+      )}
+      {inviteUrl && (
+        <div style={{ flexBasis: '100%', display: 'flex', gap: 8, alignItems: 'center', marginTop: 4 }}>
+          <input readOnly value={inviteUrl} onFocus={(e) => e.currentTarget.select()} style={{ ...input, flex: 1, fontSize: 12 }} />
+          <button onClick={copyInviteUrl} style={{ ...btn, padding: '5px 10px' }}>{copied ? 'Copied' : 'Copy'}</button>
+        </div>
       )}
       {editing && (
         <div style={{ flexBasis: '100%', border: '1px solid #eaeef2', borderRadius: 6, padding: 8, marginTop: 4 }}>

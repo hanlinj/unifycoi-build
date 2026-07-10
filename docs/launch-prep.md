@@ -353,10 +353,10 @@ Self-serve SaaS signup; horizontal/multi-instance scale; real email at volume (p
 ### OPS-14 — No way to retrieve/resend the billing-setup or credential-invite link after first display *(discovered Phase 12 Slice 5a.1)*
 - **What:** Both tokenized links the operator needs to hand a customer — the billing-setup link (`/billing/setup?token=...`, Slice 5a.1) and the credential-invite link (`/reset-password?token=...`, Slice 4/5a) — are shown exactly once (in the wizard's Result screen, or nowhere at all in the invite's case, since it's issued asynchronously by the `invoice.paid` webhook after the wizard has already finished). If the operator loses the billing link before sending it, or needs to resend the invite, there is no UI to regenerate or look either one up.
 - **Source:** Phase 12 Slice 5a.1 (`docs/decisions.md` ADR-012-06 names the token infrastructure; this is the missing UI on top of it).
-- **Current state:** both tokens are fully re-issuable via existing service functions (`issueBillingSetupToken`, `issueInviteToken`) and both are revisitable/idempotent by design (a billing-setup link never expires-on-use; a redelivered invite would just need a fresh token minted) — the gap is purely UI/route, not data model.
-- **Trigger:** before 5 (a lost link today means a direct DB/API poke, same as the pre-existing invite-resend gap noted in Slice 5a's ledger).
-- **Effort:** small–medium.
-- **Approach:** banked explicitly as Slice 5b scope (per the Slice 5a.1 brief: "bulk import, invite management... gates no revenue") — a tenant-detail action ("Resend billing link" / "Resend invite") that calls the existing issuance functions and displays the result the same way the wizard does today.
+- **✅ RESOLVED (invite half) — Phase 12 Slice 5b, Feature 2 (ADR-012-09).** `/users` shows invite state (invited/no-link-sent vs invited/sent vs active) and a Send-invite/Resend-invite action per row, wired to `sendUserInvite` (reuses `issueInviteToken` verbatim). This closes the tenant-Users-panel side of the gap — an Admin can now resend any dormant manager's link without a DB/API poke. **Still open:** the platform-altitude side — a tenant-cockpit action to resend the FIRST Admin's own credential-invite link or the billing-setup link (both still one-time-display in the provisioning wizard's Result screen; no `/platform/tenants/:id` UI consumes `issueBillingSetupToken`/`issueInviteToken` for those two specifically).
+- **Trigger:** before 5 (a lost billing-setup/first-Admin-invite link today still means a direct DB/API poke).
+- **Effort:** small (the invite-panel half, done); small–medium remaining (the platform tenant-cockpit half).
+- **Approach (remaining):** a tenant-detail action ("Resend billing link" / "Resend admin invite") in `/platform/tenants/:id` that calls the existing issuance functions and displays the result the same way the wizard does today.
 
 ---
 

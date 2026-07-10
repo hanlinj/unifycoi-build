@@ -9,7 +9,7 @@ import { InviteUserForm, UserRowActions } from './UsersClient';
 
 export const dynamic = 'force-dynamic';
 
-interface ManagedUser { id: string; email: string; name: string; role: string; status: string; regionIds: string[]; locationIds: string[]; manageable: boolean }
+interface ManagedUser { id: string; email: string; name: string; role: string; status: string; invite_sent_at: string | null; regionIds: string[]; locationIds: string[]; manageable: boolean }
 interface Loc { id: string; name: string; region_id: string | null; region_name: string | null }
 
 const ROLE_LABEL: Record<string, string> = { admin: 'Admin', district_manager: 'District Manager', store_manager: 'Store Manager' };
@@ -91,11 +91,18 @@ export default async function UsersPage({ searchParams }: { searchParams: { role
                   <td style={td}>{u.name}</td>
                   <td style={{ ...td, color: '#57606a' }}>{u.email}</td>
                   <td style={td}>{ROLE_LABEL[u.role] ?? u.role}</td>
-                  <td style={{ ...td, color: u.status === 'disabled' ? '#cf222e' : u.status === 'invited' ? '#9a6700' : '#1a7f37', fontWeight: 600 }}>{u.status}</td>
+                  <td style={{ ...td, color: u.status === 'disabled' ? '#cf222e' : u.status === 'invited' ? '#9a6700' : '#1a7f37', fontWeight: 600 }}>
+                    {u.status}
+                    {u.status === 'invited' && (
+                      <span style={{ display: 'block', fontSize: 11, color: '#8c959f', fontWeight: 400 }}>
+                        {u.invite_sent_at ? 'link sent' : 'no link sent'}
+                      </span>
+                    )}
+                  </td>
                   <td style={{ ...td, color: '#57606a' }}>{scopeText}</td>
                   <td style={td}>
                     {u.manageable
-                      ? <UserRowActions user={{ id: u.id, role: u.role, status: u.status, regionIds: u.regionIds, locationIds: u.locationIds }} regions={regions} locations={locations.map((l) => ({ id: l.id, name: l.name }))} />
+                      ? <UserRowActions user={{ id: u.id, role: u.role, status: u.status, inviteSentAt: u.invite_sent_at, regionIds: u.regionIds, locationIds: u.locationIds }} regions={regions} locations={locations.map((l) => ({ id: l.id, name: l.name }))} />
                       : <span style={{ fontSize: 12, color: '#8c959f' }}>Admin — not manageable by you</span>}
                   </td>
                 </tr>

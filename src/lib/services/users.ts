@@ -4,6 +4,8 @@ import { TenantDB } from '@/lib/db/tenant';
 import { hashPassword } from '@/lib/auth/password';
 import { logAudit } from '@/lib/audit';
 import { userManageableByScope, type Scope } from '@/lib/scope';
+import { issueInviteToken } from './password-reset';
+import { env } from '@/lib/env';
 
 export interface User {
   id: string;
@@ -13,6 +15,10 @@ export interface User {
   role: string;
   status: string;
   created_at: string;
+  /** Last time an invite link was issued (Slice 5b, Feature 2) — null = never sent. Drives the
+   *  Users panel's Send-invite vs Resend-invite button; independent of `status`, since a link
+   *  can be sent more than once before the invitee ever accepts it. */
+  invite_sent_at: string | null;
   password_hash?: string | null; // never returned to client
 }
 
@@ -41,7 +47,7 @@ const VALID_ROLES = ['admin', 'district_manager', 'store_manager'] as const;
 
 function userWithScope(db: Database.Database, tenantId: string, userId: string): UserWithScope | null {
   const tdb = new TenantDB(db, tenantId);
-  const user = tdb.get<User>('SELECT id, tenant_id, email, name, role, status, created_at FROM users WHERE tenant_id = ? AND id = ?', [userId]);
+  const user = tdb.get<User>('SELECT id, tenant_id, email, name, role, status, invite_sent_at, created_at FROM users WHERE tenant_id = ? AND id = ?', [userId]);
   if (!user) return null;
 
   const regionRows = tdb.all<{ region_id: string }>('SELECT region_id FROM user_regions WHERE tenant_id = ? AND user_id = ?', [userId]);
@@ -281,4 +287,62 @@ export function inviteUser(
   });
 
   return userWithScope(db, tenantId, userId)!;
+}
+
+export interface SendInviteResult {
+  user: UserWithScope;
+  inviteUrl: string;
+  expiresAt: string;
+}
+
+/**
+ * Send (or resend) a credential-set invite link for a dormant user — Slice 5b, Feature 2. Reuses
+ * issueInviteToken verbatim (the SAME token path as the provisioning wizard's Admin invite and
+ * the billing-setup link — one table, one crypto primitive, distinguished by `purpose`), so this
+ * is wiring existing machinery to a UI, not new token infrastructure. Requires status='invited':
+ * a dormant, never-logged-in user is the only state this makes sense for — an active user has
+ * already set their password, and re-inviting them would be a confusing dead link, not a reset
+ * (that's requestPasswordReset's job).
+ *
+ * "Send" and "resend" are the same call — invite_sent_at (null vs set) is what the UI reads to
+ * choose the button label; the backend doesn't need to know which the caller meant.
+ *
+ * Deliberately does NOT invalidate a previously-issued invite token still outstanding for this
+ * user: multiple live invite tokens for one user is the same shape the Admin invite and
+ * billing-setup links already accept (issueInviteToken never invalidates siblings either), and
+ * confirmPasswordReset already invalidates every other outstanding reset/invite token the moment
+ * ANY one of them is actually used — so there is never more than one *usable* credential-set
+ * outcome, just possibly more than one live link pointing at it. Not an oversight.
+ */
+export function sendUserInvite(
+  db: Database.Database,
+  tenantId: string,
+  userId: string,
+  actorId: string,
+  now: Date = new Date()
+): SendInviteResult {
+  const tdb = new TenantDB(db, tenantId);
+  const existing = tdb.get<User>('SELECT id, status FROM users WHERE tenant_id = ? AND id = ?', [userId]);
+  if (!existing) throw Object.assign(new Error('User not found'), { status: 404 });
+  if (existing.status !== 'invited') {
+    throw Object.assign(new Error('Only a dormant (invited) user can be sent an invite link'), { status: 409 });
+  }
+
+  const { rawToken, expiresAt } = issueInviteToken(db, { tenantId, userId }, now);
+  tdb.update('users', { invite_sent_at: now.toISOString() }, { id: userId });
+
+  logAudit(db, {
+    tenantId,
+    actorType: 'user',
+    actorId,
+    eventType: 'user.invite_sent',
+    targetType: 'user',
+    targetId: userId,
+  });
+
+  return {
+    user: userWithScope(db, tenantId, userId)!,
+    inviteUrl: `${env.app.baseUrl}/reset-password?token=${rawToken}`,
+    expiresAt,
+  };
 }
