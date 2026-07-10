@@ -13,6 +13,17 @@ export interface BillingSetupIntent {
 export interface BillingSubscription {
   subscriptionId: string;
 }
+export interface BillingSetupIntentState {
+  clientSecret: string;
+  status: string;
+  /** Attached once the customer has confirmed the SetupIntent with a card; null until then. */
+  paymentMethodId: string | null;
+}
+export interface BillingFinalizeResult {
+  paid: boolean;
+  /** Present only when paid=false — e.g. a card_declined message. Never thrown. */
+  error?: string;
+}
 
 export interface BillingProvider {
   /** Create (or, via idempotencyKey, reuse) the customer for a tenant. */
@@ -35,6 +46,20 @@ export interface BillingProvider {
    * proration, so a mid-month location add/remove never generates a partial charge.
    */
   updateSubscriptionQuantity(input: { subscriptionId: string; quantity: number }): Promise<void>;
+  /**
+   * Re-fetch a SetupIntent's live state (Slice 5a.1 — the card-entry page) — the client secret
+   * from the original createSetupIntent call is never persisted, so a link opened later needs
+   * a fresh one for the same underlying SetupIntent.
+   */
+  retrieveSetupIntent(input: { setupIntentId: string }): Promise<BillingSetupIntentState>;
+  /**
+   * After the customer confirms their card: set it as the customer's default payment method and
+   * attempt to pay the tenant's open (first) invoice. Never throws — a decline is a structured
+   * `{ paid: false, error }` result, same non-throwing shape as attachBilling, so the card-entry
+   * page can show the customer an error and let them retry without the tenant ending up in a
+   * half-activated state (actual activation stays the invoice.paid webhook's job either way).
+   */
+  finalizeCardSetup(input: { customerId: string; paymentMethodId: string }): Promise<BillingFinalizeResult>;
 }
 
 /**
@@ -54,5 +79,11 @@ export class NoOpBillingProvider implements BillingProvider {
   }
   async updateSubscriptionQuantity(): Promise<void> {
     // No real subscription behind this id — nothing to update.
+  }
+  async retrieveSetupIntent(input: { setupIntentId: string }): Promise<BillingSetupIntentState> {
+    return { clientSecret: `${input.setupIntentId}_secret`, status: 'requires_payment_method', paymentMethodId: null };
+  }
+  async finalizeCardSetup(): Promise<BillingFinalizeResult> {
+    return { paid: true }; // deterministic success — no real invoice to decline
   }
 }

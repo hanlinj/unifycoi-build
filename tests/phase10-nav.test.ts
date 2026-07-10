@@ -36,9 +36,11 @@ describe('navForRole', () => {
 // ── shouldShowChrome / isActive ───────────────────────────────────────────────────────────
 
 describe('shouldShowChrome', () => {
-  test('no chrome on login, vendor token flow, root redirect, platform', () => {
+  test('no chrome on login, vendor token flow, credential-set/billing-setup landing pages, root redirect, platform', () => {
     expect(shouldShowChrome('/login')).toBe(false);
     expect(shouldShowChrome('/v/abc123')).toBe(false); // public vendor flow — no tenant chrome leak
+    expect(shouldShowChrome('/reset-password')).toBe(false);
+    expect(shouldShowChrome('/billing/setup')).toBe(false);
     expect(shouldShowChrome('/')).toBe(false);
     expect(shouldShowChrome('/platform')).toBe(false);
   });

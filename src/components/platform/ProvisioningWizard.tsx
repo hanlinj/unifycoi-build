@@ -9,8 +9,10 @@
 // Activation-on-payment (Slice 5a, ADR-012-05): billing is now an automatic Stripe
 // subscription — rate × location count, recurring, no manual monthly action. The Admin invite
 // is issued when the tenant's first invoice is actually PAID (the invoice.paid webhook), not
-// at provision time — so the Result screen below can no longer show a ready invite link; that
-// waits until the tenant activates.
+// at provision time — so the Result screen below can no longer show a ready invite link.
+// Instead (Slice 5a.1) it shows the billing-setup link: the operator sends THIS to the
+// customer first, the customer enters a card on Stripe's own Elements form, and only once
+// that invoice is paid does the tenant activate and the (separate, later) Admin invite go out.
 //
 // Two-commit shape: Provision (the audited DB transaction) and Billing attach (customer +
 // SetupIntent + subscription) are independent, separately retryable steps — POST
@@ -45,6 +47,7 @@ interface BillingAttachResponse {
   customerId: string | null;
   setupIntentClientSecret: string | null;
   subscriptionId: string | null;
+  billingSetupUrl: string | null;
   error?: string;
 }
 
@@ -108,6 +111,7 @@ export function ProvisioningWizard({ templates }: { templates: WizardTemplate[] 
   const [submitError, setSubmitError] = React.useState<string | null>(null);
   const [result, setResult] = React.useState<ProvisionResponse | null>(null);
   const [retrying, setRetrying] = React.useState(false);
+  const [copied, setCopied] = React.useState(false);
 
   const tzList = React.useMemo(timezoneOptions, []);
 
@@ -231,6 +235,17 @@ export function ProvisioningWizard({ templates }: { templates: WizardTemplate[] 
     }
   }
 
+  async function handleCopyBillingLink() {
+    if (!result?.billing.billingSetupUrl) return;
+    try {
+      await navigator.clipboard.writeText(result.billing.billingSetupUrl);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch {
+      // Clipboard API unavailable — the link is still visible/selectable in the input.
+    }
+  }
+
   // ── Result screen (post-provision) ────────────────────────────────────────────
 
   if (result) {
@@ -243,9 +258,22 @@ export function ProvisioningWizard({ templates }: { templates: WizardTemplate[] 
           </div>
 
           <p className="mb-5 text-sm text-fg-muted">
-            The tenant is provisioned and the recurring subscription is set up. Once a first payment goes through, the
-            tenant activates automatically and the Admin&rsquo;s invite goes out automatically.
+            The tenant is provisioned and the recurring subscription is set up. Send the customer the billing link
+            below — once they enter a card and the first invoice is paid, the tenant activates automatically and the
+            Admin&rsquo;s invite goes out automatically.
           </p>
+
+          {result.billing.billingSetupUrl && (
+            <FormField
+              label="Billing setup link"
+              help="Send this to the customer. Card entry happens entirely on Stripe's own form — nothing here ever sees a card number."
+            >
+              <div className="flex gap-2">
+                <Input readOnly value={result.billing.billingSetupUrl} onFocus={(e) => e.currentTarget.select()} />
+                <Button type="button" onClick={handleCopyBillingLink}>{copied ? 'Copied' : 'Copy'}</Button>
+              </div>
+            </FormField>
+          )}
 
           <div className="mt-5">
             {result.billing.attached ? (

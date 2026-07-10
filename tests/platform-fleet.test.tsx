@@ -12,7 +12,8 @@ import type { Tenant } from '@/lib/services/tenants';
 
 const mk = (i: number, over: Partial<Tenant> = {}): Tenant => ({
   id: `t${i}`, name: `Tenant ${i}`, slug: `tenant-${i}`, lifecycle_state: 'active', monthly_rate_cents: 9000,
-  setup_fee_cents: null, created_at: '2026-06-01T00:00:00.000Z', ...over,
+  setup_fee_cents: null, stripe_customer_id: null, stripe_subscription_id: null, stripe_setup_intent_id: null,
+  created_at: '2026-06-01T00:00:00.000Z', ...over,
 });
 
 // ── platform nav (pure) ──────────────────────────────────────────────────────

@@ -9,6 +9,8 @@ import type {
   BillingCustomer,
   BillingSetupIntent,
   BillingSubscription,
+  BillingSetupIntentState,
+  BillingFinalizeResult,
 } from './provider';
 import { NoOpBillingProvider } from './provider';
 
@@ -88,6 +90,30 @@ export class StripeBillingProvider implements BillingProvider {
     });
   }
 
+  async retrieveSetupIntent(input: { setupIntentId: string }): Promise<BillingSetupIntentState> {
+    const si = await this.stripe.setupIntents.retrieve(input.setupIntentId);
+    const paymentMethodId = typeof si.payment_method === 'string' ? si.payment_method : (si.payment_method?.id ?? null);
+    return { clientSecret: si.client_secret ?? '', status: si.status, paymentMethodId };
+  }
+
+  async finalizeCardSetup(input: { customerId: string; paymentMethodId: string }): Promise<BillingFinalizeResult> {
+    await this.stripe.customers.update(input.customerId, {
+      invoice_settings: { default_payment_method: input.paymentMethodId },
+    });
+
+    const openInvoices = await this.stripe.invoices.list({ customer: input.customerId, status: 'open', limit: 1 });
+    const invoice = openInvoices.data[0];
+    if (!invoice?.id) return { paid: false, error: 'No open invoice found for this tenant.' };
+
+    try {
+      const paid = await this.stripe.invoices.pay(invoice.id);
+      return { paid: paid.status === 'paid' };
+    } catch (err) {
+      // Card declined, insufficient funds, etc. — a structured result, never thrown further:
+      // the card IS attached fine (the SetupIntent already succeeded), only the charge failed.
+      return { paid: false, error: (err as Error).message };
+    }
+  }
 }
 
 /** Stripe when a key is configured; otherwise the NoOp provider (dev/test/CI). */

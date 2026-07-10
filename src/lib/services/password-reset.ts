@@ -1,7 +1,11 @@
-// Password reset (SEC-8) and invite-accept (Slice 4). One table (password_reset_tokens), one
-// crypto primitive (reset-token.ts). Reset and invite tokens are interchangeable through
-// confirmPasswordReset — status (invited/active) is the authoritative signal for copy, not
-// which flow minted the token.
+// Password reset (SEC-8), invite-accept (Slice 4), and billing-setup links (Slice 5a.1) — one
+// table (password_reset_tokens), one crypto primitive (reset-token.ts), distinguished by a
+// `purpose` column ('reset' | 'invite' | 'billing_setup'). Reset/invite are single-use
+// (consumed_at) and interchangeable through confirmPasswordReset — status (invited/active) is
+// the authoritative signal for copy, not which purpose minted the token. billing_setup is
+// deliberately excluded from confirmPasswordReset/peekResetToken (a billing link must never be
+// usable to touch a password) and is never "consumed" — it's revisitable until the tenant
+// activates, which the caller reads off lifecycle_state.
 //
 // Request:  resolve email → tenant user (SAME first-match order as login's tenant scan),
 //           issue a hashed token, and queue a 'password_reset' notification — the reset
@@ -10,9 +14,6 @@
 //           or not the email resolves; this function just no-ops when it doesn't.
 // Confirm:  verify hash + not expired + not consumed → set the new password → consume the
 //           token AND invalidate every other outstanding reset/invite token for that user.
-// Peek:     read-only pre-check (Slice 4a) for the /reset-password landing page — distinguishes
-//           invalid/expired/consumed/valid WITHOUT consuming the token, so the page can render
-//           status-appropriate copy before ever showing a password field.
 //
 // Reset does NOT invalidate live JWT sessions this phase (stateless JWT; 8h expiry is the
 // bound). token_version session-invalidation is deferred to Phase 12.
@@ -65,8 +66,8 @@ export function requestPasswordReset(
   if (!user) return; // unknown / disabled / platform-only → silently no-op (no enumeration)
 
   db.prepare(
-    `INSERT INTO password_reset_tokens (id, tenant_id, user_id, token_hash, expires_at, consumed_at, created_at)
-     VALUES (?, ?, ?, ?, ?, NULL, ?)`
+    `INSERT INTO password_reset_tokens (id, tenant_id, user_id, token_hash, expires_at, consumed_at, created_at, purpose)
+     VALUES (?, ?, ?, ?, ?, NULL, ?, 'reset')`
   ).run(
     randomUUID(),
     user.tenant_id,
@@ -102,11 +103,64 @@ export function issueInviteToken(
   const expiresAt = new Date(now.getTime() + INVITE_TTL_MS).toISOString();
 
   db.prepare(
-    `INSERT INTO password_reset_tokens (id, tenant_id, user_id, token_hash, expires_at, consumed_at, created_at)
-     VALUES (?, ?, ?, ?, ?, NULL, ?)`
+    `INSERT INTO password_reset_tokens (id, tenant_id, user_id, token_hash, expires_at, consumed_at, created_at, purpose)
+     VALUES (?, ?, ?, ?, ?, NULL, ?, 'invite')`
   ).run(randomUUID(), input.tenantId, input.userId, tokenHash, expiresAt, now.toISOString());
 
   return { rawToken, expiresAt };
+}
+
+const BILLING_SETUP_TTL_MS = 90 * 24 * 60 * 60 * 1000; // ~90d — operator-paced, same spirit as invites
+
+/**
+ * Issue a billing-setup link token (Slice 5a.1) — the SAME table/crypto as reset/invite,
+ * distinguished by `purpose` (the ledger's predicted moment to add that column: this is the
+ * first consumer that actually needs to query by it, since a billing-setup token must never be
+ * usable to reset/accept a password, and vice versa). Unlike reset/invite, this token is NOT
+ * single-use-then-dead: the card-entry page must stay revisitable if the customer abandons it
+ * mid-entry, so nothing here ever sets consumed_at. Whether setup is "done" is read off the
+ * tenant's lifecycle_state by the caller — same status-is-authoritative principle as Slice 4a.
+ */
+export function issueBillingSetupToken(
+  db: Database.Database,
+  input: { tenantId: string; userId: string },
+  now: Date = new Date()
+): { rawToken: string; expiresAt: string } {
+  const { rawToken, tokenHash } = generateResetToken();
+  const expiresAt = new Date(now.getTime() + BILLING_SETUP_TTL_MS).toISOString();
+
+  db.prepare(
+    `INSERT INTO password_reset_tokens (id, tenant_id, user_id, token_hash, expires_at, consumed_at, created_at, purpose)
+     VALUES (?, ?, ?, ?, ?, NULL, ?, 'billing_setup')`
+  ).run(randomUUID(), input.tenantId, input.userId, tokenHash, expiresAt, now.toISOString());
+
+  return { rawToken, expiresAt };
+}
+
+export type BillingSetupTokenStatus = 'valid' | 'expired' | 'invalid';
+
+export interface BillingSetupTokenPeek {
+  status: BillingSetupTokenStatus;
+  tenantId?: string;
+}
+
+/**
+ * Resolve a billing-setup token to its tenant — gated on purpose='billing_setup' so a
+ * reset/invite token (or vice versa) can never cross-use this path. No consumed_at check: the
+ * page is meant to be revisited (declined card, closed tab) until the tenant actually activates,
+ * which the caller checks via lifecycle_state, not via this function.
+ */
+export function resolveBillingSetupToken(
+  db: Database.Database,
+  rawToken: string,
+  now: Date = new Date()
+): BillingSetupTokenPeek {
+  const row = db
+    .prepare(`SELECT tenant_id, expires_at, purpose FROM password_reset_tokens WHERE token_hash = ?`)
+    .get(hashResetToken(rawToken)) as { tenant_id: string; expires_at: string; purpose: string } | undefined;
+  if (!row || row.purpose !== 'billing_setup') return { status: 'invalid' };
+  if (new Date(row.expires_at).getTime() <= now.getTime()) return { status: 'expired' };
+  return { status: 'valid', tenantId: row.tenant_id };
 }
 
 export interface TokenPeek {
@@ -121,13 +175,12 @@ export interface TokenPeek {
 }
 
 /**
- * Read-only pre-check for the credential-set landing page (Slice 4a): distinguishes invalid /
- * expired / consumed / valid WITHOUT consuming the token, so the page can render
- * status-appropriate copy (and the right dead-end) before ever showing a password field.
- * confirmPasswordReset (the write path) deliberately collapses all three failure cases into
- * 'invalid_token' — that's a separate, intentional choice (see its docstring); this function
- * exists precisely to give the landing page the finer-grained read that the write path doesn't
- * expose.
+ * Read-only pre-check for the credential-set landing page: distinguishes invalid / expired /
+ * consumed / valid WITHOUT consuming the token, so the page can render status-appropriate copy
+ * (and the right dead-end) before ever showing a password field. confirmPasswordReset (the
+ * write path) deliberately collapses all three failure cases into 'invalid_token' — that's a
+ * separate, intentional choice (see its docstring); this function exists precisely to give the
+ * landing page the finer-grained read that the write path doesn't expose.
  *
  * Note (flagged, not hidden): this reveals slightly more about a token's history than the
  * confirm endpoint does (e.g. "this token existed and was already used" vs a flat "invalid").
@@ -141,7 +194,7 @@ export function peekResetToken(
 ): TokenPeek {
   const row = db
     .prepare(
-      `SELECT user_id, tenant_id, expires_at, consumed_at FROM password_reset_tokens WHERE token_hash = ?`
+      `SELECT user_id, tenant_id, expires_at, consumed_at FROM password_reset_tokens WHERE token_hash = ? AND purpose != 'billing_setup'`
     )
     .get(hashResetToken(rawToken)) as
     | { user_id: string; tenant_id: string; expires_at: string; consumed_at: string | null }
@@ -180,7 +233,7 @@ export function confirmPasswordReset(
 
   const row = db
     .prepare(
-      `SELECT id, tenant_id, user_id, expires_at, consumed_at FROM password_reset_tokens WHERE token_hash = ?`
+      `SELECT id, tenant_id, user_id, expires_at, consumed_at FROM password_reset_tokens WHERE token_hash = ? AND purpose != 'billing_setup'`
     )
     .get(hashResetToken(input.rawToken)) as
     | { id: string; tenant_id: string; user_id: string; expires_at: string; consumed_at: string | null }
@@ -200,10 +253,12 @@ export function confirmPasswordReset(
        WHERE id = ? AND tenant_id = ?`
     ).run(hashPassword(input.newPassword), row.user_id, row.tenant_id);
     // Consume this token and invalidate every other outstanding reset/invite token for the
-    // user — a password change invalidates all of those.
+    // user — a password change invalidates all of those. Billing-setup tokens are excluded:
+    // they're a different purpose (never "consumed" in this sense; gated on lifecycle_state,
+    // not consumed_at) and shouldn't be touched by an unrelated credential change.
     db.prepare(
       `UPDATE password_reset_tokens SET consumed_at = ?
-       WHERE tenant_id = ? AND user_id = ? AND consumed_at IS NULL`
+       WHERE tenant_id = ? AND user_id = ? AND consumed_at IS NULL AND purpose != 'billing_setup'`
     ).run(nowIso, row.tenant_id, row.user_id);
   });
   tx();

@@ -37,6 +37,12 @@ class FakeBilling implements BillingProvider {
   async updateSubscriptionQuantity(input: { subscriptionId: string; quantity: number }) {
     this.quantityUpdateCalls.push(input);
   }
+  async retrieveSetupIntent(input: { setupIntentId: string }) {
+    return { clientSecret: `${input.setupIntentId}_secret`, status: 'requires_payment_method', paymentMethodId: null };
+  }
+  async finalizeCardSetup() {
+    return { paid: true };
+  }
 }
 
 function baseInput(templateId: string, over: Partial<ProvisionInput> = {}): ProvisionInput {
@@ -83,8 +89,12 @@ describe('provisionTenant · happy path', () => {
     };
     expect(adminRow.status).toBe('invited');
     expect(adminRow.password_hash).toBeNull();
-    const tokenRows = db.prepare('SELECT id FROM password_reset_tokens WHERE user_id = ?').all(res.adminUserId);
-    expect(tokenRows).toHaveLength(0); // nothing issued yet — gated on first payment
+    // The ONLY token issued at provision time is the billing-setup link (Slice 5a.1) — same
+    // table, distinct purpose; it must never be usable to touch the admin's password. The
+    // credential-invite token itself is still gated on first payment (see
+    // phase12-billing-subscription.test.ts's activateTenantOnFirstPayment).
+    const tokenRows = db.prepare('SELECT purpose FROM password_reset_tokens WHERE user_id = ?').all(res.adminUserId) as { purpose: string }[];
+    expect(tokenRows).toEqual([{ purpose: 'billing_setup' }]);
 
     // Locations + template applied
     expect(res.locationIds).toHaveLength(2);
@@ -96,6 +106,7 @@ describe('provisionTenant · happy path', () => {
     // billing_snapshots (2 locations were added during provisioning), rate from monthly_rate_cents.
     expect(res.billing).toMatchObject({ attached: true, customerId: `cus_${res.tenant.id}`, subscriptionId: `sub_cus_${res.tenant.id}` });
     expect(res.billing.setupIntentClientSecret).toBeTruthy();
+    expect(res.billing.billingSetupUrl).toContain('/billing/setup?token=');
     expect(billing.subscriptionCalls).toHaveLength(1);
     expect(billing.subscriptionCalls[0]).toMatchObject({ unitAmountCents: 9000, quantity: 2, setupFeeCents: null });
 

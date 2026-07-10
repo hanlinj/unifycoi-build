@@ -11,6 +11,9 @@ export interface Tenant {
   lifecycle_state: string;
   monthly_rate_cents: number;
   setup_fee_cents: number | null;
+  stripe_customer_id: string | null;
+  stripe_subscription_id: string | null;
+  stripe_setup_intent_id: string | null;
   created_at: string;
 }
 
@@ -87,16 +90,16 @@ export function createTenant(
     payload: { name: input.name },
   });
 
-  return db.prepare('SELECT id, name, slug, lifecycle_state, monthly_rate_cents, setup_fee_cents, created_at FROM tenants WHERE id = ?').get(id) as Tenant;
+  return db.prepare('SELECT id, name, slug, lifecycle_state, monthly_rate_cents, setup_fee_cents, stripe_customer_id, stripe_subscription_id, stripe_setup_intent_id, created_at FROM tenants WHERE id = ?').get(id) as Tenant;
 }
 
 export function listTenants(db: Database.Database): Tenant[] {
-  return db.prepare('SELECT id, name, slug, lifecycle_state, monthly_rate_cents, setup_fee_cents, created_at FROM tenants ORDER BY created_at DESC').all() as Tenant[];
+  return db.prepare('SELECT id, name, slug, lifecycle_state, monthly_rate_cents, setup_fee_cents, stripe_customer_id, stripe_subscription_id, stripe_setup_intent_id, created_at FROM tenants ORDER BY created_at DESC').all() as Tenant[];
 }
 
 export function getTenantById(db: Database.Database, tenantId: string): Tenant | null {
   return (
-    (db.prepare('SELECT id, name, slug, lifecycle_state, monthly_rate_cents, setup_fee_cents, created_at FROM tenants WHERE id = ?').get(tenantId) as Tenant | undefined) ?? null
+    (db.prepare('SELECT id, name, slug, lifecycle_state, monthly_rate_cents, setup_fee_cents, stripe_customer_id, stripe_subscription_id, stripe_setup_intent_id, created_at FROM tenants WHERE id = ?').get(tenantId) as Tenant | undefined) ?? null
   );
 }
 

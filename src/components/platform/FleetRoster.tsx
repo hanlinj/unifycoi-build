@@ -24,7 +24,11 @@ function money(cents: number): string {
 }
 function shortDate(iso: string): string {
   const d = new Date(iso);
-  return Number.isNaN(d.getTime()) ? '—' : d.toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric' });
+  // timeZone MUST be pinned explicitly — without it, toLocaleDateString uses the runtime's
+  // local zone, which differs between the server (SSR/hydration render) and the browser
+  // (client render), and Next.js flags any mismatch as a hydration error. UTC is deterministic
+  // and correct here: this is the platform (super-admin) fleet view, not tenant-scoped.
+  return Number.isNaN(d.getTime()) ? '—' : d.toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric', timeZone: 'UTC' });
 }
 
 export function FleetRoster({ tenants }: { tenants: Tenant[] }) {

@@ -41,7 +41,7 @@ import { createTenant, getTenantById, updateTenant, isSlugTaken, isValidSlug, ty
 import { createUser } from './users';
 import { createLocation } from './locations';
 import { getTemplate, applyTemplate } from '@/lib/requirements/templates';
-import { issueInviteToken } from './password-reset';
+import { issueInviteToken, issueBillingSetupToken } from './password-reset';
 import type { BillingProvider } from '@/lib/billing/provider';
 
 export interface ProvisionInput {
@@ -60,6 +60,8 @@ export interface BillingAttachResult {
   customerId: string | null;
   setupIntentClientSecret: string | null;
   subscriptionId: string | null;
+  /** The link the operator sends the customer to enter a card (Slice 5a.1). Null iff attached=false. */
+  billingSetupUrl: string | null;
   error?: string;
 }
 
@@ -136,8 +138,8 @@ export async function attachBilling(
       idempotencyKey: `${idempotencyKey}:subscription`,
     });
 
-    db.prepare('UPDATE tenants SET stripe_customer_id = ?, stripe_subscription_id = ? WHERE id = ?')
-      .run(customer.customerId, subscription.subscriptionId, tenantId);
+    db.prepare('UPDATE tenants SET stripe_customer_id = ?, stripe_subscription_id = ?, stripe_setup_intent_id = ? WHERE id = ?')
+      .run(customer.customerId, subscription.subscriptionId, si.setupIntentId, tenantId);
 
     // The subscription's initial quantity already reflects every snapshot taken up to this
     // point (all pre-activation) — mark them synced so the quantity-sync worker's first tick
@@ -165,15 +167,22 @@ export async function attachBilling(
       payload: { quantity, unit_amount_cents: tenant.monthly_rate_cents, setup_fee_cents: tenant.setup_fee_cents ?? null },
     });
 
+    // The link the operator sends the customer (Slice 5a.1) — revisitable, not single-use, so
+    // a fresh one each successful attach/retry is harmless (old ones for this tenant still
+    // resolve fine too; nothing invalidates them).
+    const { rawToken } = issueBillingSetupToken(db, { tenantId, userId: admin.id });
+    const billingSetupUrl = `${env.app.baseUrl}/billing/setup?token=${rawToken}`;
+
     return {
       attached: true,
       customerId: customer.customerId,
       setupIntentClientSecret: si.clientSecret,
       subscriptionId: subscription.subscriptionId,
+      billingSetupUrl,
     };
   } catch (err) {
     // Recoverable: 'provisioning' tenant, no customer/subscription, non-billable, activation-gated. No orphan.
-    return { attached: false, customerId: null, setupIntentClientSecret: null, subscriptionId: null, error: (err as Error).message };
+    return { attached: false, customerId: null, setupIntentClientSecret: null, subscriptionId: null, billingSetupUrl: null, error: (err as Error).message };
   }
 }
 

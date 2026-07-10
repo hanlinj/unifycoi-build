@@ -38,11 +38,13 @@ export function navForRole(role: string): NavSection[] {
 }
 
 /** Whether the tenant app chrome (sidebar + header) should render for a given path.
- *  Hidden on the login screen, the public vendor token flow, the credential-set landing page,
- *  the root redirect, and the platform placeholder (platform users get no tenant chrome). */
+ *  Hidden on the login screen, the public vendor token flow, the credential-set and
+ *  billing-setup landing pages, the root redirect, and the platform placeholder (platform
+ *  users get no tenant chrome). */
 export function shouldShowChrome(pathname: string): boolean {
   if (pathname === '/' || pathname === '/login') return false;
   if (pathname.startsWith('/reset-password')) return false; // unauthenticated, token-in-URL page
+  if (pathname.startsWith('/billing/setup')) return false;  // unauthenticated, token-in-URL page
   if (pathname.startsWith('/v/')) return false;       // public tokenized vendor flow — no leak
   if (pathname.startsWith('/platform')) return false; // platform altitude, separate shell
   return true;

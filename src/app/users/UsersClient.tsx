@@ -90,7 +90,7 @@ export function UserRowActions({ user, regions, locations }: { user: { id: strin
       if (res.ok) { window.location.reload(); return; }
       const b = await res.json().catch(() => ({}));
       setErr((b as { error?: string }).error ?? `Error ${res.status}`);
-    } finally { setBusy(false); }
+    } catch { setErr('Network error.'); } finally { setBusy(false); }
   }
   const toggle = (arr: string[], set: (v: string[]) => void, id: string) => set(arr.includes(id) ? arr.filter((x) => x !== id) : [...arr, id]);
 
