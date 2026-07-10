@@ -14,6 +14,9 @@ export interface Tenant {
   stripe_customer_id: string | null;
   stripe_subscription_id: string | null;
   stripe_setup_intent_id: string | null;
+  /** The requirements template applied at provisioning (Phase 3) — null for a tenant that
+   *  predates templates or never had one applied. Resolve the name via getTemplate/listTemplates. */
+  applied_template_id: string | null;
   created_at: string;
 }
 
@@ -40,6 +43,7 @@ export function isSlugTaken(db: Database.Database, slug: string): boolean {
 export interface UpdateTenantInput {
   name?: string;
   monthlyRateCents?: number;
+  setupFeeCents?: number | null;
   lifecycleState?: string;
 }
 
@@ -90,16 +94,16 @@ export function createTenant(
     payload: { name: input.name },
   });
 
-  return db.prepare('SELECT id, name, slug, lifecycle_state, monthly_rate_cents, setup_fee_cents, stripe_customer_id, stripe_subscription_id, stripe_setup_intent_id, created_at FROM tenants WHERE id = ?').get(id) as Tenant;
+  return db.prepare('SELECT id, name, slug, lifecycle_state, monthly_rate_cents, setup_fee_cents, stripe_customer_id, stripe_subscription_id, stripe_setup_intent_id, applied_template_id, created_at FROM tenants WHERE id = ?').get(id) as Tenant;
 }
 
 export function listTenants(db: Database.Database): Tenant[] {
-  return db.prepare('SELECT id, name, slug, lifecycle_state, monthly_rate_cents, setup_fee_cents, stripe_customer_id, stripe_subscription_id, stripe_setup_intent_id, created_at FROM tenants ORDER BY created_at DESC').all() as Tenant[];
+  return db.prepare('SELECT id, name, slug, lifecycle_state, monthly_rate_cents, setup_fee_cents, stripe_customer_id, stripe_subscription_id, stripe_setup_intent_id, applied_template_id, created_at FROM tenants ORDER BY created_at DESC').all() as Tenant[];
 }
 
 export function getTenantById(db: Database.Database, tenantId: string): Tenant | null {
   return (
-    (db.prepare('SELECT id, name, slug, lifecycle_state, monthly_rate_cents, setup_fee_cents, stripe_customer_id, stripe_subscription_id, stripe_setup_intent_id, created_at FROM tenants WHERE id = ?').get(tenantId) as Tenant | undefined) ?? null
+    (db.prepare('SELECT id, name, slug, lifecycle_state, monthly_rate_cents, setup_fee_cents, stripe_customer_id, stripe_subscription_id, stripe_setup_intent_id, applied_template_id, created_at FROM tenants WHERE id = ?').get(tenantId) as Tenant | undefined) ?? null
   );
 }
 
@@ -141,6 +145,10 @@ export function updateTenant(
   if (input.monthlyRateCents !== undefined && input.monthlyRateCents !== tenant.monthly_rate_cents) {
     settingsChanges['monthly_rate_cents'] = { from: tenant.monthly_rate_cents, to: input.monthlyRateCents };
     db.prepare('UPDATE tenants SET monthly_rate_cents = ? WHERE id = ?').run(input.monthlyRateCents, tenantId);
+  }
+  if (input.setupFeeCents !== undefined && input.setupFeeCents !== tenant.setup_fee_cents) {
+    settingsChanges['setup_fee_cents'] = { from: tenant.setup_fee_cents, to: input.setupFeeCents };
+    db.prepare('UPDATE tenants SET setup_fee_cents = ? WHERE id = ?').run(input.setupFeeCents, tenantId);
   }
 
   // Audit tenant settings changes (name / billing rate) with before→after. A billing-rate

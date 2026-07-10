@@ -33,6 +33,7 @@
 // can't just happen inline in createLocation/updateLocation (db.transaction() callbacks must
 // be fully synchronous; a Stripe call can't live inside one).
 
+import { randomUUID } from 'crypto';
 import type Database from 'better-sqlite3';
 import { logAudit } from '@/lib/audit';
 import { isValidTimeZone } from '@/lib/time/zone';
@@ -223,6 +224,202 @@ export function activateTenantOnFirstPayment(
   // Same path requestPasswordReset already builds — one token table, one landing path,
   // whichever flow minted the token (see src/app/reset-password/page.tsx, Slice 4a).
   return { adminUserId: admin.id, invite: { rawToken, inviteUrl: `${env.app.baseUrl}/reset-password?token=${rawToken}`, expiresAt } };
+}
+
+export interface ResendResult {
+  inviteUrl: string;
+  expiresAt: string;
+}
+
+/**
+ * Resend the first Admin's credential-set invite link from the tenant cockpit (Slice 6, closes
+ * the OPS-14 remainder). Reuses issueInviteToken verbatim — the SAME primitive
+ * activateTenantOnFirstPayment uses, not a new issuer. Deliberately NOT sendUserInvite
+ * (src/lib/services/users.ts): that function's audit call is hardcoded actorType:'user' for a
+ * tenant-Admin caller, which would misattribute a platform-initiated resend. Same status guard
+ * as sendUserInvite (only a dormant/invited admin can be resent a link) and the same
+ * non-invalidating resend semantics (confirmPasswordReset invalidates every sibling token the
+ * moment any one is used, so there is never more than one *usable* outcome).
+ */
+export function resendFirstAdminInvite(
+  db: Database.Database,
+  tenantId: string,
+  platformUserId: string,
+  now: Date = new Date()
+): ResendResult {
+  const tenant = getTenantById(db, tenantId);
+  if (!tenant) throw Object.assign(new Error('Tenant not found'), { status: 404 });
+  const admin = db
+    .prepare(`SELECT id, status FROM users WHERE tenant_id = ? AND role = 'admin' ORDER BY created_at LIMIT 1`)
+    .get(tenantId) as { id: string; status: string } | undefined;
+  if (!admin) throw Object.assign(new Error('Tenant has no admin user to invite'), { status: 409 });
+  if (admin.status !== 'invited') {
+    throw Object.assign(new Error('The first Admin has already accepted their invite — nothing to resend'), { status: 409 });
+  }
+
+  const { rawToken, expiresAt } = issueInviteToken(db, { tenantId, userId: admin.id }, now);
+  db.prepare('UPDATE users SET invite_sent_at = ? WHERE id = ? AND tenant_id = ?').run(now.toISOString(), admin.id, tenantId);
+
+  logAudit(db, {
+    tenantId,
+    actorType: 'platform',
+    actorId: platformUserId,
+    eventType: 'admin.invite_resent',
+    targetType: 'user',
+    targetId: admin.id,
+  });
+
+  return { inviteUrl: `${env.app.baseUrl}/reset-password?token=${rawToken}`, expiresAt };
+}
+
+/**
+ * Resend the billing-setup link from the tenant cockpit (Slice 6). Reuses issueBillingSetupToken
+ * verbatim — the SAME issuer attachBilling calls. No status guard: unlike the credential invite,
+ * a billing-setup link isn't gated on the target user's account state (it never touches a
+ * password), so it's always resendable once a subscription exists to attach a card to.
+ */
+export function resendBillingSetupLink(
+  db: Database.Database,
+  tenantId: string,
+  platformUserId: string,
+  now: Date = new Date()
+): ResendResult {
+  const tenant = getTenantById(db, tenantId);
+  if (!tenant) throw Object.assign(new Error('Tenant not found'), { status: 404 });
+  if (!tenant.stripe_customer_id) {
+    throw Object.assign(new Error('Billing has not been attached for this tenant yet — nothing to send'), { status: 409 });
+  }
+  const admin = db
+    .prepare(`SELECT id FROM users WHERE tenant_id = ? AND role = 'admin' ORDER BY created_at LIMIT 1`)
+    .get(tenantId) as { id: string } | undefined;
+  if (!admin) throw Object.assign(new Error('Tenant has no admin user to bill'), { status: 409 });
+
+  const { rawToken, expiresAt } = issueBillingSetupToken(db, { tenantId, userId: admin.id }, now);
+
+  logAudit(db, {
+    tenantId,
+    actorType: 'platform',
+    actorId: platformUserId,
+    eventType: 'billing.setup_link_resent',
+    targetType: 'tenant',
+    targetId: tenantId,
+  });
+
+  return { inviteUrl: `${env.app.baseUrl}/billing/setup?token=${rawToken}`, expiresAt };
+}
+
+export interface RateUpdateResult {
+  monthlyRateCents: number; // the rate now in effect (unchanged from before if this failed)
+  pushedToStripe: boolean; // true iff a live subscription existed and was updated
+  error?: string; // present iff the Stripe push failed — local rate was NOT changed either
+}
+
+/**
+ * Edit a tenant's per-location rate from the cockpit (Slice 6). Stripe Prices are immutable, so
+ * a rate change is always create-a-new-Price + repoint-the-subscription-item (see
+ * StripeBillingProvider.updateSubscriptionPrice) — never an edit of the existing Price.
+ * `proration_behavior: 'none'`, same rule as quantity-sync: the new rate takes effect at the
+ * NEXT billing cycle, never a mid-month partial charge.
+ *
+ * Consistency, the whole point of this function: if a live subscription exists, the Stripe push
+ * happens FIRST — the local `monthly_rate_cents` column is only written after Stripe confirms
+ * the swap. A Stripe failure returns a structured `{ pushedToStripe: false, error }` result
+ * (same non-throwing shape as attachBilling) and leaves the local rate COMPLETELY UNCHANGED —
+ * never a local rate Stripe isn't actually charging. If no subscription exists yet
+ * (pre-activation), there's nothing live to push to; the local rate is simply what
+ * attachBilling will use whenever it eventually runs.
+ */
+export async function updateTenantRate(
+  db: Database.Database,
+  tenantId: string,
+  newRateCents: number,
+  billing: BillingProvider,
+  actorId: string
+): Promise<RateUpdateResult> {
+  const tenant = getTenantById(db, tenantId);
+  if (!tenant) throw Object.assign(new Error('Tenant not found'), { status: 404 });
+  if (!Number.isInteger(newRateCents) || newRateCents < 0) {
+    throw Object.assign(new Error('rate must be a non-negative integer number of cents'), { status: 400 });
+  }
+
+  if (!tenant.stripe_subscription_id) {
+    // Pre-attach: nothing live to push to. The local column IS the source of truth until
+    // attachBilling runs and reads it.
+    updateTenant(db, tenantId, { monthlyRateCents: newRateCents }, actorId);
+    return { monthlyRateCents: newRateCents, pushedToStripe: false };
+  }
+
+  try {
+    await billing.updateSubscriptionPrice({
+      subscriptionId: tenant.stripe_subscription_id,
+      unitAmountCents: newRateCents,
+      idempotencyKey: `rate-update:${tenantId}:${randomUUID()}`,
+    });
+  } catch (err) {
+    // Stripe rejected the swap — the local rate is NOT touched. No divergence: what's in the DB
+    // still matches what Stripe is actually charging.
+    return { monthlyRateCents: tenant.monthly_rate_cents, pushedToStripe: false, error: (err as Error).message };
+  }
+
+  // Stripe confirmed the swap — NOW (and only now) commit the local column to match.
+  updateTenant(db, tenantId, { monthlyRateCents: newRateCents }, actorId);
+  // Distinct from tenant.settings_changed (which updateTenant already logs with a from/to
+  // payload) — this one specifically attests that the change actually reached Stripe, not just
+  // the local column, for the same defensibility reason attachBilling logs
+  // billing.subscription_created as its own event alongside billing.customer_attached.
+  logAudit(db, {
+    tenantId,
+    actorType: 'platform',
+    actorId,
+    eventType: 'billing.rate_synced_to_stripe',
+    targetType: 'tenant',
+    targetId: tenantId,
+    payload: { new_rate_cents: newRateCents, subscription_id: tenant.stripe_subscription_id },
+  });
+  return { monthlyRateCents: newRateCents, pushedToStripe: true };
+}
+
+export interface SetupFeeUpdateResult {
+  setupFeeCents: number | null;
+  updated: boolean;
+  /** Present iff blocked — the fee was already invoiced to Stripe at billing attach. */
+  blockedReason?: string;
+}
+
+/**
+ * Edit a tenant's one-time setup fee from the cockpit (Slice 6). A setup fee is a PENDING
+ * invoice item created once, synchronously, inside attachBilling — the moment a subscription
+ * exists (tenant.stripe_subscription_id is set), that fee is already queued on Stripe's
+ * open/first invoice, paid or not. Editing the local column after that point would be a lie:
+ * Stripe would still charge whatever amount was queued at attach time, regardless of what the
+ * local column says. So the gate is `stripe_subscription_id IS NOT NULL` — NOT
+ * `lifecycle_state === 'active'` — because the fee is committed to Stripe at attach, before the
+ * tenant has necessarily paid (activation is gated on the invoice.paid webhook, which fires
+ * after attach). Pre-attach, this is a plain local column write (no Stripe call at all — there
+ * is nothing to push to yet).
+ */
+export function updateTenantSetupFee(
+  db: Database.Database,
+  tenantId: string,
+  newFeeCents: number | null,
+  actorId: string
+): SetupFeeUpdateResult {
+  const tenant = getTenantById(db, tenantId);
+  if (!tenant) throw Object.assign(new Error('Tenant not found'), { status: 404 });
+  if (newFeeCents !== null && (!Number.isInteger(newFeeCents) || newFeeCents < 0)) {
+    throw Object.assign(new Error('setup fee must be a non-negative integer number of cents, or null for none'), { status: 400 });
+  }
+
+  if (tenant.stripe_subscription_id) {
+    return {
+      setupFeeCents: tenant.setup_fee_cents,
+      updated: false,
+      blockedReason: 'The setup fee was already invoiced to Stripe when billing attached — it cannot be changed after the fact. A charge already queued or paid cannot be un-charged.',
+    };
+  }
+
+  updateTenant(db, tenantId, { setupFeeCents: newFeeCents }, actorId);
+  return { setupFeeCents: newFeeCents, updated: true };
 }
 
 export async function provisionTenant(

@@ -11,6 +11,7 @@ import type {
   BillingSubscription,
   BillingSetupIntentState,
   BillingFinalizeResult,
+  BillingInvoice,
 } from './provider';
 import { NoOpBillingProvider } from './provider';
 
@@ -113,6 +114,54 @@ export class StripeBillingProvider implements BillingProvider {
       // the card IS attached fine (the SetupIntent already succeeded), only the charge failed.
       return { paid: false, error: (err as Error).message };
     }
+  }
+
+  async listRecentInvoices(input: { customerId: string; limit?: number }): Promise<BillingInvoice[]> {
+    const invoices = await this.stripe.invoices.list({ customer: input.customerId, limit: input.limit ?? 5 });
+    return invoices.data.map((inv) => ({
+      id: inv.id,
+      status: inv.status,
+      amountPaidCents: inv.amount_paid,
+      createdAt: new Date(inv.created * 1000).toISOString(),
+      hostedInvoiceUrl: inv.hosted_invoice_url ?? null,
+    }));
+  }
+
+  async updateSubscriptionPrice(input: { subscriptionId: string; unitAmountCents: number; idempotencyKey: string }): Promise<void> {
+    const subscription = await this.stripe.subscriptions.retrieve(input.subscriptionId);
+    const itemId = subscription.items.data[0]?.id;
+    if (!itemId) throw new Error('Subscription has no item to update');
+
+    // Same immutable-Price pattern as createSubscription: a Price's unit_amount can never be
+    // edited, so a rate change is always a new Price + repointing the subscription item at it.
+    const price = await this.stripe.prices.create(
+      {
+        currency: 'usd',
+        unit_amount: input.unitAmountCents,
+        recurring: { interval: 'month' },
+        product_data: { name: 'Per-location monthly fee' },
+      },
+      { idempotencyKey: `${input.idempotencyKey}:price` }
+    );
+
+    // Deliberately omit `quantity` here — Stripe subscription-item updates are partial (only
+    // the fields passed change), so the item's current quantity (owned by the quantity-sync
+    // worker) survives untouched. The item id itself never changes across a price swap either
+    // (this UPDATEs the existing item's price field; it does not delete+recreate the item), so
+    // quantity-sync's own `items.data[0]?.id` lookup keeps resolving the same item afterward.
+    await this.stripe.subscriptions.update(
+      input.subscriptionId,
+      {
+        items: [{ id: itemId, price: price.id }],
+        proration_behavior: 'none', // next cycle only — never a mid-month partial charge
+      },
+      { idempotencyKey: input.idempotencyKey }
+    );
+  }
+
+  async getSubscriptionStatus(input: { subscriptionId: string }): Promise<{ status: string }> {
+    const subscription = await this.stripe.subscriptions.retrieve(input.subscriptionId);
+    return { status: subscription.status };
   }
 }
 

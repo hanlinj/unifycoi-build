@@ -43,6 +43,15 @@ class RecordingBilling implements BillingProvider {
   async finalizeCardSetup() {
     return { paid: true };
   }
+  async listRecentInvoices() {
+    return [];
+  }
+  async updateSubscriptionPrice() {
+    // no-op for these tests
+  }
+  async getSubscriptionStatus() {
+    return { status: 'active' };
+  }
 }
 
 // ── activateTenantOnFirstPayment ─────────────────────────────────────────────────

@@ -43,6 +43,15 @@ class FakeBilling implements BillingProvider {
   async finalizeCardSetup() {
     return { paid: true };
   }
+  async listRecentInvoices() {
+    return [];
+  }
+  async updateSubscriptionPrice() {
+    // no-op for these tests
+  }
+  async getSubscriptionStatus() {
+    return { status: 'active' };
+  }
 }
 
 function baseInput(templateId: string, over: Partial<ProvisionInput> = {}): ProvisionInput {
