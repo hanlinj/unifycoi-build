@@ -88,14 +88,58 @@ duplicated here) for the full original module map and per-stage rationale.
   **Closed in Stage 8b** — converted alongside notifications (its two DB dependencies,
   `queueNotification` and `chase.ts`'s `vendorExpiry`, were already converted in Stages 3 and 5
   respectively, so it was a cheap pickup, not a scope expansion).
-- **Tracking-doc drift, flagged for a pre-Stage-10 reconciliation pass, not fixed now.** Three
-  files surfaced during conversion work that the *original* stage-plan document (the Phase 13
-  kickoff investigation report) never listed: `exports/content.ts` (Stage 7), `bootstrap.ts`
-  (Stage 8a), `manual-reminder.ts` (Stage 8a found it, Stage 8b converted it) — all three now
-  documented, but nobody has re-run the original module inventory against the actual current
-  codebase since Stage 0 to confirm the stage plan is still exhaustive. Do this reconciliation
-  pass before Stage 10 (the final drop-`better-sqlite3` stage) — not now, and not silently
-  deferred without a marker: this is that marker.
+- ~~Tracking-doc drift, flagged for a pre-Stage-10 reconciliation pass, not fixed now.~~
+  **A reconciliation pass ran pre-8c (2026-07-11), not pre-10 — see ADR-013-01's "Pre-8c
+  reconciliation sweep" entry.** The three previously-surfaced files (`exports/content.ts`,
+  `bootstrap.ts`, `manual-reminder.ts`) are all now accounted for. The `Database.Database` sweep
+  came back clean (matches the tracking docs exactly). The `getRawDb` sweep did NOT come back
+  clean — see the new section immediately below. **This does not retire the obligation for a
+  final pass before Stage 10** — it found a bigger gap than expected, which is itself a reason to
+  re-run this sweep again once Stage 8c/9 land, not to consider reconciliation "done."
+
+## Discovered, unassigned surface (pre-8c reconciliation, 2026-07-11)
+
+A repo-wide `getRawDb` grep (removed from `src/lib/db/client.ts` since Stage 1) found 21
+importing files. 5 belong to already-tracked not-yet-converted stages (`app/api/exports/**` ×3 →
+8c; `app/api/reports/[reportKey]`, `app/api/search` → 9) — expected, not new. **The other 16 are
+genuinely unassigned in the Phase 13 stage plan** — never claimed by any stage, including Stage 4
+even though every one of them calls a function Stage 4 itself converted:
+
+- `src/app/api/billing/setup/confirm/route.ts`
+- `src/app/api/platform/provision/route.ts`
+- `src/app/api/platform/tenants/route.ts`
+- `src/app/api/platform/tenants/check-slug/route.ts`
+- `src/app/api/platform/tenants/[tenantId]/route.ts`
+- `src/app/api/platform/tenants/[tenantId]/impersonate/route.ts`
+- `src/app/api/platform/tenants/[tenantId]/rate/route.ts`
+- `src/app/api/platform/tenants/[tenantId]/resend-admin-invite/route.ts`
+- `src/app/api/platform/tenants/[tenantId]/resend-billing-link/route.ts`
+- `src/app/api/platform/tenants/[tenantId]/retry-billing/route.ts`
+- `src/app/api/platform/tenants/[tenantId]/setup-fee/route.ts`
+- `src/app/api/webhooks/stripe/route.ts`
+- `src/app/billing/setup/page.tsx`
+- `src/app/platform/layout.tsx`
+- `src/app/platform/page.tsx` (also missing `await` on the now-async call underneath — a second,
+  compounding bug)
+- `src/app/platform/provisioning/page.tsx` (same missing-`await` compounding bug)
+
+**Why Stage 4 "done" didn't mean these routes/pages work:** Stage 4's charter (see its row above)
+lists service files — `tenants.ts`, `provisioning.ts`, `requirements/templates.ts`,
+`billing/{quantity-sync,worker,stripe-webhook}.ts` — never their callers. Every file in this list
+calls one of those already-converted, already-`async`/`Db`-typed functions through the dead
+`getRawDb()`, the exact bootstrap.ts/instrumentation.ts pattern (Stage 8a) at much larger scale:
+the entire `/platform` UI and several billing/webhook routes have been non-functional since
+Stage 1, and nothing in the stage plan ever claimed ownership of fixing that, because the plan
+was written against service-file boundaries, not HTTP-reachability.
+
+**Not fixed in this sweep — reconciliation, not conversion, per instruction.** Recommended
+placement, for whoever plans the next stage: these are pure connective-tissue fixes (identical
+shape to Stage 8a's `instrumentation.ts` and Stage 8b's two routes — swap `getRawDb`→`getDb`, add
+`await`), not new conversion work, since every callee is already done. They don't obviously
+belong to Stage 8c (exports) or Stage 9 (reports/search) by subject matter, and grouping them
+under either would blur that stage's own scope. Options: (a) a dedicated slice before Stage 10,
+(b) folded into Stage 10's cutover pass since Stage 10 already has to sweep the whole repo for
+`better-sqlite3` references anyway. Left as an open call, not decided here.
 
 ## Repo infrastructure added mid-migration
 
