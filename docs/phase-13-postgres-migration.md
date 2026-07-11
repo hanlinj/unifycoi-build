@@ -1,13 +1,21 @@
 # Phase 13 — SQLite → Postgres + Kysely migration
 
-Staged, module-by-module, never a big-bang rewrite. The 1010-test suite (SQLite baseline) is
-the correctness contract — the running pass count against Postgres is the tracking signal
-across stages. Decision record: `docs/decisions.md` ADR-013-01 (rationale, fresh-baseline
-choice, Kysely choice, and the cross-stage invariants/landmines discovered along the way).
+Staged, module-by-module, never a big-bang rewrite. The SQLite baseline test suite is the
+correctness contract — the running pass count against Postgres is the tracking signal across
+stages. Decision record: `docs/decisions.md` ADR-013-01 (rationale, fresh-baseline choice,
+Kysely choice, and the cross-stage invariants/landmines discovered along the way).
 
-**Running pass count: 440 / 1010** (as of Stage 4, commit `dd8393b`). Every failure not yet
-converted has been confirmed to be the same "old code calling the new async/Kysely API
-synchronously" shape — no suite has failed for a different, real-behavior reason.
+**Running pass count: 469 / 1100** (as of Stage 5). Every failure not yet converted has been
+confirmed to be the same "old code calling the new async/Kysely API synchronously" shape — no
+suite has failed for a different, real-behavior reason.
+
+> **Baseline correction:** earlier reports in this doc's history cited "440 / 1010" as of Stage
+> 4. That 1010 figure was stale/wrong — re-verified directly against the Stage 4 commit
+> (`dd8393b`, stashing all Stage 5 work and running the full suite against it) gives **440 /
+> 1071**, not 1010. The extra ~61 tests were pre-existing Phase 12 test files that had already
+> landed on disk by the time of that report, not anything Phase 13 added or removed. Stage 5's
+> own delta is a clean, exact +25/+29 (test file additions only) on top of the corrected 1071
+> baseline — see ADR-013-01 for the reconciliation math.
 
 ## Stage status
 
@@ -18,15 +26,39 @@ synchronously" shape — no suite has failed for a different, real-behavior reas
 | 2 | `logAudit`, `scope.ts` — tiny, imported everywhere, unblocks downstream conversion | ✅ done | `d70db30` |
 | 3 | `auth.ts`, `rate-limit.ts`, `password-reset.ts` (+ `notifications/queue.ts` hard dependency), the 5 auth routes + reset-password page | ✅ done | `d70db30` |
 | 4 | `tenants.ts`, `provisioning.ts`, `requirements/templates.ts`, `billing/{quantity-sync,worker,stripe-webhook}.ts` (+ narrow `createUser`/`createLocation` slices) | ✅ done | `dd8393b` |
-| 5 | locations/users/dashboards — the biggest tenant-scoped CRUD cluster; finishes Stage 4's partial `users.ts`/`locations.ts` conversions, plus remaining `COLLATE NOCASE`/`INSERT OR IGNORE` spots and the `listUsers` N+1 | 🔜 next | — |
+| 5 | locations/users/dashboards — the biggest tenant-scoped CRUD cluster; finishes Stage 4's partial `users.ts`/`locations.ts` conversions, plus remaining `COLLATE NOCASE`/`INSERT OR IGNORE` spots and the `listUsers` N+1. Also: the `chase.ts` JSON1→jsonb rewrite, its `MIN()`/ordering type-safety fix (and the `expiryBoundaryMs` DATE_ONLY regression that fix nearly introduced — caught pre-commit), a durable normalize-on-write fix for unpadded expiration dates (`toIsoDateStr`, `earliestExpiration`), and the repo's first ESLint infra (see below) | ✅ done | `c9d9841` |
 | 6 | vendors + vendor onboarding portal (`/v/[token]`) — vendor lifecycle, invites, FSM; includes its own transaction-boundary rewrites | not started | — |
 | 7 | verification/requirements engine — depends on stages 4–6 | not started | — |
-| 8 | notifications + retention + audit exports — the cross-tenant worker group, migrated together (claim-then-process pattern); fixes `search.ts`'s `rowid` spot and the `notifications/queue.ts` N+1 (`notifyTenantAdmins`, already fixed in Stage 3) | not started | — |
-| 9 | reports/search — last, depends on nearly everything; fixes the two `reports/builders.ts` N+1 spots | not started | — |
+| 8 | notifications + retention + audit exports — the cross-tenant worker group, migrated together (claim-then-process pattern); fixes `search.ts`'s `rowid` spot, the `notifications/queue.ts` N+1 (`notifyTenantAdmins`, already fixed in Stage 3), and the `json_extract` spot in `notifications/renewal.ts` (see the cross-stage invariants below, items 8/9) | not started | — |
+| 9 | reports/search — last, depends on nearly everything; fixes the two `reports/builders.ts` N+1 spots AND the `MIN(json_extract(...))` type-safety spot found during Stage 5's post-hoc JSON1 audit (see the cross-stage invariants below, items 8/9) | not started | — |
 | 10 | dev scripts (`dev-seed.ts`, `eval-test-dataset.ts`), cutover cleanup, remove `better-sqlite3` dependency | not started | — |
 
 Stage boundaries and reasoning: see the Phase 13 kickoff investigation report (chat, not
 duplicated here) for the full original module map and per-stage rationale.
+
+## Repo infrastructure added mid-migration
+
+**ESLint (`eslint.config.mjs`), added in Stage 5's pre-commit gap-closing pass.** The repo had
+no ESLint setup at all before this — no config, no dependency, no lint script. Scoped
+deliberately narrow: just `@typescript-eslint/no-floating-promises` and
+`@typescript-eslint/no-misused-promises` (both type-aware, via `projectService: true`), the two
+rules that catch the highest-risk silent bug class in a sync→async conversion — a dropped
+`await` that used to be a no-op on a synchronous call and is now a silently-ignored Promise. Not
+a general lint-everything setup; broadening scope (style rules, React rules, etc.) is a separate
+decision for whoever owns that later.
+
+Run it with `npx eslint <path>` (no `npm run lint` script added — deliberately, since running it
+repo-wide currently fails on pre-existing, out-of-scope violations; see below).
+
+- **Retroactively cleared Stages 1–4:** every file converted in Stages 1–4 (db-core, audit/scope,
+  auth/tokens, tenants/provisioning/billing) is 100% clean against both rules — checked directly,
+  not assumed.
+- **Stage 5's own files are 100% clean.**
+- **142 pre-existing violations remain, all in NOT-yet-converted Stage 6–9 modules**
+  (`vendors.ts`, `verification/run.ts`, `exports/*`, `reports/*`, the notifications workers,
+  `v/[token]/*`, etc.) or in pre-existing React client-component floating promises unrelated to
+  this migration entirely. Left untouched — out of scope for Stage 5, flagged here so Stages 6–9
+  clear their own portion as they convert, rather than rediscovering this from scratch.
 
 ## What "green" means each stage
 
@@ -63,15 +95,44 @@ See ADR-013-01 in `docs/decisions.md` for the full write-up. Summary:
    cascading failures onto unrelated tests in the same worker. Don't remove this early.
 5. **`COLLATE NOCASE` → `lower(col) = lower($)`**, not a `citext` column — matches the old
    ASCII case-folding behavior exactly, verified explicitly in Stage 3's test suite for every
-   email-lookup call site converted so far. Remaining spots: `locations.ts`'s region-name dedupe
-   and manager-email lookup, `bulk-onboarding.ts` (Stage 5).
+   email-lookup call site converted so far. Fixed through Stage 5: `locations.ts`'s region-name
+   dedupe and manager-email lookup, `users.ts`'s email lookup, `bulk-onboarding.ts`'s manager
+   lookup. No remaining known spots outside Stage 6+'s not-yet-audited modules.
 6. **`INSERT OR IGNORE`/`OR REPLACE` → `ON CONFLICT ... DO NOTHING`/`DO UPDATE`.**
    `TenantDB.insert(table, row, { orIgnore: true })` already does this (no conflict target
-   specified — matches SQLite's "skip on ANY constraint violation" semantics). Remaining raw
-   spots outside `TenantDB`: none currently known outside Stage 5/6's scope.
+   specified — matches SQLite's "skip on ANY constraint violation" semantics). No remaining raw
+   spots outside `TenantDB` known through Stage 5.
 7. **N+1-in-`.map()` sites need `Promise.all` + async mapper, or `for...of` if the loop body
    has ordering/race sensitivity** (e.g. `provisionTenant`'s location loop — sequential because
    `recordBillingSnapshot`'s read-count-then-insert pattern would race under concurrent writes).
    Fixed so far: `notifications/queue.ts`'s `notifyTenantAdmins` (Stage 3, `Promise.all`),
-   `provisionTenant`'s location creation (Stage 4, sequential `for...of`). Remaining: `users.ts`'s
-   `listUsers` (Stage 5), `reports/builders.ts` ×2 (Stage 9).
+   `provisionTenant`'s location creation (Stage 4, sequential `for...of`), `users.ts`'s
+   `listUsers` (Stage 5, `Promise.all`). Remaining: `reports/builders.ts` ×2 (Stage 9).
+8. **SQLite's `json_extract()`/JSON1 functions have no Postgres equivalent — rewrite to the `->>`
+   jsonb text-extraction operator.** Missed by the Stage 0 investigation (DDL-only audit, not
+   application queries). Fixed: `chase.ts` (Stage 5). A post-hoc repo-wide grep found two more
+   un-converted spots — `notifications/renewal.ts:76` (Stage 8) and `reports/builders.ts:84-91`
+   (Stage 9, same shape as item 9 below). **That grep was not re-run after Stages 6-8 land — Stage
+   9 should re-grep before assuming this list is exhaustive.**
+9. **`MIN()`/ordering over a jsonb `->>`-extracted value is a lexicographic TEXT comparison, not
+   a chronological one**, unless cast to its real type first. Found in `chase.ts` via an unpadded
+   date fixture (Stage 5, pre-commit review). The straightforward fix (cast + reformat via
+   `to_char`) is a trap: it silently turns a DATE-ONLY value into a full timestamp, which breaks
+   any downstream code detecting date-only-ness (here: `expiryBoundaryMs`'s tenant-timezone
+   day-boundary math, OPS-7) — caught before commit, not by a test. The real fix never rewrites
+   the value: `DISTINCT ON (col) ORDER BY (extracted)::timestamptz` for a SQL-side aggregate,
+   `Date.parse()` (not raw string `<`) for a client-side reduction. `reports/builders.ts`'s
+   `MIN(json_extract(...))` (item 8) has the identical shape and will need the identical
+   treatment when Stage 9 converts it.
+10. **Raw upstream string data (e.g. Vision-extracted dates) needs format normalization at its
+    write choke point, independent of which SQL engine reads it back.** `expiration_date` had no
+    format constraint from Vision's extraction schema, so a genuinely unpadded/non-ISO value could
+    reach storage. Beyond the lexicographic-`MIN()` risk (item 9), an un-normalized value creates
+    a *second*, subtler seam: `Date.parse()` on a non-conforming string is V8-implementation-
+    defined (resolves in the process's local timezone) while Postgres's `::timestamptz` cast
+    resolves in the Postgres server's timezone — two different interpretations of the same string
+    that can silently disagree near a day boundary if the two processes run under different zone
+    configs. Fixed at the source (`earliestExpiration()` in `notifications/renewal.ts`, the single
+    choke point every renewal-chase payload's `expiration_date` flows through) via
+    `toIsoDateStr()` (extended to also zero-pad unpadded ISO-dash dates, not just US slash format)
+    — not a Postgres-specific fix, applies regardless of SQL engine.
