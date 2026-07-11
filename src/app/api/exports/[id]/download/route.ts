@@ -2,7 +2,7 @@
 // The download is itself audited (export.downloaded). Returns 409 if not yet ready.
 
 import { NextResponse } from 'next/server';
-import { getRawDb } from '@/lib/db/client';
+import { getDb } from '@/lib/db/client';
 import { TenantDB } from '@/lib/db/tenant';
 import { requireTenantAuth, isResponse, forbidden, notFound, conflict } from '@/lib/api';
 import { getBlobStore } from '@/lib/blob';
@@ -18,10 +18,10 @@ export async function GET(request: Request, { params }: { params: { id: string }
   if (!auth.tenantId) return forbidden();
   if (auth.role !== 'admin') return forbidden();
 
-  const db = getRawDb();
+  const db = getDb();
   const tdb = new TenantDB(db, auth.tenantId);
-  const row = tdb.get<{ id: string; format: string; status: string; storage_key: string | null }>(
-    'SELECT id, format, status, storage_key FROM audit_exports WHERE tenant_id = ? AND id = ?',
+  const row = await tdb.get<{ id: string; format: string; status: string; storage_key: string | null }>(
+    'SELECT id, format, status, storage_key FROM audit_exports WHERE tenant_id = $1 AND id = $2',
     [params.id]
   );
   if (!row) return notFound('Export not found'); // tenant-isolated → cross-tenant 404
@@ -31,7 +31,7 @@ export async function GET(request: Request, { params }: { params: { id: string }
   const bytes = unpackEncrypted(blob);
 
   // Downloading an export is itself an audited access event (defensibility).
-  logAudit(db, {
+  await logAudit(db, {
     tenantId: auth.tenantId, actorType: 'user', actorId: auth.sub,
     eventType: 'export.downloaded', targetType: 'audit_export', targetId: row.id,
     payload: { format: row.format },

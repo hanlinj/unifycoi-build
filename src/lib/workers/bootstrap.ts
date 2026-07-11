@@ -30,12 +30,10 @@ export interface WorkerHandles {
  * Start all background workers. Returns handles so callers (and tests) can stop them.
  *
  * Phase 13 Stage 8a: `db` is now correctly typed as Kysely `Db` (see ADR-013-01 Stage 8a —
- * this was previously mistyped as `Database.Database`, a latent bug since Stage 4). Stage 8b
- * converts notification/digest alongside retention/billing-sync, so those four now wire
- * cleanly; only `startAuditExportWorker` remains Stage 8c's work and still expects
- * `Database.Database` — that one call now surfaces the expected "not-yet-converted downstream
- * code" type error until its own stage lands, same as every other cross-module boundary
- * throughout this migration.
+ * this was previously mistyped as `Database.Database`, a latent bug since Stage 4). Stages
+ * 8a/8b/8c converted retention/billing-sync, notification/digest, and audit-export
+ * respectively — all five workers now wire cleanly with no downstream type errors, for the
+ * first time since this file's bug was introduced.
  */
 export function startAllWorkers(mailer: Mailer, db: Db, billing: BillingProvider): WorkerHandles {
   return {

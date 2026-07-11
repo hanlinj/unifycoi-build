@@ -10,7 +10,7 @@
 // Sync (vendor/location) → 200 ready; async (region/org/tenant_offboard) → 202 queued.
 
 import { NextResponse } from 'next/server';
-import { getRawDb } from '@/lib/db/client';
+import { getDb } from '@/lib/db/client';
 import { requireTenantAuth, isResponse, forbidden, badRequest, unprocessable } from '@/lib/api';
 import { resolveScope } from '@/lib/scope';
 import { logAudit } from '@/lib/audit';
@@ -24,7 +24,7 @@ export async function POST(request: Request): Promise<NextResponse> {
   if (isResponse(auth)) return auth;
   if (!auth.tenantId) return forbidden();
   const tenantId = auth.tenantId;
-  const db = getRawDb();
+  const db = getDb();
 
   let body: unknown;
   try { body = await request.json(); } catch { return badRequest('JSON body required'); }
@@ -44,19 +44,19 @@ export async function POST(request: Request): Promise<NextResponse> {
 
   // ── Authority ────────────────────────────────────────────────────────────────────
   if (auth.role === 'store_manager') {
-    logViolation({ scope });
+    await logViolation({ scope });
     return forbidden();
   }
   if (auth.role === 'district_manager') {
-    if (scope !== 'region') { logViolation({ scope, reason: 'scope_not_allowed_for_district' }); return forbidden(); }
-    const callerScope = resolveScope(db, tenantId, auth.sub, auth.role);
+    if (scope !== 'region') { await logViolation({ scope, reason: 'scope_not_allowed_for_district' }); return forbidden(); }
+    const callerScope = await resolveScope(db, tenantId, auth.sub, auth.role);
     if (!scopeRef || callerScope.regionIds === null || !callerScope.regionIds.includes(scopeRef)) {
-      logViolation({ scope, scope_ref: scopeRef, reason: 'region_out_of_scope' });
+      await logViolation({ scope, scope_ref: scopeRef, reason: 'region_out_of_scope' });
       return forbidden();
     }
     if (includesSensitive) {
       // Standard-only for District — coerce to false and log the attempt (don't reject).
-      logViolation({ scope, scope_ref: scopeRef, reason: 'sensitive_not_permitted_for_district' });
+      await logViolation({ scope, scope_ref: scopeRef, reason: 'sensitive_not_permitted_for_district' });
       includesSensitive = false;
     }
   }

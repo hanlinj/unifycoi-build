@@ -8,13 +8,12 @@
 // lands a correct-but-basic audit-events export so the engine is testable end to end.
 
 import { randomUUID } from 'crypto';
-import type Database from 'better-sqlite3';
+import type { Db } from '@/lib/db/client';
 import { TenantDB } from '@/lib/db/tenant';
 import { logAudit } from '@/lib/audit';
 import { captureSecurityAlert } from '@/lib/observability';
 import { getBlobStore } from '@/lib/blob';
 import { packEncrypted } from '@/lib/crypto/envelope-file';
-import { inClause } from '@/lib/reports';
 import { gatherAuditExportContent } from './content';
 import { renderAuditExportCsv } from './audit-csv';
 import { renderAuditExportPdf } from './audit-pdf';
@@ -34,7 +33,7 @@ export class AuditExportError extends Error {
 }
 
 export interface CreateExportInput {
-  db: Database.Database;
+  db: Db;
   tenantId: string;
   requestedBy: string;
   scope: ExportScope;
@@ -61,16 +60,16 @@ export async function createAuditExport(input: CreateExportInput): Promise<Creat
 
   const tdb = new TenantDB(db, tenantId);
   const exportId = randomUUID();
-  const now = new Date().toISOString();
+  const now = new Date();
   const isSync = SYNC_SCOPES.includes(scope);
 
-  tdb.insert('audit_exports', {
+  await tdb.insert('audit_exports', {
     id: exportId,
     requested_by: requestedBy,
     scope_type: scope,
     scope_ref: scopeRef,
     format,
-    includes_sensitive: includesSensitive ? 1 : 0,
+    includes_sensitive: includesSensitive,
     status: isSync ? 'generating' : 'queued',
     storage_key: null,
     claimed_at: null,
@@ -78,14 +77,14 @@ export async function createAuditExport(input: CreateExportInput): Promise<Creat
     completed_at: null,
   });
 
-  logAudit(db, {
+  await logAudit(db, {
     tenantId, actorType: 'user', actorId: requestedBy,
     eventType: 'export.generated', targetType: 'audit_export', targetId: exportId,
     payload: { scope, scope_ref: scopeRef, format, includes_sensitive: includesSensitive, mode: isSync ? 'sync' : 'async' },
   });
 
   if (includesSensitive) {
-    logAudit(db, {
+    await logAudit(db, {
       tenantId, actorType: 'user', actorId: requestedBy,
       eventType: 'export.sensitive_included', targetType: 'audit_export', targetId: exportId,
       payload: { scope, scope_ref: scopeRef, reason: reason!.trim() },
@@ -100,31 +99,32 @@ export async function createAuditExport(input: CreateExportInput): Promise<Creat
 }
 
 interface ExportRow {
-  id: string; scope_type: ExportScope; scope_ref: string | null; format: ExportFormat; includes_sensitive: number; status: string;
+  id: string; scope_type: ExportScope; scope_ref: string | null; format: ExportFormat; includes_sensitive: boolean; status: string;
 }
 
 interface ExportRowFull extends ExportRow { requested_by: string }
 
 /** Build the export bytes, encrypt, store, and flip the row to 'ready'. Shared by sync + worker. */
-export async function generateExportArtifact(db: Database.Database, tenantId: string, exportId: string): Promise<string> {
+export async function generateExportArtifact(db: Db, tenantId: string, exportId: string): Promise<string> {
   const tdb = new TenantDB(db, tenantId);
-  const row = tdb.get<ExportRowFull>(
-    'SELECT id, scope_type, scope_ref, format, includes_sensitive, status, requested_by FROM audit_exports WHERE tenant_id = ? AND id = ?',
+  const row = (await tdb.get<ExportRowFull>(
+    'SELECT id, scope_type, scope_ref, format, includes_sensitive, status, requested_by FROM audit_exports WHERE tenant_id = $1 AND id = $2',
     [exportId]
-  )!;
-  const generator = tdb.get<{ id: string; name: string; role: string }>('SELECT id, name, role FROM users WHERE tenant_id = ? AND id = ?', [row.requested_by]) ?? null;
-  const tenantName = (db.prepare('SELECT name FROM tenants WHERE id = ?').get(tenantId) as { name: string } | undefined)?.name ?? 'UnifyCOI';
+  ))!;
+  const generator = (await tdb.get<{ id: string; name: string; role: string }>('SELECT id, name, role FROM users WHERE tenant_id = $1 AND id = $2', [row.requested_by])) ?? null;
+  const tenantRow = await db.selectFrom('tenants').select('name').where('id', '=', tenantId).executeTakeFirst();
+  const tenantName = tenantRow?.name ?? 'UnifyCOI';
 
   const { bytes, decryptFailures } = await buildAuditExportBytes(db, tenantId, {
     scope: row.scope_type, scopeRef: row.scope_ref, format: row.format,
-    includesSensitive: row.includes_sensitive === 1, tenantName, generator,
+    includesSensitive: row.includes_sensitive, tenantName, generator,
   });
 
   // If any Sensitive ciphertext was unreadable, record the degradation (counts only — no
   // Sensitive content in the payload). The artifact still renders '(unreadable)' gracefully.
   const totalFails = decryptFailures.tin + decryptFailures.routing + decryptFailures.account;
   if (totalFails > 0) {
-    logAudit(db, {
+    await logAudit(db, {
       tenantId, actorType: 'user', actorId: row.requested_by,
       eventType: 'export.sensitive_decrypt_failed', targetType: 'audit_export', targetId: exportId,
       payload: { unreadable: decryptFailures },
@@ -139,47 +139,57 @@ export async function generateExportArtifact(db: Database.Database, tenantId: st
   const storageKey = `tenants/${tenantId}/exports/${exportId}.${row.format}`;
   await getBlobStore().put(storageKey, packEncrypted(bytes));
 
-  tdb.update('audit_exports', { status: 'ready', storage_key: storageKey, claimed_at: null, completed_at: new Date().toISOString() }, { id: exportId });
+  await tdb.update('audit_exports', { status: 'ready', storage_key: storageKey, claimed_at: null, completed_at: new Date() }, { id: exportId });
   return storageKey;
 }
 
 // ── Scope → audit_events ────────────────────────────────────────────────────────────
 
-interface AuditRow { created_at: string; actor_type: string; actor_id: string | null; event_type: string; target_type: string | null; target_id: string | null; payload_json: string | null }
+/**
+ * Postgres-parameterized IN(...) placeholder list, starting at $<startAt>. `reports/index.ts`'s
+ * `inClause()` is SQLite `?`-only (still Stage 9's file, un-converted) — a narrow local helper
+ * here avoids pulling that whole not-yet-scoped file into this stage's conversion. Same helper
+ * as content.ts's — small and local enough that a shared export isn't worth it yet.
+ */
+function inClausePg(count: number, startAt: number): string {
+  return Array.from({ length: count }, (_, i) => `$${startAt + i}`).join(', ');
+}
 
-export function scopeAuditEvents(db: Database.Database, tenantId: string, scope: ExportScope, scopeRef: string | null): AuditRow[] {
+interface AuditRow { created_at: string; actor_type: string; actor_id: string | null; event_type: string; target_type: string | null; target_id: string | null; payload_json: Record<string, unknown> | null }
+
+export async function scopeAuditEvents(db: Db, tenantId: string, scope: ExportScope, scopeRef: string | null): Promise<AuditRow[]> {
   const tdb = new TenantDB(db, tenantId);
   const cols = 'created_at, actor_type, actor_id, event_type, target_type, target_id, payload_json';
 
   // org / tenant_offboard: the complete tenant trail (offboard = from inception — Slice E
   // verifies completeness; the query is already the full trail).
   if (scope === 'org' || scope === 'tenant_offboard') {
-    return tdb.all<AuditRow>(`SELECT ${cols} FROM audit_events WHERE tenant_id = ? ORDER BY created_at ASC`);
+    return tdb.all<AuditRow>(`SELECT ${cols} FROM audit_events WHERE tenant_id = $1 ORDER BY created_at ASC`);
   }
 
   let targets: string[] = [];
   if (scope === 'vendor') {
     targets = scopeRef ? [scopeRef] : [];
   } else if (scope === 'location') {
-    const vendorIds = tdb.all<{ vendor_id: string }>('SELECT DISTINCT vendor_id FROM vendor_locations WHERE tenant_id = ? AND location_id = ?', [scopeRef]).map((r) => r.vendor_id);
+    const vendorIds = (await tdb.all<{ vendor_id: string }>('SELECT DISTINCT vendor_id FROM vendor_locations WHERE tenant_id = $1 AND location_id = $2', [scopeRef])).map((r) => r.vendor_id);
     targets = [scopeRef!, ...vendorIds];
   } else { // region
-    const locIds = tdb.all<{ id: string }>('SELECT id FROM locations WHERE tenant_id = ? AND region_id = ?', [scopeRef]).map((r) => r.id);
+    const locIds = (await tdb.all<{ id: string }>('SELECT id FROM locations WHERE tenant_id = $1 AND region_id = $2', [scopeRef])).map((r) => r.id);
     const vendorIds = locIds.length
-      ? tdb.all<{ vendor_id: string }>(`SELECT DISTINCT vendor_id FROM vendor_locations WHERE tenant_id = ? AND location_id IN (${inClause(locIds)})`, locIds).map((r) => r.vendor_id)
+      ? (await tdb.all<{ vendor_id: string }>(`SELECT DISTINCT vendor_id FROM vendor_locations WHERE tenant_id = $1 AND location_id IN (${inClausePg(locIds.length, 2)})`, locIds)).map((r) => r.vendor_id)
       : [];
     targets = [scopeRef!, ...locIds, ...vendorIds];
   }
 
   if (targets.length === 0) return [];
   return tdb.all<AuditRow>(
-    `SELECT ${cols} FROM audit_events WHERE tenant_id = ? AND target_id IN (${inClause(targets)}) ORDER BY created_at ASC`,
+    `SELECT ${cols} FROM audit_events WHERE tenant_id = $1 AND target_id IN (${inClausePg(targets.length, 2)}) ORDER BY created_at ASC`,
     targets
   );
 }
 
 export async function buildAuditExportBytes(
-  db: Database.Database,
+  db: Db,
   tenantId: string,
   input: {
     scope: ExportScope; scopeRef: string | null; format: ExportFormat;
@@ -188,7 +198,7 @@ export async function buildAuditExportBytes(
 ): Promise<{ bytes: Buffer; decryptFailures: { tin: number; routing: number; account: number } }> {
   const { scope, scopeRef, format, includesSensitive, tenantName, generator } = input;
   const generatedAt = new Date().toISOString();
-  const content = gatherAuditExportContent(db, tenantId, { scope, scopeRef, includesSensitive, generatedAt, generator });
+  const content = await gatherAuditExportContent(db, tenantId, { scope, scopeRef, includesSensitive, generatedAt, generator });
 
   const bytes = format === 'csv'
     ? Buffer.from(renderAuditExportCsv(content), 'utf-8')
