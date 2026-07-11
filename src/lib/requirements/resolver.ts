@@ -11,7 +11,7 @@
  * The platform floor is the absolute backstop; no resolved value may fall below it.
  */
 
-import type Database from 'better-sqlite3';
+import type { Db } from '@/lib/db/client';
 import { TenantDB } from '@/lib/db/tenant';
 
 export type Precedence = 'strictest' | 'location' | 'trade';
@@ -156,22 +156,22 @@ export function computeRequirements(
  * The precedence parameter should be read from requirement_settings by the caller
  * before invoking this function (the /api/requirements endpoints do this).
  */
-export function resolveRequirements(
-  db: Database.Database,
+export async function resolveRequirements(
+  db: Db,
   input: {
     tenantId: string;
     vendorTrade: string;
     locationId: string;
     precedence: Precedence;
   }
-): RequirementMatrix {
+): Promise<RequirementMatrix> {
   const tdb = new TenantDB(db, input.tenantId);
 
   // Load all rules for this tenant, newest-first so latestPerKey picks correctly
-  const allRules = tdb.all<RuleRow & { created_at: string }>(
+  const allRules = await tdb.all<RuleRow & { created_at: string }>(
     `SELECT id, scope_type, scope_ref, requirement_key, required_value, created_at
      FROM requirement_rules
-     WHERE tenant_id = ?
+     WHERE tenant_id = $1
      ORDER BY created_at DESC`
   );
 
@@ -183,12 +183,12 @@ export function resolveRequirements(
     (r) => r.scope_type === 'location' && r.scope_ref === input.locationId
   );
 
-  // Load the floor snapshot stored when the template was applied
-  const settings = tdb.get<{ floor_json: string | null }>(
-    'SELECT floor_json FROM requirement_settings WHERE tenant_id = ?'
+  // Load the floor snapshot stored when the template was applied. floor_json is jsonb —
+  // Kysely/pg returns it already parsed, never JSON.parse() it.
+  const settings = await tdb.get<{ floor_json: Record<string, string> | null }>(
+    'SELECT floor_json FROM requirement_settings WHERE tenant_id = $1'
   );
-  const floor: Record<string, string> =
-    settings?.floor_json ? (JSON.parse(settings.floor_json) as Record<string, string>) : {};
+  const floor: Record<string, string> = settings?.floor_json ?? {};
 
   return computeRequirements(orgRules, tradeRules, locationRules, floor, input.precedence);
 }

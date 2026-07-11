@@ -2,13 +2,13 @@
 // Creates vendor_locations rows at status='under_review', then runs rules-only re-eval.
 
 import { randomUUID } from 'crypto';
-import type Database from 'better-sqlite3';
+import type { Db } from '@/lib/db/client';
 import { TenantDB } from '@/lib/db/tenant';
 import { logAudit } from '@/lib/audit';
 import { runRulesOnlyReeval, type RunResult } from '@/lib/verification/run';
 
 export interface AddToLocationsInput {
-  db: Database.Database;
+  db: Db;
   tenantId: string;
   vendorId: string;
   actorUserId: string;
@@ -35,11 +35,11 @@ export async function addVendorToLocations(
 ): Promise<AddToLocationsResult> {
   const { db, tenantId, vendorId, actorUserId, locationIds } = input;
   const tdb = new TenantDB(db, tenantId);
-  const now = new Date().toISOString();
+  const now = new Date();
 
   interface VendorRow { id: string; trade: string }
-  const vendor = tdb.get<VendorRow>(
-    'SELECT id, trade FROM vendors WHERE tenant_id = ? AND id = ?',
+  const vendor = await tdb.get<VendorRow>(
+    'SELECT id, trade FROM vendors WHERE tenant_id = $1 AND id = $2',
     [vendorId]
   );
   if (!vendor) throw new AddToLocationsError('Vendor not found', 'NOT_FOUND');
@@ -47,21 +47,21 @@ export async function addVendorToLocations(
   const added: string[] = [];
 
   for (const locId of locationIds) {
-    const loc = tdb.get<{ id: string }>(
-      `SELECT id FROM locations WHERE tenant_id = ? AND id = ? AND status = 'active'`,
+    const loc = await tdb.get<{ id: string }>(
+      `SELECT id FROM locations WHERE tenant_id = $1 AND id = $2 AND status = 'active'`,
       [locId]
     );
     if (!loc) throw new AddToLocationsError(`Location not found or not active: ${locId}`, 'BAD_LOCATION');
 
-    const existing = tdb.get<{ id: string }>(
-      'SELECT id FROM vendor_locations WHERE tenant_id = ? AND vendor_id = ? AND location_id = ?',
+    const existing = await tdb.get<{ id: string }>(
+      'SELECT id FROM vendor_locations WHERE tenant_id = $1 AND vendor_id = $2 AND location_id = $3',
       [vendorId, locId]
     );
     if (existing) {
       throw new AddToLocationsError(`Vendor already associated with location: ${locId}`, 'ALREADY_ASSOCIATED');
     }
 
-    tdb.insert('vendor_locations', {
+    await tdb.insert('vendor_locations', {
       id: randomUUID(),
       vendor_id: vendorId,
       location_id: locId,
@@ -75,7 +75,10 @@ export async function addVendorToLocations(
     added.push(locId);
   }
 
-  // Rules-only re-eval: reads stored extractions, no Vision call (invariant #7)
+  // Rules-only re-eval: reads stored extractions, no Vision call (invariant #7). Its own
+  // multi-write (verification_runs/requirement_evaluations/engine_advisories/audit) is
+  // atomic internally (runVerification's own withTransaction) — this function doesn't need
+  // its own wrapping transaction beyond that, matching the original (pre-Stage-7) structure.
   const runResult = await runRulesOnlyReeval(db, {
     tenantId,
     vendorId,
@@ -83,7 +86,7 @@ export async function addVendorToLocations(
     trigger: 'location_add',
   });
 
-  logAudit(db, {
+  await logAudit(db, {
     tenantId,
     actorType: 'user',
     actorId: actorUserId,

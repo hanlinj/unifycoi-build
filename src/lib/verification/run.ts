@@ -10,13 +10,13 @@
 //   7. Emit audit events
 
 import { randomUUID } from 'crypto';
-import type Database from 'better-sqlite3';
+import type { Db } from '@/lib/db/client';
 import { TenantDB } from '@/lib/db/tenant';
+import { withTransaction } from '@/lib/db/transaction';
 import { logAudit } from '@/lib/audit';
 import { resolveRequirements } from '@/lib/requirements/resolver';
 import { runRulesEngine, rollUp } from './engine';
 import { generateAdvisories } from './advisories';
-import { env } from '@/lib/env';
 import type { ExtractionBundle, ProcessedCOIExtraction, ProcessedW9Extraction, ProcessedACHExtraction } from '@/lib/extraction/types';
 import type { EvaluationResult } from './engine';
 
@@ -40,24 +40,24 @@ interface ExtractionRow {
   id: string;
   document_id: string;
   doc_type: string;
-  payload_json: string;
+  payload_json: ProcessedCOIExtraction | ProcessedW9Extraction | ProcessedACHExtraction; // jsonb
   created_at: string;
 }
 
 // ── Load stored extractions for a vendor ─────────────────────────────────────
 
-export function loadExtractionBundle(
-  db: Database.Database,
+export async function loadExtractionBundle(
+  db: Db,
   tenantId: string,
   vendorId: string
-): ExtractionBundle {
+): Promise<ExtractionBundle> {
   const tdb = new TenantDB(db, tenantId);
 
   // Get active documents for this vendor
-  const docs = tdb.all<DocumentRow>(
+  const docs = await tdb.all<DocumentRow>(
     `SELECT d.id, d.doc_type, d.state
      FROM documents d
-     WHERE tenant_id = ? AND vendor_id = ? AND state = 'active' AND superseded_by IS NULL`,
+     WHERE tenant_id = $1 AND vendor_id = $2 AND state = 'active' AND superseded_by IS NULL`,
     [vendorId]
   );
 
@@ -67,10 +67,10 @@ export function loadExtractionBundle(
     if (doc.doc_type !== 'coi' && doc.doc_type !== 'w9' && doc.doc_type !== 'ach') continue;
 
     // Get the latest extraction for this document
-    const extraction = tdb.get<ExtractionRow>(
+    const extraction = await tdb.get<ExtractionRow>(
       `SELECT id, document_id, doc_type, payload_json, created_at
        FROM extractions
-       WHERE tenant_id = ? AND document_id = ?
+       WHERE tenant_id = $1 AND document_id = $2
        ORDER BY created_at DESC
        LIMIT 1`,
       [doc.id]
@@ -78,7 +78,8 @@ export function loadExtractionBundle(
 
     if (!extraction) continue;
 
-    const payload = JSON.parse(extraction.payload_json);
+    // payload_json is jsonb — Kysely/pg returns it already parsed, never JSON.parse() it.
+    const payload = extraction.payload_json;
     if (doc.doc_type === 'coi') bundle.coi = payload as ProcessedCOIExtraction;
     else if (doc.doc_type === 'w9') bundle.w9 = payload as ProcessedW9Extraction;
     else if (doc.doc_type === 'ach') bundle.ach = payload as ProcessedACHExtraction;
@@ -97,7 +98,7 @@ export interface RunResult {
 }
 
 export async function runVerification(
-  db: Database.Database,
+  db: Db,
   input: {
     tenantId: string;
     vendorId: string;
@@ -107,151 +108,161 @@ export async function runVerification(
   }
 ): Promise<RunResult> {
   const { tenantId, vendorId, vendorTrade, trigger } = input;
-  const tdb = new TenantDB(db, tenantId);
 
-  // Load bundle (extraction results) — from DB if not supplied directly
-  const bundle = input.bundle ?? loadExtractionBundle(db, tenantId, vendorId);
+  // Phase 13 Stage 7: the whole run (every read that feeds the decision, and every write of
+  // its outcome) is now one atomic unit via withTransaction() — a deliberate change, not
+  // behavior-preservation. The original synchronous SQLite version had no explicit transaction
+  // wrapping any of this: a failure partway through (e.g. the 4th requirement_evaluations
+  // insert) left verification_runs and the first 3 evaluations committed with nothing to roll
+  // them back. See ADR-013-01 for the decision record and the atomicity test that proves it.
+  return withTransaction(db, async (trx) => {
+    const tdb = new TenantDB(trx, tenantId);
 
-  // Load vendor's assigned locations
-  const vendorLocations = tdb.all<VendorLocation>(
-    `SELECT id, location_id, status FROM vendor_locations WHERE tenant_id = ? AND vendor_id = ?`,
-    [vendorId]
-  );
+    // Load bundle (extraction results) — from DB if not supplied directly. loadExtractionBundle
+    // is an internal branch of this orchestrator, not a separate unit (Stage 7 scoping).
+    const bundle = input.bundle ?? await loadExtractionBundle(trx, tenantId, vendorId);
 
-  if (vendorLocations.length === 0) {
-    // No locations assigned — run against empty matrix for the trigger
-    vendorLocations.push({ id: 'none', location_id: 'none', status: 'onboarding' });
-  }
+    // Load vendor's assigned locations
+    const vendorLocations = await tdb.all<VendorLocation>(
+      `SELECT id, location_id, status FROM vendor_locations WHERE tenant_id = $1 AND vendor_id = $2`,
+      [vendorId]
+    );
 
-  // Load precedence policy
-  const settings = tdb.get<{ precedence_policy: string }>(
-    'SELECT precedence_policy FROM requirement_settings WHERE tenant_id = ?'
-  );
-  const precedence = (settings?.precedence_policy as 'strictest' | 'location' | 'trade') ?? 'strictest';
-
-  // Run rules engine for each location — collect all evaluations
-  const allEvaluations: Array<{ locationId: string; evaluations: EvaluationResult[] }> = [];
-
-  for (const vl of vendorLocations) {
-    let matrix = {};
-    if (vl.location_id !== 'none') {
-      matrix = resolveRequirements(db, {
-        tenantId,
-        vendorTrade,
-        locationId: vl.location_id,
-        precedence,
-      });
+    if (vendorLocations.length === 0) {
+      // No locations assigned — run against empty matrix for the trigger
+      vendorLocations.push({ id: 'none', location_id: 'none', status: 'onboarding' });
     }
 
-    const result = runRulesEngine({ bundle, matrix, vendorTrade });
-    allEvaluations.push({ locationId: vl.location_id, evaluations: result.evaluations });
-  }
+    // Load precedence policy
+    const settings = await tdb.get<{ precedence_policy: string }>(
+      'SELECT precedence_policy FROM requirement_settings WHERE tenant_id = $1'
+    );
+    const precedence = (settings?.precedence_policy as 'strictest' | 'location' | 'trade') ?? 'strictest';
 
-  // Flatten evaluations for recommendation roll-up
-  const flatEvals = allEvaluations.flatMap((e) => e.evaluations);
-  const recommendation = rollUp(flatEvals);
+    // Run rules engine for each location — collect all evaluations
+    const allEvaluations: Array<{ locationId: string; evaluations: EvaluationResult[] }> = [];
 
-  // Generate advisories (full pipeline only)
-  const advisories = trigger === 'rule_change' || trigger === 'location_add'
-    ? []
-    : generateAdvisories(bundle);
+    for (const vl of vendorLocations) {
+      let matrix = {};
+      if (vl.location_id !== 'none') {
+        matrix = await resolveRequirements(trx, {
+          tenantId,
+          vendorTrade,
+          locationId: vl.location_id,
+          precedence,
+        });
+      }
 
-  // Write verification_run row
-  const runId = randomUUID();
-  tdb.insert('verification_runs', {
-    id: runId,
-    vendor_id: vendorId,
-    trigger,
-    engine_version: ENGINE_VERSION,
-    recommendation,
-    created_at: new Date().toISOString(),
-  });
-
-  // Write requirement_evaluations rows (one per requirement per location)
-  for (const { locationId, evaluations } of allEvaluations) {
-    for (const ev of evaluations) {
-      if (ev.outcome === 'pass') continue; // only write non-pass evaluations
-      tdb.insert('requirement_evaluations', {
-        id: randomUUID(),
-        run_id: runId,
-        vendor_id: vendorId,
-        location_id: locationId === 'none' ? vendorId : locationId, // fallback
-        requirement_key: ev.requirementKey,
-        required_value: ev.requiredValue,
-        extracted_value_ref: ev.extractedValueRef,
-        comparison_result: ev.comparisonResult,
-        confidence_band: ev.confidenceBand,
-        outcome: ev.outcome,
-        note: ev.note,
-      });
+      const result = runRulesEngine({ bundle, matrix, vendorTrade });
+      allEvaluations.push({ locationId: vl.location_id, evaluations: result.evaluations });
     }
-  }
 
-  // Write engine_advisories rows
-  for (const adv of advisories) {
-    tdb.insert('engine_advisories', {
-      id: randomUUID(),
+    // Flatten evaluations for recommendation roll-up
+    const flatEvals = allEvaluations.flatMap((e) => e.evaluations);
+    const recommendation = rollUp(flatEvals);
+
+    // Generate advisories (full pipeline only)
+    const advisories = trigger === 'rule_change' || trigger === 'location_add'
+      ? []
+      : generateAdvisories(bundle);
+
+    // Write verification_run row
+    const runId = randomUUID();
+    await tdb.insert('verification_runs', {
+      id: runId,
       vendor_id: vendorId,
-      verification_run_id: runId,
-      key: adv.key,
-      severity: adv.severity,
-      message: adv.message,
-      evidence_json: JSON.stringify({ evidence: adv.evidence }),
-      created_at: new Date().toISOString(),
-    });
-  }
-
-  // Audit: ai.recommendation
-  logAudit(db, {
-    tenantId,
-    actorType: 'ai',
-    actorId: `engine/${ENGINE_VERSION}`,
-    eventType: 'ai.recommendation',
-    targetType: 'vendor',
-    targetId: vendorId,
-    payload: {
-      run_id: runId,
       trigger,
+      engine_version: ENGINE_VERSION,
       recommendation,
-      evaluation_count: flatEvals.length,
-      advisory_count: advisories.length,
-      escalated: false,
-    },
-  });
+      created_at: new Date(),
+    });
 
-  // Audit: ai.advisory for each advisory
-  for (const adv of advisories) {
-    logAudit(db, {
+    // Write requirement_evaluations rows (one per requirement per location)
+    for (const { locationId, evaluations } of allEvaluations) {
+      for (const ev of evaluations) {
+        if (ev.outcome === 'pass') continue; // only write non-pass evaluations
+        await tdb.insert('requirement_evaluations', {
+          id: randomUUID(),
+          run_id: runId,
+          vendor_id: vendorId,
+          location_id: locationId === 'none' ? vendorId : locationId, // fallback
+          requirement_key: ev.requirementKey,
+          required_value: ev.requiredValue,
+          extracted_value_ref: ev.extractedValueRef,
+          comparison_result: ev.comparisonResult,
+          confidence_band: ev.confidenceBand,
+          outcome: ev.outcome,
+          note: ev.note,
+        });
+      }
+    }
+
+    // Write engine_advisories rows
+    for (const adv of advisories) {
+      await tdb.insert('engine_advisories', {
+        id: randomUUID(),
+        vendor_id: vendorId,
+        verification_run_id: runId,
+        key: adv.key,
+        severity: adv.severity,
+        message: adv.message,
+        evidence_json: JSON.stringify({ evidence: adv.evidence }),
+        created_at: new Date(),
+      });
+    }
+
+    // Audit: ai.recommendation
+    await logAudit(trx, {
       tenantId,
       actorType: 'ai',
       actorId: `engine/${ENGINE_VERSION}`,
-      eventType: 'ai.advisory',
+      eventType: 'ai.recommendation',
       targetType: 'vendor',
       targetId: vendorId,
       payload: {
         run_id: runId,
-        key: adv.key,
-        severity: adv.severity,
-        message: adv.message,
-        // evidence is not sensitive; log it for traceability
-        evidence: adv.evidence,
+        trigger,
+        recommendation,
+        evaluation_count: flatEvals.length,
+        advisory_count: advisories.length,
+        escalated: false,
       },
     });
-  }
 
-  return {
-    runId,
-    recommendation,
-    evaluationCount: flatEvals.length,
-    advisoryCount: advisories.length,
-  };
+    // Audit: ai.advisory for each advisory
+    for (const adv of advisories) {
+      await logAudit(trx, {
+        tenantId,
+        actorType: 'ai',
+        actorId: `engine/${ENGINE_VERSION}`,
+        eventType: 'ai.advisory',
+        targetType: 'vendor',
+        targetId: vendorId,
+        payload: {
+          run_id: runId,
+          key: adv.key,
+          severity: adv.severity,
+          message: adv.message,
+          // evidence is not sensitive; log it for traceability
+          evidence: adv.evidence,
+        },
+      });
+    }
+
+    return {
+      runId,
+      recommendation,
+      evaluationCount: flatEvals.length,
+      advisoryCount: advisories.length,
+    };
+  });
 }
 
 // ── Rules-only re-evaluation (trigger: rule_change or location_add) ───────────
 // No Vision call. No advisory generation. Reads stored extractions only.
 
 export async function runRulesOnlyReeval(
-  db: Database.Database,
+  db: Db,
   input: {
     tenantId: string;
     vendorId: string;

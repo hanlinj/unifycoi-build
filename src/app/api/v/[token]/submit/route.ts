@@ -5,7 +5,7 @@
 
 import { NextResponse } from 'next/server';
 import { randomUUID } from 'crypto';
-import { getRawDb } from '@/lib/db/client';
+import { getDb } from '@/lib/db/client';
 import { TenantDB } from '@/lib/db/tenant';
 import { validateInviteToken, INVALID_TOKEN_MESSAGE } from '@/lib/services/vendor-token';
 import { fsmTransition, IllegalTransitionError } from '@/lib/services/vendor-fsm';
@@ -24,8 +24,8 @@ export async function POST(
   _request: Request,
   { params }: { params: { token: string } }
 ): Promise<NextResponse> {
-  const db = getRawDb();
-  const validated = validateInviteToken(db, params.token);
+  const db = getDb();
+  const validated = await validateInviteToken(db, params.token);
 
   if (!validated) {
     return NextResponse.json({ error: INVALID_TOKEN_MESSAGE }, { status: 401 });
@@ -36,8 +36,8 @@ export async function POST(
   const vendorId = invite.vendor_id;
   const tdb = new TenantDB(db, tenantId);
 
-  const vendor = tdb.get<VendorRow>(
-    'SELECT id, business_name, trade FROM vendors WHERE tenant_id = ? AND id = ?',
+  const vendor = await tdb.get<VendorRow>(
+    'SELECT id, business_name, trade FROM vendors WHERE tenant_id = $1 AND id = $2',
     [vendorId]
   );
   if (!vendor) {
@@ -45,9 +45,9 @@ export async function POST(
   }
 
   // Require all three doc types to be present and active before allowing submit
-  const activeDocs = tdb.all<DocRow>(
+  const activeDocs = await tdb.all<DocRow>(
     `SELECT DISTINCT doc_type FROM documents
-     WHERE tenant_id = ? AND vendor_id = ? AND state = 'active' AND superseded_by IS NULL`,
+     WHERE tenant_id = $1 AND vendor_id = $2 AND state = 'active' AND superseded_by IS NULL`,
     [vendorId]
   );
   const uploadedTypes = new Set(activeDocs.map((d) => d.doc_type));
@@ -62,7 +62,7 @@ export async function POST(
   // FSM: onboarding → under_review
   // IllegalTransitionError means vendor already submitted (or wrong state) — return 409
   try {
-    fsmTransition(db, tenantId, vendorId, 'submit');
+    await fsmTransition(db, tenantId, vendorId, 'submit');
   } catch (err) {
     if (err instanceof IllegalTransitionError) {
       return NextResponse.json({ error: 'Already submitted' }, { status: 409 });
@@ -88,8 +88,8 @@ export async function POST(
   // Notify the Admin who sent the invite. Per Notifications_and_Communications.md catalog
   // ("Vendor ready for review → Admin → Digest"), this is ROUTINE throughput, batched into
   // the daily digest — not an immediate exception. (Corrected from the Phase 5 deviation.)
-  const now = new Date().toISOString();
-  tdb.insert('notifications', {
+  const now = new Date();
+  await tdb.insert('notifications', {
     id: randomUUID(),
     recipient_type: 'user',
     recipient_ref: invite.inviter_user_id,
@@ -109,7 +109,7 @@ export async function POST(
     created_at: now,
   });
 
-  logAudit(db, {
+  await logAudit(db, {
     tenantId,
     actorType: 'vendor',
     actorId: vendorId,

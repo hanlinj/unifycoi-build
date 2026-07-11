@@ -14,7 +14,7 @@
  * § "Advisory flags" and § "Reuse".
  */
 
-import type Database from 'better-sqlite3';
+import type { Db } from '@/lib/db/client';
 import { TenantDB } from '@/lib/db/tenant';
 import { logAudit } from '@/lib/audit';
 import { runRulesOnlyReeval } from '@/lib/verification/run';
@@ -36,19 +36,20 @@ interface VendorLocationRow {
  * @param changedKey  The requirement_key that was changed (for scoped re-eval filtering).
  */
 export async function triggerRuleChangeReeval(
-  db: Database.Database,
+  db: Db,
   tenantId: string,
   changedKey: string
 ): Promise<void> {
   const tdb = new TenantDB(db, tenantId);
 
-  // Load all approved vendor-locations for this tenant
-  const vendorLocations = tdb.all<VendorLocationRow>(
+  // Load all approved vendor-locations for this tenant. Both tenant_id checks want the same
+  // value, so both can just reuse $1 (unlike SQLite's positional `?` binding, which needed a
+  // second copy of the value passed explicitly for the second occurrence).
+  const vendorLocations = await tdb.all<VendorLocationRow>(
     `SELECT vl.vendor_id, v.trade AS vendor_trade, vl.status
      FROM vendor_locations vl
-     JOIN vendors v ON v.id = vl.vendor_id AND v.tenant_id = ?
-     WHERE vl.tenant_id = ? AND vl.status = 'approved'`,
-    [tenantId]  // second ? is injected by TenantDB as first param
+     JOIN vendors v ON v.id = vl.vendor_id AND v.tenant_id = $1
+     WHERE vl.tenant_id = $1 AND vl.status = 'approved'`
   );
 
   let reevalCount = 0;
@@ -67,13 +68,13 @@ export async function triggerRuleChangeReeval(
 
     if (result.recommendation === 'deficiencies' || result.recommendation === 'uncertain') {
       // Vendor no longer passes — flip to non_compliant
-      tdb.update(
+      await tdb.update(
         'vendor_locations',
         { status: 'non_compliant' },
         { vendor_id: vl.vendor_id }
       );
 
-      logAudit(db, {
+      await logAudit(db, {
         tenantId,
         actorType: 'system',
         actorId: 'rule-change-reeval',
@@ -90,7 +91,7 @@ export async function triggerRuleChangeReeval(
       // Exception (immediate): a rule tightening surfaced new post-approval risk. Admins
       // must learn now, not in the digest (Notifications_and_Communications.md catalog:
       // "Re-evaluation flags vendor Non-Compliant" → Admin → Immediate).
-      notifyTenantAdmins(db, tenantId, {
+      await notifyTenantAdmins(db, tenantId, {
         type: 'non_compliant_rule_change',
         vendor_id: vl.vendor_id,
         changed_key: changedKey,
@@ -102,7 +103,7 @@ export async function triggerRuleChangeReeval(
   }
 
   // Log the re-eval trigger summary
-  logAudit(db, {
+  await logAudit(db, {
     tenantId,
     actorType: 'system',
     actorId: 'rule-change-reeval',

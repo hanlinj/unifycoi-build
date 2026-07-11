@@ -3,7 +3,7 @@
 // Admin-only. Delegates to addVendorToLocations() service.
 
 import { NextResponse } from 'next/server';
-import { getRawDb } from '@/lib/db/client';
+import { getDb } from '@/lib/db/client';
 import { requireTenantAuth, isResponse, forbidden, badRequest, notFound, conflict } from '@/lib/api';
 import { addVendorToLocations, AddToLocationsError } from '@/lib/services/add-to-locations';
 
@@ -34,7 +34,7 @@ export async function POST(
 
   try {
     const result = await addVendorToLocations({
-      db: getRawDb(),
+      db: getDb(),
       tenantId: auth.tenantId,
       vendorId: params.id,
       actorUserId: auth.sub,

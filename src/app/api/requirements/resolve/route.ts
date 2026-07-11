@@ -3,7 +3,7 @@
 // Read-only; reuses the Phase 3 resolver. Admin-only.
 
 import { NextResponse } from 'next/server';
-import { getRawDb } from '@/lib/db/client';
+import { getDb } from '@/lib/db/client';
 import { requireTenantAuth, isResponse, forbidden, badRequest, ok } from '@/lib/api';
 import { resolveRequirements, type Precedence } from '@/lib/requirements/resolver';
 import { getPrecedence } from '@/lib/services/requirements';
@@ -22,9 +22,9 @@ export async function GET(request: Request): Promise<NextResponse> {
   const location = url.searchParams.get('location');
   if (!trade || !location) return badRequest('trade and location are required');
 
-  const db = getRawDb();
-  const precedence = getPrecedence(db, auth.tenantId) as Precedence;
-  const matrix = resolveRequirements(db, { tenantId: auth.tenantId, vendorTrade: trade, locationId: location, precedence });
+  const db = getDb();
+  const precedence = (await getPrecedence(db, auth.tenantId)) as Precedence;
+  const matrix = await resolveRequirements(db, { tenantId: auth.tenantId, vendorTrade: trade, locationId: location, precedence });
 
   const entries = Object.entries(matrix).map(([requirement_key, e]) => ({
     requirement_key, required_value: e.required_value, source: e.scope, rule_id: e.rule_id,

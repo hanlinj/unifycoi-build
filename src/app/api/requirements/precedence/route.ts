@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server';
-import { getRawDb } from '@/lib/db/client';
+import { getDb } from '@/lib/db/client';
 import { setPrecedence } from '@/lib/services/requirements';
 import type { Precedence } from '@/lib/services/requirements';
 import { requireTenantAuth, isResponse, ok, badRequest, forbidden } from '@/lib/api';
@@ -27,7 +27,7 @@ export async function PUT(request: Request): Promise<NextResponse> {
     return badRequest('reason is required (min 10 characters) for a precedence change');
   }
 
-  const db = getRawDb();
-  setPrecedence(db, auth.tenantId, policy as Precedence, auth.sub, reason.trim());
+  const db = getDb();
+  await setPrecedence(db, auth.tenantId, policy as Precedence, auth.sub, reason.trim());
   return ok({ policy });
 }

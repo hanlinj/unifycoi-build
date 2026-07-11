@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server';
-import { getRawDb } from '@/lib/db/client';
+import { getDb } from '@/lib/db/client';
 import { getRequirements, setRequirementRule } from '@/lib/services/requirements';
 import type { ScopeType } from '@/lib/services/requirements';
 import { requireTenantAuth, isResponse, ok, badRequest, forbidden, unprocessable } from '@/lib/api';
@@ -13,8 +13,8 @@ export async function GET(request: Request): Promise<NextResponse> {
   if (auth.role !== 'admin') return forbidden();
   if (!auth.tenantId) return forbidden();
 
-  const db = getRawDb();
-  return ok(getRequirements(db, auth.tenantId));
+  const db = getDb();
+  return ok(await getRequirements(db, auth.tenantId));
 }
 
 export async function PUT(request: Request): Promise<NextResponse> {
@@ -41,7 +41,7 @@ export async function PUT(request: Request): Promise<NextResponse> {
     return badRequest('reason is required (audit invariant)');
   }
 
-  const db = getRawDb();
+  const db = getDb();
   try {
     const rule = await setRequirementRule(
       db,

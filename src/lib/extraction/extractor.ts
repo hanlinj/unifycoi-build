@@ -96,6 +96,24 @@ function strField(raw: RawFieldStr | undefined | null, band: ConfBand, corrobora
   return { value: raw.value, confidence: raw.confidence, band, source: raw.source, corroborated };
 }
 
+/**
+ * Like strField(), but for date fields: normalizes the raw Vision string to zero-padded
+ * ISO-8601 (toIsoDateStr) before it's ever returned — the single enforcement point for every
+ * date this extraction pipeline produces (Phase 13 Stage 7). Vision's tool schema puts no
+ * format constraint on these fields, so the raw value could be "9/5/2026", "2026-9-5", or
+ * unparseable prose; toIsoDateStr() normalizes the first two and passes the third through
+ * unchanged (its existing null-safe contract). Every downstream consumer — the expiration
+ * gate, the renewal chase, the advisory generator — now reads an already-normalized value
+ * instead of needing its own fix. Supersedes notifications/renewal.ts's earliestExpiration(),
+ * which stays as-is (defense in depth on a value that's already normalized by the time it gets
+ * there, not an accidental duplicate — see ADR-013-01).
+ */
+function dateField(raw: RawFieldStr | undefined | null, band: ConfBand, corroborated: boolean): FieldValue<string | null> {
+  if (!raw) return { value: null, confidence: 0, band, source: NULL_SOURCE, corroborated };
+  const normalized = raw.value ? (toIsoDateStr(raw.value) ?? raw.value) : raw.value;
+  return { value: normalized, confidence: raw.confidence, band, source: raw.source, corroborated };
+}
+
 function numField(raw: RawFieldNum | undefined | null, band: ConfBand, corroborated: boolean): FieldValue<number | null> {
   if (!raw) return { value: null, confidence: 0, band, source: NULL_SOURCE, corroborated };
   return { value: raw.value, confidence: raw.confidence, band, source: raw.source, corroborated };
@@ -328,7 +346,10 @@ Set document_type_confirmed to 'ach'. If this is NOT an ACH form, return the act
 
 // ── Build processed payloads ───────────────────────────────────────────────────
 
-function buildCOI(raw: RawCOIExtraction, corr: Record<string, RawField>): ProcessedCOIExtraction {
+// Exported (alongside toIsoDateStr, checkExpirationGate) so the Stage 7 boundary-normalization
+// fix is directly unit-testable without mocking the Vision API call — same testability
+// convention this file already uses.
+export function buildCOI(raw: RawCOIExtraction, corr: Record<string, RawField>): ProcessedCOIExtraction {
   // Optional-chain on f so undefined/null fields default to confidence=0, value=null
   const fb = (path: string, f: RawField | undefined | null) =>
     fieldBand(path, f?.confidence ?? 0, f?.value ?? null, corr);
@@ -336,7 +357,7 @@ function buildCOI(raw: RawCOIExtraction, corr: Record<string, RawField>): Proces
   return {
     doc_type: 'coi',
     document_type_confirmed: raw.document_type_confirmed,
-    certificate_date: strField(raw.certificate_date, ...bandPair(fb('certificate_date', raw.certificate_date))),
+    certificate_date: dateField(raw.certificate_date, ...bandPair(fb('certificate_date', raw.certificate_date))),
     producer: strField(raw.producer, ...bandPair(fb('producer', raw.producer))),
     named_insured: strField(raw.named_insured, ...bandPair(fb('named_insured', raw.named_insured))),
     insured_address: strField(raw.insured_address, ...bandPair(fb('insured_address', raw.insured_address))),
@@ -349,8 +370,8 @@ function buildCOI(raw: RawCOIExtraction, corr: Record<string, RawField>): Proces
       coverage_type: strField(p.coverage_type, ...bandPair(fb(`policies.${i}.coverage_type`, p.coverage_type))),
       insurer_letter: strField(p.insurer_letter, toBand(p.insurer_letter.confidence), false),
       policy_number: strField(p.policy_number, ...bandPair(fb(`policies.${i}.policy_number`, p.policy_number))),
-      effective_date: strField(p.effective_date, ...bandPair(fb(`policies.${i}.effective_date`, p.effective_date))),
-      expiration_date: strField(p.expiration_date, ...bandPair(fb(`policies.${i}.expiration_date`, p.expiration_date))),
+      effective_date: dateField(p.effective_date, ...bandPair(fb(`policies.${i}.effective_date`, p.effective_date))),
+      expiration_date: dateField(p.expiration_date, ...bandPair(fb(`policies.${i}.expiration_date`, p.expiration_date))),
       limits: Object.fromEntries(
         Object.entries(p.limits).map(([k, v]) => [
           k,
@@ -368,7 +389,7 @@ function buildCOI(raw: RawCOIExtraction, corr: Record<string, RawField>): Proces
   };
 }
 
-function buildW9(raw: RawW9Extraction, corr: Record<string, RawField>): ProcessedW9Extraction {
+export function buildW9(raw: RawW9Extraction, corr: Record<string, RawField>): ProcessedW9Extraction {
   const fb = (path: string, f: RawField) => fieldBand(path, f.confidence, f.value, corr);
   const tinCipher = raw.tin_value.value ? encryptField(raw.tin_value.value) : null;
   return {
@@ -381,7 +402,7 @@ function buildW9(raw: RawW9Extraction, corr: Record<string, RawField>): Processe
     tin_value: { value: tinCipher, confidence: raw.tin_value.confidence, band: toBand(raw.tin_value.confidence), source: raw.tin_value.source, corroborated: false },
     address: strField(raw.address, ...bandPair(fb('address', raw.address))),
     signature_present: boolField(raw.signature_present, toBand(raw.signature_present.confidence), false),
-    signature_date: strField(raw.signature_date, toBand(raw.signature_date.confidence), false),
+    signature_date: dateField(raw.signature_date, toBand(raw.signature_date.confidence), false),
   };
 }
 

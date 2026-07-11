@@ -1,5 +1,5 @@
 import { randomUUID } from 'crypto';
-import type Database from 'better-sqlite3';
+import type { Db } from '@/lib/db/client';
 import { TenantDB } from '@/lib/db/tenant';
 import { logAudit } from '@/lib/audit';
 import { isStricter } from '@/lib/requirements/resolver';
@@ -44,22 +44,22 @@ const VALID_TRADES = new Set<string>(SHARED_TRADES);
  * Returns the current layered rules (latest per key per scope) and settings for
  * the requirements configuration screen.
  */
-export function getRequirements(
-  db: Database.Database,
+export async function getRequirements(
+  db: Db,
   tenantId: string
-): {
+): Promise<{
   rules: { org: RequirementRuleRow[]; trade: RequirementRuleRow[]; location: RequirementRuleRow[] };
   precedence: Precedence;
   floor: Record<string, string>;
-} {
+}> {
   const tdb = new TenantDB(db, tenantId);
 
   // Load all rules, newest-first; deduplicate by (scope_type, scope_ref, requirement_key)
-  const allRules = tdb.all<RequirementRuleRow>(
+  const allRules = await tdb.all<RequirementRuleRow>(
     `SELECT id, tenant_id, scope_type, scope_ref, requirement_key, required_value,
             created_by, reason, created_at
      FROM requirement_rules
-     WHERE tenant_id = ?
+     WHERE tenant_id = $1
      ORDER BY created_at DESC`
   );
 
@@ -74,8 +74,9 @@ export function getRequirements(
     }
   }
 
-  const settings = tdb.get<{ precedence_policy: Precedence; floor_json: string | null }>(
-    'SELECT precedence_policy, floor_json FROM requirement_settings WHERE tenant_id = ?'
+  // floor_json is jsonb — Kysely/pg returns it already parsed, never JSON.parse() it.
+  const settings = await tdb.get<{ precedence_policy: Precedence; floor_json: Record<string, string> | null }>(
+    'SELECT precedence_policy, floor_json FROM requirement_settings WHERE tenant_id = $1'
   );
 
   return {
@@ -85,7 +86,7 @@ export function getRequirements(
       location: current.filter((r) => r.scope_type === 'location'),
     },
     precedence: settings?.precedence_policy ?? 'strictest',
-    floor: settings?.floor_json ? (JSON.parse(settings.floor_json) as Record<string, string>) : {},
+    floor: settings?.floor_json ?? {},
   };
 }
 
@@ -103,7 +104,7 @@ export function getRequirements(
  *   - required_value is not below the platform floor (if a floor exists for this key)
  */
 export async function setRequirementRule(
-  db: Database.Database,
+  db: Db,
   tenantId: string,
   input: SetRuleInput,
   actorId: string
@@ -126,20 +127,20 @@ export async function setRequirementRule(
     if (!input.scope_ref) {
       throw Object.assign(new Error('scope_ref (location_id) required for location scope'), { status: 400 });
     }
-    const loc = tdb.get<{ id: string }>(
-      'SELECT id FROM locations WHERE tenant_id = ? AND id = ?',
+    const loc = await tdb.get<{ id: string }>(
+      'SELECT id FROM locations WHERE tenant_id = $1 AND id = $2',
       [input.scope_ref]
     );
     if (!loc) throw Object.assign(new Error('Location not found'), { status: 404 });
   }
 
-  // Validate against floor
-  const settings = tdb.get<{ floor_json: string | null }>(
-    'SELECT floor_json FROM requirement_settings WHERE tenant_id = ?'
+  // Validate against floor. floor_json is jsonb — Kysely/pg returns it already parsed, never
+  // JSON.parse() it.
+  const settings = await tdb.get<{ floor_json: Record<string, string> | null }>(
+    'SELECT floor_json FROM requirement_settings WHERE tenant_id = $1'
   );
   if (settings?.floor_json) {
-    const floor = JSON.parse(settings.floor_json) as Record<string, string>;
-    const floorValue = floor[input.requirement_key];
+    const floorValue = settings.floor_json[input.requirement_key];
     if (floorValue !== undefined && isStricter(floorValue, input.required_value)) {
       throw Object.assign(
         new Error(
@@ -151,10 +152,10 @@ export async function setRequirementRule(
   }
 
   // Find the current rule (if any) for audit diff
-  const existing = tdb.get<RequirementRuleRow>(
+  const existing = await tdb.get<RequirementRuleRow>(
     `SELECT id, required_value FROM requirement_rules
-     WHERE tenant_id = ? AND scope_type = ? AND scope_ref ${input.scope_ref === null ? 'IS NULL' : '= ?'}
-       AND requirement_key = ?
+     WHERE tenant_id = $1 AND scope_type = $2 AND scope_ref ${input.scope_ref === null ? 'IS NULL' : '= $3'}
+       AND requirement_key = ${input.scope_ref === null ? '$3' : '$4'}
      ORDER BY created_at DESC LIMIT 1`,
     input.scope_ref === null
       ? [input.scope, input.requirement_key]
@@ -162,9 +163,9 @@ export async function setRequirementRule(
   );
 
   const id = randomUUID();
-  const now = new Date().toISOString();
+  const now = new Date();
 
-  tdb.insert('requirement_rules', {
+  await tdb.insert('requirement_rules', {
     id,
     scope_type: input.scope,
     scope_ref: input.scope_ref ?? null,
@@ -175,7 +176,7 @@ export async function setRequirementRule(
     created_at: now,
   });
 
-  logAudit(db, {
+  await logAudit(db, {
     tenantId,
     actorType: 'user',
     actorId,
@@ -195,42 +196,41 @@ export async function setRequirementRule(
   // Re-evaluation hook (Phase 4 fills in the body)
   await triggerRuleChangeReeval(db, tenantId, input.requirement_key);
 
-  return tdb.get<RequirementRuleRow>(
+  return (await tdb.get<RequirementRuleRow>(
     `SELECT id, tenant_id, scope_type, scope_ref, requirement_key, required_value,
             created_by, reason, created_at
-     FROM requirement_rules WHERE tenant_id = ? AND id = ?`,
+     FROM requirement_rules WHERE tenant_id = $1 AND id = $2`,
     [id]
-  )!;
+  ))!;
 }
 
 // ─── Precedence ────────────────────────────────────────────────────────────────
 
-export function getPrecedence(db: Database.Database, tenantId: string): Precedence {
+export async function getPrecedence(db: Db, tenantId: string): Promise<Precedence> {
   const tdb = new TenantDB(db, tenantId);
-  const row = tdb.get<{ precedence_policy: Precedence }>(
-    'SELECT precedence_policy FROM requirement_settings WHERE tenant_id = ?'
+  const row = await tdb.get<{ precedence_policy: Precedence }>(
+    'SELECT precedence_policy FROM requirement_settings WHERE tenant_id = $1'
   );
   return row?.precedence_policy ?? 'strictest';
 }
 
-export function setPrecedence(
-  db: Database.Database,
+export async function setPrecedence(
+  db: Db,
   tenantId: string,
   policy: Precedence,
   actorId: string,
   reason?: string
-): void {
-  const tdb = new TenantDB(db, tenantId);
-  const old = getPrecedence(db, tenantId);
+): Promise<void> {
+  const old = await getPrecedence(db, tenantId);
 
   // Upsert requirement_settings
-  db.prepare(
-    `INSERT INTO requirement_settings (tenant_id, precedence_policy)
-     VALUES (?, ?)
-     ON CONFLICT(tenant_id) DO UPDATE SET precedence_policy = excluded.precedence_policy`
-  ).run(tenantId, policy);
+  await db
+    .insertInto('requirement_settings')
+    .values({ tenant_id: tenantId, precedence_policy: policy })
+    .onConflict((oc) => oc.column('tenant_id').doUpdateSet({ precedence_policy: policy }))
+    .execute();
 
-  logAudit(db, {
+  await logAudit(db, {
     tenantId,
     actorType: 'user',
     actorId,
