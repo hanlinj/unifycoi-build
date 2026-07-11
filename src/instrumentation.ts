@@ -7,10 +7,10 @@ export async function register() {
     // Error monitoring + structured logging up first, so startup failures are captured.
     const { initObservability } = await import('@/lib/observability');
     initObservability();
-    const { getRawDb } = await import('@/lib/db/client');
+    const { getDb } = await import('@/lib/db/client');
     const { seedTemplates } = await import('@/lib/requirements/templates');
-    const db = getRawDb();
-    seedTemplates(db);
+    const db = getDb();
+    await seedTemplates(db);
 
     // Start the in-process background workers (notification sender, daily digest cycle,
     // retention sweep, billing quantity sync). Dynamic imports keep them out of the edge bundle.

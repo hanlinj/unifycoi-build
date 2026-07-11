@@ -6,9 +6,11 @@
 // row gets a retention.purge_eligible audit event (system actor, no Sensitive payload).
 //
 // Cross-tenant infrastructure process (like the notification worker / migration runner):
-// it scans all tenants' rows and logs each mark under that row's own tenant_id.
+// it scans all tenants' rows and logs each mark under that row's own tenant_id. No TenantDB
+// (there is no single tenant to scope by) — raw db.selectFrom/updateTable, same shape as
+// billing/quantity-sync.ts's cross-tenant scan.
 
-import type Database from 'better-sqlite3';
+import type { Db } from '@/lib/db/client';
 import { logAudit } from '@/lib/audit';
 
 export const RETENTION_YEARS = 7;
@@ -29,39 +31,41 @@ export interface RetentionSweepResult {
  * One retention sweep. Deterministic with injected `now`.
  *  - Documents: inactive (superseded_at set) AND superseded_at ≤ horizon AND not already marked.
  *  - Audit events: created_at ≤ horizon AND not already marked.
- * Idempotent: the `purge_eligible = 0` guard prevents double-marking and duplicate audit rows.
+ * Idempotent: the `purge_eligible = false` guard prevents double-marking and duplicate audit rows.
  */
-export function runRetentionSweep(
-  db: Database.Database,
+export async function runRetentionSweep(
+  db: Db,
   now: Date = new Date(),
   years: number = RETENTION_YEARS
-): RetentionSweepResult {
-  const horizon = retentionHorizon(now, years);
-  const nowIso = now.toISOString();
+): Promise<RetentionSweepResult> {
+  const horizon = new Date(retentionHorizon(now, years));
 
-  const documentsMarked = markDocuments(db, horizon, nowIso);
-  const auditEventsMarked = markAuditEvents(db, horizon, nowIso);
+  const documentsMarked = await markDocuments(db, horizon, now);
+  const auditEventsMarked = await markAuditEvents(db, horizon, now);
 
   return { documentsMarked, auditEventsMarked };
 }
 
-function markDocuments(db: Database.Database, horizon: string, nowIso: string): number {
-  const rows = db
-    .prepare(
-      `SELECT id, tenant_id FROM documents
-       WHERE purge_eligible = 0 AND superseded_at IS NOT NULL AND superseded_at <= ?`
-    )
-    .all(horizon) as { id: string; tenant_id: string }[];
-
-  const mark = db.prepare(
-    `UPDATE documents SET purge_eligible = 1, purge_eligible_at = ? WHERE id = ? AND purge_eligible = 0`
-  );
+async function markDocuments(db: Db, horizon: Date, now: Date): Promise<number> {
+  const rows = await db
+    .selectFrom('documents')
+    .select(['id', 'tenant_id'])
+    .where('purge_eligible', '=', false)
+    .where('superseded_at', 'is not', null)
+    .where('superseded_at', '<=', horizon)
+    .execute();
 
   let count = 0;
-  for (const row of rows) {
-    const changed = mark.run(nowIso, row.id).changes;
-    if (changed === 0) continue; // already marked by a concurrent pass
-    logAudit(db, {
+  for (const row of rows as { id: string; tenant_id: string }[]) {
+    const res = await db
+      .updateTable('documents')
+      .set({ purge_eligible: true, purge_eligible_at: now })
+      .where('id', '=', row.id)
+      .where('purge_eligible', '=', false)
+      .executeTakeFirst();
+    if (Number(res.numUpdatedRows) === 0) continue; // already marked by a concurrent pass
+
+    await logAudit(db, {
       tenantId: row.tenant_id,
       actorType: 'system',
       actorId: 'retention-worker',
@@ -75,26 +79,28 @@ function markDocuments(db: Database.Database, horizon: string, nowIso: string): 
   return count;
 }
 
-function markAuditEvents(db: Database.Database, horizon: string, nowIso: string): number {
+async function markAuditEvents(db: Db, horizon: Date, now: Date): Promise<number> {
   // Snapshot the ids first: marking logs NEW audit events (created now), which must never be
   // swept in the same pass — selecting up-front by created_at ≤ horizon excludes them anyway,
   // but snapshotting also avoids iterating a growing set.
-  const rows = db
-    .prepare(
-      `SELECT id, tenant_id FROM audit_events
-       WHERE purge_eligible = 0 AND created_at <= ?`
-    )
-    .all(horizon) as { id: string; tenant_id: string }[];
-
-  const mark = db.prepare(
-    `UPDATE audit_events SET purge_eligible = 1, purge_eligible_at = ? WHERE id = ? AND purge_eligible = 0`
-  );
+  const rows = await db
+    .selectFrom('audit_events')
+    .select(['id', 'tenant_id'])
+    .where('purge_eligible', '=', false)
+    .where('created_at', '<=', horizon)
+    .execute();
 
   let count = 0;
-  for (const row of rows) {
-    const changed = mark.run(nowIso, row.id).changes;
-    if (changed === 0) continue;
-    logAudit(db, {
+  for (const row of rows as { id: string; tenant_id: string }[]) {
+    const res = await db
+      .updateTable('audit_events')
+      .set({ purge_eligible: true, purge_eligible_at: now })
+      .where('id', '=', row.id)
+      .where('purge_eligible', '=', false)
+      .executeTakeFirst();
+    if (Number(res.numUpdatedRows) === 0) continue;
+
+    await logAudit(db, {
       tenantId: row.tenant_id,
       actorType: 'system',
       actorId: 'retention-worker',
@@ -116,15 +122,14 @@ export interface RetentionWorkerHandle {
 
 /** Start the daily retention worker. Logic lives in runRetentionSweep (tested with a frozen clock). */
 export function startRetentionWorker(
-  db: Database.Database,
+  db: Db,
   intervalSeconds: number = 24 * 60 * 60
 ): RetentionWorkerHandle {
   const timer = setInterval(() => {
-    try {
-      runRetentionSweep(db);
-    } catch (err) {
+    void runRetentionSweep(db).catch((err) => {
+      // eslint-disable-next-line no-console
       console.error('[retention-worker] sweep failed:', err);
-    }
+    });
   }, intervalSeconds * 1000);
   if (typeof timer.unref === 'function') timer.unref();
   return { stop: () => clearInterval(timer) };
