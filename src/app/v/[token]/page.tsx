@@ -3,10 +3,10 @@
 // then renders the guided upload UI or the already-submitted confirmation.
 // No login required — the token is the credential.
 
-import { getRawDb } from '@/lib/db/client';
+import { getDb } from '@/lib/db/client';
 import { TenantDB } from '@/lib/db/tenant';
 import { validateInviteToken } from '@/lib/services/vendor-token';
-import { fsmTransition } from '@/lib/services/vendor-fsm';
+import { fireOnboardingStarted } from '@/lib/services/vendor-onboarding';
 import { UploadFlow } from './UploadFlow';
 
 export const dynamic = 'force-dynamic';
@@ -18,8 +18,8 @@ export default async function VendorTokenPage({
 }: {
   params: { token: string };
 }) {
-  const db = getRawDb();
-  const validated = validateInviteToken(db, params.token);
+  const db = getDb();
+  const validated = await validateInviteToken(db, params.token);
 
   if (!validated) {
     return <InvalidTokenPage />;
@@ -28,28 +28,30 @@ export default async function VendorTokenPage({
   const { invite, vendor, vendorLocations } = validated;
   const tdb = new TenantDB(db, invite.tenant_id);
 
-  // Fire open_link: invited_pending → onboarding on first page load.
-  // Idempotent — guard is false once locations have moved past invited_pending.
-  const allPending =
-    vendorLocations.length > 0 &&
-    vendorLocations.every((vl) => vl.status === 'invited_pending');
-  if (allPending) {
-    fsmTransition(db, invite.tenant_id, invite.vendor_id, 'open_link');
-  }
+  // Fire open_link: invited_pending → onboarding on first page load, audited (Stage 6b
+  // collapses this onto the same fireOnboardingStarted() the GET API route already used —
+  // this page previously called fsmTransition() directly, silently skipping the audit event).
+  await fireOnboardingStarted(db, {
+    tenantId: invite.tenant_id,
+    vendorId: invite.vendor_id,
+    inviteId: invite.id,
+    purpose: invite.purpose,
+    vendorLocations,
+  });
 
   // If the vendor has already submitted (a verification run exists), show read-only confirmation.
-  const hasRun = !!tdb.get<{ id: string }>(
-    `SELECT id FROM verification_runs WHERE tenant_id = ? AND vendor_id = ? LIMIT 1`,
+  const hasRun = !!(await tdb.get<{ id: string }>(
+    `SELECT id FROM verification_runs WHERE tenant_id = $1 AND vendor_id = $2 LIMIT 1`,
     [invite.vendor_id]
-  );
+  ));
   if (hasRun) {
     return <SubmittedPage vendorName={vendor.business_name} />;
   }
 
-  const uploadedDocs = tdb.all<{ id: string; doc_type: string; uploaded_at: string }>(
+  const uploadedDocs = await tdb.all<{ id: string; doc_type: string; uploaded_at: Date }>(
     `SELECT id, doc_type, uploaded_at
      FROM documents
-     WHERE tenant_id = ? AND vendor_id = ? AND superseded_by IS NULL AND state = 'active'
+     WHERE tenant_id = $1 AND vendor_id = $2 AND superseded_by IS NULL AND state = 'active'
      ORDER BY uploaded_at ASC`,
     [invite.vendor_id]
   );
@@ -59,7 +61,7 @@ export default async function VendorTokenPage({
       token={params.token}
       vendorName={vendor.business_name}
       requiredDocTypes={[...REQUIRED_DOC_TYPES]}
-      initialUploadedDocs={uploadedDocs}
+      initialUploadedDocs={uploadedDocs.map((d) => ({ ...d, uploaded_at: d.uploaded_at.toISOString() }))}
     />
   );
 }

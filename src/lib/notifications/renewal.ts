@@ -14,6 +14,7 @@
 // All chase artifacts share the COI's document_id, so a renewal supersedes every one of them.
 
 import type Database from 'better-sqlite3';
+import type { Db } from '@/lib/db/client';
 import { TenantDB } from '@/lib/db/tenant';
 import { queueNotification, notifyTenantAdmins } from './queue';
 import { logAudit } from '@/lib/audit';
@@ -74,8 +75,8 @@ export interface ScheduleResult {
  * elapsed at upload time) are skipped — e.g. a COI uploaded 10 days before expiry only gets
  * the 7- and 1-day reminders.
  */
-export function scheduleRenewalReminders(
-  db: Database.Database,
+export async function scheduleRenewalReminders(
+  db: Db,
   input: {
     tenantId: string;
     vendorId: string;
@@ -83,43 +84,45 @@ export function scheduleRenewalReminders(
     expirationDate: string;   // ISO or parseable
   },
   now: Date = new Date()
-): ScheduleResult {
+): Promise<ScheduleResult> {
   const { tenantId, vendorId, documentId, expirationDate } = input;
   const tdb = new TenantDB(db, tenantId);
 
   // Idempotency guard — never double-schedule for the same COI.
-  const existing = tdb.get<{ n: number }>(
+  // json_extract() -> ->> (Stage 0's catalogued JSON1 rework spot; see ADR-013-01 invariant 8).
+  const existing = await tdb.get<{ n: string }>(
     `SELECT COUNT(*) AS n FROM notifications
-     WHERE tenant_id = ? AND document_id = ?
-       AND json_extract(payload_json, '$.type') = 'renewal_reminder'`,
+     WHERE tenant_id = $1 AND document_id = $2
+       AND payload_json->>'type' = 'renewal_reminder'`,
     [documentId]
   );
-  if (existing && existing.n > 0) {
+  if (existing && Number(existing.n) > 0) {
     return { scheduled: 0, skippedPast: 0, alreadyScheduled: true, reminderDates: [], expirationJobScheduled: false, adminAlerts: 0 };
   }
 
   // OPS-7: resolve the expiry boundary in the TENANT's timezone (start-of-day local for a
   // date-only expiry), not UTC. Null tz → UTC (no-op vs the old Date.parse behavior).
-  const tz = (db.prepare('SELECT timezone FROM tenants WHERE id = ?').get(tenantId) as { timezone: string | null } | undefined)?.timezone ?? null;
+  const tenantRow = await db.selectFrom('tenants').select('timezone').where('id', '=', tenantId).executeTakeFirst();
+  const tz = tenantRow?.timezone ?? null;
   const expMs = expiryBoundaryMs(expirationDate, tz);
   if (Number.isNaN(expMs)) {
     return { scheduled: 0, skippedPast: 0, alreadyScheduled: false, reminderDates: [], expirationJobScheduled: false, adminAlerts: 0 };
   }
 
   // Resolve vendor name + email for a payload-complete reminder.
-  const vendor = tdb.get<{ business_name: string; contact_email: string | null }>(
-    'SELECT business_name, contact_email FROM vendors WHERE tenant_id = ? AND id = ?',
+  const vendor = await tdb.get<{ business_name: string; contact_email: string | null }>(
+    'SELECT business_name, contact_email FROM vendors WHERE tenant_id = $1 AND id = $2',
     [vendorId]
   );
   const vendorEmail = vendor?.contact_email ?? null;
   const vendorName = vendor?.business_name ?? null;
 
   // The vendor's locations + the tenant's admins (for the imminent-lapse internal alerts).
-  const locationIds = tdb
-    .all<{ location_id: string }>('SELECT location_id FROM vendor_locations WHERE tenant_id = ? AND vendor_id = ?', [vendorId])
+  const locationIds = (await tdb
+    .all<{ location_id: string }>('SELECT location_id FROM vendor_locations WHERE tenant_id = $1 AND vendor_id = $2', [vendorId]))
     .map((r) => r.location_id);
-  const adminIds = tdb
-    .all<{ id: string }>(`SELECT id FROM users WHERE tenant_id = ? AND role = 'admin' AND status != 'disabled'`)
+  const adminIds = (await tdb
+    .all<{ id: string }>(`SELECT id FROM users WHERE tenant_id = $1 AND role = 'admin' AND status != 'disabled'`))
     .map((r) => r.id);
 
   let scheduled = 0;
@@ -137,7 +140,7 @@ export function scheduleRenewalReminders(
     reminderDates.push(reminderIso);
 
     if (vendorEmail) {
-      queueNotification(db, tenantId, {
+      await queueNotification(db, tenantId, {
         recipientType: 'vendor',
         recipientRef: vendorEmail,
         kind: 'exception',          // vendor-facing, immediate-tier — never batched into a digest
@@ -162,7 +165,7 @@ export function scheduleRenewalReminders(
     // vendor reminder). One row per admin, scheduled for the rung date, superseded on renewal.
     if (IMMINENT_RUNGS.has(days)) {
       for (const adminId of adminIds) {
-        queueNotification(db, tenantId, {
+        await queueNotification(db, tenantId, {
           recipientType: 'user',
           recipientRef: adminId,
           kind: 'exception',
@@ -186,7 +189,7 @@ export function scheduleRenewalReminders(
   // not an email). The worker special-cases type='coi_expiration' to flip status to expired.
   let expirationJobScheduled = false;
   if (expMs > now.getTime()) {
-    queueNotification(db, tenantId, {
+    await queueNotification(db, tenantId, {
       recipientType: 'user',
       recipientRef: 'system', // internal action; the worker never emails this row
       kind: 'exception',
@@ -214,14 +217,15 @@ export function scheduleRenewalReminders(
  *
  * document_id is only ever set on these chase artifacts, so no type filter is needed.
  */
-export function supersedeReminders(db: Database.Database, tenantId: string, documentId: string): number {
-  const res = db
-    .prepare(
-      `UPDATE notifications SET status = 'superseded'
-       WHERE tenant_id = ? AND document_id = ? AND status = 'queued'`
-    )
-    .run(tenantId, documentId);
-  return res.changes;
+export async function supersedeReminders(db: Db, tenantId: string, documentId: string): Promise<number> {
+  const res = await db
+    .updateTable('notifications')
+    .set({ status: 'superseded' })
+    .where('tenant_id', '=', tenantId)
+    .where('document_id', '=', documentId)
+    .where('status', '=', 'queued')
+    .executeTakeFirst();
+  return Number(res.numUpdatedRows);
 }
 
 export interface CoiUploadResult {
@@ -237,11 +241,11 @@ export interface CoiUploadResult {
  *  2. Eager-schedule the new COI's ladder.
  * No-op-safe: onboarding's first COI has no prior, so step 1 is skipped.
  */
-export function handleCoiUploadChase(
-  db: Database.Database,
+export async function handleCoiUploadChase(
+  db: Db,
   input: { tenantId: string; vendorId: string; newDocumentId: string; expirationDate: string },
   now: Date = new Date()
-): CoiUploadResult {
+): Promise<CoiUploadResult> {
   const { tenantId, vendorId, newDocumentId, expirationDate } = input;
   const tdb = new TenantDB(db, tenantId);
 
@@ -250,11 +254,11 @@ export function handleCoiUploadChase(
   // between the document insert and this supersession, so two overlapping COI uploads can both
   // be present here. Without the guard each would supersede the other (A↔B), leaving NO active
   // COI and bricking submit. Only superseding strictly-older COIs makes the newest always win.
-  const prior = tdb.get<{ id: string }>(
+  const prior = await tdb.get<{ id: string }>(
     `SELECT id FROM documents
-     WHERE tenant_id = ? AND vendor_id = ? AND doc_type = 'coi'
-       AND id != ? AND superseded_by IS NULL AND state = 'active'
-       AND uploaded_at < (SELECT uploaded_at FROM documents WHERE id = ?)
+     WHERE tenant_id = $1 AND vendor_id = $2 AND doc_type = 'coi'
+       AND id != $3 AND superseded_by IS NULL AND state = 'active'
+       AND uploaded_at < (SELECT uploaded_at FROM documents WHERE id = $4)
      ORDER BY uploaded_at DESC LIMIT 1`,
     [vendorId, newDocumentId, newDocumentId]
   );
@@ -265,16 +269,16 @@ export function handleCoiUploadChase(
   if (prior) {
     // superseded_at is the retention anchor for the old COI (Slice D): the 7-year clock
     // starts when a renewal makes it inactive.
-    tdb.update(
+    await tdb.update(
       'documents',
-      { superseded_by: newDocumentId, superseded_at: now.toISOString() },
+      { superseded_by: newDocumentId, superseded_at: now },
       { id: prior.id }
     );
-    supersededReminders = supersedeReminders(db, tenantId, prior.id);
+    supersededReminders = await supersedeReminders(db, tenantId, prior.id);
     supersededDocumentId = prior.id;
   }
 
-  const schedule = scheduleRenewalReminders(
+  const schedule = await scheduleRenewalReminders(
     db,
     { tenantId, vendorId, documentId: newDocumentId, expirationDate },
     now

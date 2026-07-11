@@ -1,4 +1,4 @@
-import type Database from 'better-sqlite3';
+import type { Db } from '@/lib/db/client';
 import { TenantDB } from '@/lib/db/tenant';
 
 export type VendorStatus =
@@ -31,20 +31,20 @@ export class IllegalTransitionError extends Error {
  * Status is per-location (invariant #5); events move all locations together because
  * onboarding and submit apply to the vendor as a whole, not to individual locations.
  */
-export function fsmTransition(
-  db: Database.Database,
+export async function fsmTransition(
+  db: Db,
   tenantId: string,
   vendorId: string,
   event: FSMEvent
-): { locationIds: string[] } {
+): Promise<{ locationIds: string[] }> {
   const rule = ALLOWED[event];
   if (!rule) throw new IllegalTransitionError('(unknown)', event);
 
   const tdb = new TenantDB(db, tenantId);
 
-  return tdb.transaction((txTdb) => {
-    const rows = txTdb.all<{ location_id: string; status: string }>(
-      'SELECT location_id, status FROM vendor_locations WHERE tenant_id = ? AND vendor_id = ?',
+  return tdb.transaction(async (txTdb) => {
+    const rows = await txTdb.all<{ location_id: string; status: string }>(
+      'SELECT location_id, status FROM vendor_locations WHERE tenant_id = $1 AND vendor_id = $2',
       [vendorId]
     );
 
@@ -59,7 +59,7 @@ export function fsmTransition(
     }
 
     for (const row of rows) {
-      txTdb.update(
+      await txTdb.update(
         'vendor_locations',
         { status: rule.to },
         { vendor_id: vendorId, location_id: row.location_id }

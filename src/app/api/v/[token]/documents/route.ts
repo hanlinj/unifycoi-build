@@ -15,7 +15,7 @@
 
 import { NextResponse } from 'next/server';
 import { randomUUID } from 'crypto';
-import { getRawDb } from '@/lib/db/client';
+import { getDb } from '@/lib/db/client';
 import { TenantDB } from '@/lib/db/tenant';
 import { getBlobStore, documentKey } from '@/lib/blob';
 import { encryptForStorage } from '@/lib/crypto/envelope';
@@ -45,8 +45,8 @@ export async function POST(
   request: Request,
   { params }: { params: { token: string } }
 ): Promise<NextResponse> {
-  const db = getRawDb();
-  const validated = validateInviteToken(db, params.token);
+  const db = getDb();
+  const validated = await validateInviteToken(db, params.token);
 
   if (!validated) {
     return NextResponse.json({ error: INVALID_TOKEN_MESSAGE }, { status: 401 });
@@ -118,7 +118,7 @@ export async function POST(
     return NextResponse.json({ error: 'Storage error' }, { status: 503 });
   }
 
-  tdb.insert('documents', {
+  await tdb.insert('documents', {
     id: documentId,
     vendor_id: vendorId,
     doc_type: docType,
@@ -127,7 +127,7 @@ export async function POST(
     original_filename: originalFilename,
     superseded_by: null,
     state: 'active',
-    uploaded_at: new Date().toISOString(),
+    uploaded_at: new Date(),
   });
 
   // Vision extraction (operates on PDF bytes)
@@ -142,17 +142,17 @@ export async function POST(
   }
 
   const extractionId = randomUUID();
-  tdb.insert('extractions', {
+  await tdb.insert('extractions', {
     id: extractionId,
     document_id: documentId,
     doc_type: docType,
     model_id: extraction.modelId,
     extraction_version: env.anthropic.extractionSchemaVersion,
     payload_json: JSON.stringify(extraction.payload),
-    created_at: new Date().toISOString(),
+    created_at: new Date(),
   });
 
-  logAudit(db, {
+  await logAudit(db, {
     tenantId,
     actorType: 'ai',
     actorId: `engine/${extraction.modelId}`,
@@ -172,9 +172,9 @@ export async function POST(
   if (docType === 'coi') {
     const gate = checkExpirationGate(extraction.payload as ProcessedCOIExtraction);
     if (!gate.passed) {
-      tdb.update('documents', { state: 'bounced_expired' }, { id: documentId });
+      await tdb.update('documents', { state: 'bounced_expired' }, { id: documentId });
 
-      logAudit(db, {
+      await logAudit(db, {
         tenantId,
         actorType: 'system',
         actorId: 'expiration-gate',
@@ -187,12 +187,12 @@ export async function POST(
       // Vendor-facing exception (immediate): the expired upload bounces back to the vendor,
       // never to the Admin (invariant #6). They see the 422 in-session; the email is the
       // durable nudge if they close the tab. Recipient is the vendor's contact email.
-      const vrow = tdb.get<{ contact_email: string | null }>(
-        'SELECT contact_email FROM vendors WHERE tenant_id = ? AND id = ?',
+      const vrow = await tdb.get<{ contact_email: string | null }>(
+        'SELECT contact_email FROM vendors WHERE tenant_id = $1 AND id = $2',
         [vendorId]
       );
       if (vrow?.contact_email) {
-        queueNotification(db, tenantId, {
+        await queueNotification(db, tenantId, {
           recipientType: 'vendor',
           recipientRef: vrow.contact_email,
           kind: 'exception',
@@ -220,7 +220,7 @@ export async function POST(
     const coiPayload = extraction.payload as ProcessedCOIExtraction;
     const expDate = earliestExpiration(coiPayload);
     if (expDate) {
-      handleCoiUploadChase(db, {
+      await handleCoiUploadChase(db, {
         tenantId,
         vendorId,
         newDocumentId: documentId,

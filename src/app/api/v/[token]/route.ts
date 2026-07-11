@@ -4,7 +4,7 @@
 // Token lookup is always by SHA-256 hash — the raw bearer token is never stored.
 
 import { NextResponse } from 'next/server';
-import { getRawDb } from '@/lib/db/client';
+import { getDb } from '@/lib/db/client';
 import { TenantDB } from '@/lib/db/tenant';
 import { validateInviteToken, INVALID_TOKEN_MESSAGE } from '@/lib/services/vendor-token';
 import { fireOnboardingStarted } from '@/lib/services/vendor-onboarding';
@@ -32,8 +32,8 @@ export async function GET(
   _request: Request,
   { params }: { params: { token: string } }
 ): Promise<NextResponse> {
-  const db = getRawDb();
-  const validated = validateInviteToken(db, params.token);
+  const db = getDb();
+  const validated = await validateInviteToken(db, params.token);
 
   if (!validated) {
     return NextResponse.json({ error: INVALID_TOKEN_MESSAGE }, { status: 401 });
@@ -43,7 +43,7 @@ export async function GET(
 
   // Fire open_link (Invited/Pending → Onboarding) + audit on the vendor's first access.
   // Idempotent — see fireOnboardingStarted.
-  fireOnboardingStarted(db, {
+  await fireOnboardingStarted(db, {
     tenantId: invite.tenant_id,
     vendorId: invite.vendor_id,
     inviteId: invite.id,
@@ -53,18 +53,18 @@ export async function GET(
 
   const tdb = new TenantDB(db, invite.tenant_id);
 
-  const documents = tdb.all<DocumentRow>(
+  const documents = await tdb.all<DocumentRow>(
     `SELECT id, doc_type, uploaded_at
      FROM documents
-     WHERE tenant_id = ? AND vendor_id = ? AND superseded_by IS NULL AND state = 'active'
+     WHERE tenant_id = $1 AND vendor_id = $2 AND superseded_by IS NULL AND state = 'active'
      ORDER BY uploaded_at ASC`,
     [invite.vendor_id]
   );
 
-  const latestRun = tdb.get<RunRow>(
+  const latestRun = await tdb.get<RunRow>(
     `SELECT id, recommendation, created_at
      FROM verification_runs
-     WHERE tenant_id = ? AND vendor_id = ?
+     WHERE tenant_id = $1 AND vendor_id = $2
      ORDER BY created_at DESC LIMIT 1`,
     [invite.vendor_id]
   );
