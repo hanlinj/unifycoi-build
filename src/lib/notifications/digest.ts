@@ -6,7 +6,7 @@
 // daily cadence (at DIGEST_HOUR_LOCAL in the tenant timezone) is driven by the scheduling
 // worker (Slice C). Kept separate so it is unit-testable with a frozen clock.
 
-import type Database from 'better-sqlite3';
+import type { Db } from '@/lib/db/client';
 import { TenantDB } from '@/lib/db/tenant';
 import type { Mailer } from './mailer';
 import { resolveFrom } from './mailer';
@@ -20,7 +20,7 @@ export { localHourInZone } from '@/lib/time/zone';
 interface DigestRow {
   id: string;
   recipient_ref: string;        // user_id
-  payload_json: string;
+  payload_json: Record<string, unknown>;
 }
 
 export interface DigestResult {
@@ -40,19 +40,18 @@ export interface DigestResult {
  */
 export async function buildAndSendDigest(
   mailer: Mailer,
-  db: Database.Database,
+  db: Db,
   tenantId: string,
   now: Date = new Date()
 ): Promise<DigestResult> {
   const tdb = new TenantDB(db, tenantId);
-  const nowIso = now.toISOString();
 
-  const rows = tdb.all<DigestRow>(
+  const rows = await tdb.all<DigestRow>(
     `SELECT id, recipient_ref, payload_json FROM notifications
-     WHERE tenant_id = ? AND kind = 'digest' AND status = 'queued'
-       AND (scheduled_for IS NULL OR scheduled_for <= ?)
+     WHERE tenant_id = $1 AND kind = 'digest' AND status = 'queued'
+       AND (scheduled_for IS NULL OR scheduled_for <= $2)
      ORDER BY recipient_ref, created_at`,
-    [nowIso]
+    [now]
   );
 
   if (rows.length === 0) {
@@ -67,20 +66,20 @@ export async function buildAndSendDigest(
     byRecipient.set(r.recipient_ref, list);
   }
 
-  const operatorName = getOperatorName(db, tenantId);
+  const operatorName = await getOperatorName(db, tenantId);
   const from = resolveFrom('internal', operatorName);
   let emailsSent = 0;
 
   for (const [userId, items] of byRecipient) {
-    const user = tdb.get<{ email: string; status: string }>(
-      'SELECT email, status FROM users WHERE tenant_id = ? AND id = ?',
+    const user = await tdb.get<{ email: string; status: string }>(
+      'SELECT email, status FROM users WHERE tenant_id = $1 AND id = $2',
       [userId]
     );
 
     if (!user || user.status === 'disabled' || !user.email) {
       // No deliverable recipient — fail the rows so they don't recycle forever.
       for (const it of items) {
-        tdb.update('notifications', { status: 'failed' }, { id: it.id });
+        await tdb.update('notifications', { status: 'failed' }, { id: it.id });
       }
       continue;
     }
@@ -98,9 +97,9 @@ export async function buildAndSendDigest(
       body,
     });
 
-    const nowSent = new Date().toISOString();
+    const nowSent = new Date();
     for (const it of items) {
-      tdb.update(
+      await tdb.update(
         'notifications',
         result.ok ? { status: 'sent', sent_at: nowSent } : { status: 'failed' },
         { id: it.id }
@@ -119,26 +118,20 @@ export async function buildAndSendDigest(
 }
 
 /** Render a single human-readable digest line from a notification payload. */
-function digestLine(payloadJson: string): string {
-  let p: Record<string, unknown> = {};
-  try {
-    p = JSON.parse(payloadJson) as Record<string, unknown>;
-  } catch {
-    return 'Update';
-  }
-  const type = String(p['type'] ?? 'update');
+function digestLine(payload: Record<string, unknown>): string {
+  const type = String(payload['type'] ?? 'update');
   switch (type) {
     case 'vendor_submitted':
     case 'vendor_ready_for_review':
-      return `Vendor ready for review: ${p['vendor_name'] ?? p['vendor_id']}`;
+      return `Vendor ready for review: ${payload['vendor_name'] ?? payload['vendor_id']}`;
     case 'clean_auto_continue':
-      return `Renewal auto-continued: ${p['vendor_name'] ?? p['vendor_id']}`;
+      return `Renewal auto-continued: ${payload['vendor_name'] ?? payload['vendor_id']}`;
     case 'new_location_activation_ready':
-      return `New-location association ready to activate: ${p['vendor_name'] ?? p['vendor_id']}`;
+      return `New-location association ready to activate: ${payload['vendor_name'] ?? payload['vendor_id']}`;
     case 'vendor_activated_at_location':
-      return `Vendor activated at a new location: ${p['vendor_name'] ?? p['vendor_id']}`;
+      return `Vendor activated at a new location: ${payload['vendor_name'] ?? payload['vendor_id']}`;
     case 'lapse_recovered':
-      return `Coverage restored: ${p['vendor_name'] ?? p['vendor_id']}`;
+      return `Coverage restored: ${payload['vendor_name'] ?? payload['vendor_id']}`;
     default:
       return `Update: ${type}`;
   }
@@ -164,13 +157,15 @@ export interface DigestCycleResult {
  */
 export async function runDigestCycle(
   mailer: Mailer,
-  db: Database.Database,
+  db: Db,
   now: Date = new Date(),
   digestHour: number = env.notifications.digestHourLocal
 ): Promise<DigestCycleResult> {
-  const tenants = db
-    .prepare(`SELECT id, timezone FROM tenants WHERE lifecycle_state = 'active'`)
-    .all() as { id: string; timezone: string | null }[];
+  const tenants = await db
+    .selectFrom('tenants')
+    .select(['id', 'timezone'])
+    .where('lifecycle_state', '=', 'active')
+    .execute() as { id: string; timezone: string | null }[];
 
   let tenantsFired = 0;
   let utcFallbacks = 0;
@@ -206,10 +201,18 @@ export interface DigestWorkerHandle {
   stop: () => void;
 }
 
-/** Start the hourly digest cycle. Logic lives in runDigestCycle (tested with a frozen clock). */
+/**
+ * Start the hourly digest cycle. Logic lives in runDigestCycle (tested with a frozen clock).
+ *
+ * OPS-6 (docs/launch-prep.md): this worker is NOT leader-elected — running more than one app
+ * instance double-runs the daily digest cycle for every tenant (each instance's hourly tick
+ * fires the same tenant's digest independently). Deliberately deferred to "before any
+ * horizontal scaling," not fixed here — single-instance deployment is a real, current
+ * precondition for this worker's correctness, not just a performance nicety.
+ */
 export function startDigestWorker(
   mailer: Mailer,
-  db: Database.Database,
+  db: Db,
   intervalSeconds: number = 60 * 60
 ): DigestWorkerHandle {
   const timer = setInterval(() => {

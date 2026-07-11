@@ -3,7 +3,7 @@
 // location, bypassing the digest. Reuses the notification queue.
 
 import { NextResponse } from 'next/server';
-import { getRawDb } from '@/lib/db/client';
+import { getDb } from '@/lib/db/client';
 import { requireTenantAuth, isResponse, forbidden, badRequest, notFound, conflict } from '@/lib/api';
 import { sendManualRenewalReminder, ManualReminderError } from '@/lib/services/manual-reminder';
 
@@ -25,7 +25,7 @@ export async function POST(
   if (typeof vendorId !== 'string' || !vendorId) return badRequest('vendorId is required');
 
   try {
-    const result = sendManualRenewalReminder(getRawDb(), auth.tenantId, params.locationId, vendorId, auth.sub);
+    const result = await sendManualRenewalReminder(getDb(), auth.tenantId, params.locationId, vendorId, auth.sub);
     return NextResponse.json({ data: { notification_id: result.notificationId } });
   } catch (err) {
     if (err instanceof ManualReminderError) {

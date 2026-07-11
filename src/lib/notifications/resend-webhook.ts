@@ -11,7 +11,7 @@
 // invite-lifecycle work beyond a transport swap. Flagged as a gap, not papered over.
 
 import crypto from 'crypto';
-import type Database from 'better-sqlite3';
+import type { Db } from '@/lib/db/client';
 import { logAudit } from '@/lib/audit';
 
 /** Resend signs webhooks Svix-style: three headers + an HMAC over id.timestamp.body. */
@@ -80,7 +80,7 @@ interface NotifRow {
   tenant_id: string;
   recipient_type: string;
   kind: string;
-  payload_json: string;
+  payload_json: Record<string, unknown>;
 }
 
 /**
@@ -88,11 +88,11 @@ interface NotifRow {
  * everything else is acknowledged and ignored. Idempotent enough for at-least-once
  * webhook delivery (re-applying the same terminal state is harmless).
  */
-export function handleResendEvent(
-  db: Database.Database,
+export async function handleResendEvent(
+  db: Db,
   event: ResendEvent,
   now: Date = new Date()
-): HandleResult {
+): Promise<HandleResult> {
   const type = event.type;
   if (type !== 'email.bounced' && type !== 'email.complained') {
     return { handled: false, reason: 'ignored event type' };
@@ -100,40 +100,28 @@ export function handleResendEvent(
   const emailId = event.data?.email_id;
   if (!emailId) return { handled: false, reason: 'no email id' };
 
-  const row = db
-    .prepare(
-      `SELECT id, tenant_id, recipient_type, kind, payload_json
-       FROM notifications WHERE provider_message_id = ?`
-    )
-    .get(emailId) as NotifRow | undefined;
+  const row = await db
+    .selectFrom('notifications')
+    .select(['id', 'tenant_id', 'recipient_type', 'kind', 'payload_json'])
+    .where('provider_message_id', '=', emailId)
+    .executeTakeFirst() as NotifRow | undefined;
   if (!row) return { handled: false, reason: 'unknown message id' };
 
   const state = type === 'email.bounced' ? 'bounced' : 'complained';
 
-  let payload: Record<string, unknown> = {};
-  try {
-    payload = JSON.parse(row.payload_json) as Record<string, unknown>;
-  } catch {
-    payload = {};
-  }
+  const payload: Record<string, unknown> = { ...row.payload_json };
   payload['delivery'] = { state, at: now.toISOString() };
   const messageType = String(payload['type'] ?? 'notification');
 
   // A hard bounce is a terminal send outcome → flip status. A complaint (spam report) is
   // not a delivery failure, so status is left as-is; the outcome is recorded + audited.
   if (state === 'bounced') {
-    db.prepare(`UPDATE notifications SET status = 'bounced', payload_json = ? WHERE id = ?`).run(
-      JSON.stringify(payload),
-      row.id
-    );
+    await db.updateTable('notifications').set({ status: 'bounced', payload_json: JSON.stringify(payload) }).where('id', '=', row.id).execute();
   } else {
-    db.prepare(`UPDATE notifications SET payload_json = ? WHERE id = ?`).run(
-      JSON.stringify(payload),
-      row.id
-    );
+    await db.updateTable('notifications').set({ payload_json: JSON.stringify(payload) }).where('id', '=', row.id).execute();
   }
 
-  logAudit(db, {
+  await logAudit(db, {
     tenantId: row.tenant_id,
     actorType: 'system',
     actorId: 'resend-webhook',

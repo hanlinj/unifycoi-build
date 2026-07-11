@@ -13,7 +13,6 @@
 //     'imminent_lapse_admin'), alongside the vendor reminder.
 // All chase artifacts share the COI's document_id, so a renewal supersedes every one of them.
 
-import type Database from 'better-sqlite3';
 import type { Db } from '@/lib/db/client';
 import { TenantDB } from '@/lib/db/tenant';
 import { queueNotification, notifyTenantAdmins } from './queue';
@@ -302,36 +301,36 @@ export interface ExpirationFlipResult {
  * Defensive: if the COI was renewed (superseded), the chase — including this job — was
  * superseded, so this should not run; we double-check and skip if so.
  */
-export function applyExpirationFlip(
-  db: Database.Database,
+export async function applyExpirationFlip(
+  db: Db,
   input: { tenantId: string; vendorId: string; documentId: string | null },
   now: Date = new Date()
-): ExpirationFlipResult {
+): Promise<ExpirationFlipResult> {
   const { tenantId, vendorId, documentId } = input;
   const tdb = new TenantDB(db, tenantId);
 
   if (documentId) {
-    const doc = tdb.get<{ superseded_by: string | null }>(
-      'SELECT superseded_by FROM documents WHERE tenant_id = ? AND id = ?',
+    const doc = await tdb.get<{ superseded_by: string | null }>(
+      'SELECT superseded_by FROM documents WHERE tenant_id = $1 AND id = $2',
       [documentId]
     );
     if (doc?.superseded_by) return { flippedLocationIds: [] }; // renewed — nothing to expire
   }
 
-  const locs = tdb.all<{ location_id: string }>(
+  const locs = await tdb.all<{ location_id: string }>(
     `SELECT location_id FROM vendor_locations
-     WHERE tenant_id = ? AND vendor_id = ? AND status IN ('approved', 'under_review')`,
+     WHERE tenant_id = $1 AND vendor_id = $2 AND status IN ('approved', 'under_review')`,
     [vendorId]
   );
   if (locs.length === 0) return { flippedLocationIds: [] };
 
   const flipped: string[] = [];
   for (const l of locs) {
-    tdb.update('vendor_locations', { status: 'expired' }, { vendor_id: vendorId, location_id: l.location_id });
+    await tdb.update('vendor_locations', { status: 'expired' }, { vendor_id: vendorId, location_id: l.location_id });
     flipped.push(l.location_id);
   }
 
-  logAudit(db, {
+  await logAudit(db, {
     tenantId,
     actorType: 'system',
     actorId: 'expiration-worker',
@@ -342,7 +341,7 @@ export function applyExpirationFlip(
   });
 
   // Exception (immediate) alert to Admins — coverage lapsed, vendor pulled from hireable.
-  notifyTenantAdmins(db, tenantId, {
+  await notifyTenantAdmins(db, tenantId, {
     type: 'vendor_expired',
     vendor_id: vendorId,
     location_ids: flipped,

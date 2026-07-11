@@ -3,7 +3,7 @@
 // lib/notifications/resend-webhook.ts; this is thin wiring over it.
 
 import { NextResponse } from 'next/server';
-import { getRawDb } from '@/lib/db/client';
+import { getDb } from '@/lib/db/client';
 import { env } from '@/lib/env';
 import { verifyResendWebhook, handleResendEvent, type ResendEvent } from '@/lib/notifications/resend-webhook';
 
@@ -35,7 +35,7 @@ export async function POST(request: Request): Promise<NextResponse> {
     return NextResponse.json({ error: 'invalid json' }, { status: 400 });
   }
 
-  const result = handleResendEvent(getRawDb(), event);
+  const result = await handleResendEvent(getDb(), event);
   // Always 2xx once authenticated so Resend doesn't retry-storm on an ignored/unknown event.
   return NextResponse.json(result, { status: 200 });
 }

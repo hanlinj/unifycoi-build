@@ -120,7 +120,17 @@ export interface RetentionWorkerHandle {
   stop: () => void;
 }
 
-/** Start the daily retention worker. Logic lives in runRetentionSweep (tested with a frozen clock). */
+/**
+ * Start the daily retention worker. Logic lives in runRetentionSweep (tested with a frozen clock).
+ *
+ * OPS-6 (docs/launch-prep.md): this worker is NOT leader-elected — running more than one app
+ * instance double-runs the daily sweep (each instance's own tick sweeps the same rows
+ * independently; the per-row `purge_eligible = false` guard prevents double-MARKING, but not
+ * the wasted duplicate work of two instances racing the same scan). Deliberately deferred to
+ * "before any horizontal scaling," not fixed here — single-instance deployment is a real,
+ * current precondition, not just a performance nicety. (This caveat was orphaned when Stage 8a
+ * first converted this file — attached here, Stage 8b, alongside digest's identical caveat.)
+ */
 export function startRetentionWorker(
   db: Db,
   intervalSeconds: number = 24 * 60 * 60
