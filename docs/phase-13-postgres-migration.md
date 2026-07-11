@@ -5,7 +5,7 @@ correctness contract — the running pass count against Postgres is the tracking
 stages. Decision record: `docs/decisions.md` ADR-013-01 (rationale, fresh-baseline choice,
 Kysely choice, and the cross-stage invariants/landmines discovered along the way).
 
-**Running pass count: 561 / 1192** (as of Stage 8c). Every failure not yet converted has been
+**Running pass count: 584 / 1215** (as of Stage 8d). Every failure not yet converted has been
 confirmed to be the same "old code calling the new async/Kysely API synchronously" shape — no
 suite has failed for a different, real-behavior reason.
 
@@ -33,6 +33,7 @@ suite has failed for a different, real-behavior reason.
 | 8a | retention: `retention/worker.ts` (the only retention file — idempotent full-scan mark, no claim-then-process/`claimed_at`). Plus a flagged pre-existing-bug fix: `workers/bootstrap.ts`'s `db` param was mistyped as `Database.Database` (silently broken since Stage 4) and `instrumentation.ts` called the Stage-1-removed `getRawDb` — both fixed as findings, not bundled into the conversion diff; see ADR-013-01 | ✅ done | `2dfe352` |
 | 8b | notifications: `worker.ts`, `digest.ts`, `resend-webhook.ts` (+ its route), `notifications/renewal.ts`'s remaining un-converted function `applyExpirationFlip` (rest of the file converted in Stage 6b as a narrow portal-upload hard dependency), `services/manual-reminder.ts` (+ its route) — mechanical, no architecture change. Checked the claim for a multi-instance concurrency gap and found none (already safe by construction, corroborated by OPS-6 — see ADR-013-01); attached OPS-6's single-instance caveat at the digest/retention worker entry points (was orphaned for retention since Stage 8a) | ✅ done | `0c6c90f` |
 | 8c | audit exports: `exports/content.ts` + `exports/audit-export.ts` + `exports/worker.ts` + all three `app/api/exports/**` routes (deferred from Stage 7 — see ADR-013-01 and Shortcuts & gaps). Local `inClausePg` helper (not `reports/index.ts`'s SQLite one) for IN-clauses; caught and fixed a live invariant-2 landmine in `decryptedSensitiveFor`'s Sensitive-decrypt path | ✅ done | `2bfbd3d` |
+| 8d | the unclaimed `getRawDb` platform/billing surface (16 files, found by the pre-8c reconciliation sweep) — the `/platform` UI (layout, fleet page, provisioning page), `billing/setup/{confirm route,page}`, and 10 platform-tenant/webhook routes. All 16 triaged mechanical (0 deferred to Stage 9) before converting. Found 13 files also missing `await` on the now-async callee, and 3 non-`async` page/layout components promoted to `async` Server Components. New test harness (fresh-singleton + ephemeral DB via `jest.resetModules()`) makes all 16 genuinely test-reachable for the first time — see ADR-013-01 | ✅ done | `d7aae9b` |
 | 9 | reports/search — last, depends on nearly everything; fixes the two `reports/builders.ts` N+1 spots, the `MIN(json_extract(...))` type-safety spot found during Stage 5's post-hoc JSON1 audit (the one remaining known JSON1 spot as of Stage 6b — see the cross-stage invariants below, items 5/6), and `search.ts`'s `rowid` spot (re-scoped here from the original Stage 8 charter — unrelated to notifications/retention/audit-exports, more naturally reports/search's territory; found during Stage 8's pre-kickoff scoping trace) | not started | — |
 | 10 | dev scripts (`dev-seed.ts`, `eval-test-dataset.ts`), cutover cleanup, remove `better-sqlite3` dependency | not started | — |
 
@@ -89,49 +90,46 @@ duplicated here) for the full original module map and per-stage rationale.
   final pass before Stage 10** — it found a bigger gap than expected, which is itself a reason to
   re-run this sweep again once Stage 8c/9 land, not to consider reconciliation "done."
 
-## Discovered, unassigned surface (pre-8c reconciliation, 2026-07-11)
+## Discovered, unassigned surface (pre-8c reconciliation, 2026-07-11) — CLOSED in Stage 8d
 
 A repo-wide `getRawDb` grep (removed from `src/lib/db/client.ts` since Stage 1) found 21
-importing files. 5 belong to already-tracked not-yet-converted stages (`app/api/exports/**` ×3 →
-8c; `app/api/reports/[reportKey]`, `app/api/search` → 9) — expected, not new. **The other 16 are
-genuinely unassigned in the Phase 13 stage plan** — never claimed by any stage, including Stage 4
-even though every one of them calls a function Stage 4 itself converted:
+importing files. 5 belonged to already-tracked not-yet-converted stages (`app/api/exports/**` ×3
+→ 8c; `app/api/reports/[reportKey]`, `app/api/search` → 9) — expected, not new. **The other 16
+were genuinely unassigned in the Phase 13 stage plan** — never claimed by any stage, including
+Stage 4 even though every one of them calls a function Stage 4 itself converted. All 16, listed
+below, converted in Stage 8d:
 
-- `src/app/api/billing/setup/confirm/route.ts`
-- `src/app/api/platform/provision/route.ts`
-- `src/app/api/platform/tenants/route.ts`
-- `src/app/api/platform/tenants/check-slug/route.ts`
-- `src/app/api/platform/tenants/[tenantId]/route.ts`
-- `src/app/api/platform/tenants/[tenantId]/impersonate/route.ts`
-- `src/app/api/platform/tenants/[tenantId]/rate/route.ts`
-- `src/app/api/platform/tenants/[tenantId]/resend-admin-invite/route.ts`
-- `src/app/api/platform/tenants/[tenantId]/resend-billing-link/route.ts`
-- `src/app/api/platform/tenants/[tenantId]/retry-billing/route.ts`
-- `src/app/api/platform/tenants/[tenantId]/setup-fee/route.ts`
-- `src/app/api/webhooks/stripe/route.ts`
-- `src/app/billing/setup/page.tsx`
-- `src/app/platform/layout.tsx`
-- `src/app/platform/page.tsx` (also missing `await` on the now-async call underneath — a second,
-  compounding bug)
-- `src/app/platform/provisioning/page.tsx` (same missing-`await` compounding bug)
+- ~~`src/app/api/billing/setup/confirm/route.ts`~~
+- ~~`src/app/api/platform/provision/route.ts`~~
+- ~~`src/app/api/platform/tenants/route.ts`~~
+- ~~`src/app/api/platform/tenants/check-slug/route.ts`~~
+- ~~`src/app/api/platform/tenants/[tenantId]/route.ts`~~
+- ~~`src/app/api/platform/tenants/[tenantId]/impersonate/route.ts`~~
+- ~~`src/app/api/platform/tenants/[tenantId]/rate/route.ts`~~
+- ~~`src/app/api/platform/tenants/[tenantId]/resend-admin-invite/route.ts`~~
+- ~~`src/app/api/platform/tenants/[tenantId]/resend-billing-link/route.ts`~~
+- ~~`src/app/api/platform/tenants/[tenantId]/retry-billing/route.ts`~~
+- ~~`src/app/api/platform/tenants/[tenantId]/setup-fee/route.ts`~~
+- ~~`src/app/api/webhooks/stripe/route.ts`~~
+- ~~`src/app/billing/setup/page.tsx`~~
+- ~~`src/app/platform/layout.tsx`~~ (promoted to an `async` Server Component — it wasn't one)
+- ~~`src/app/platform/page.tsx`~~ (same — was missing `await` AND wasn't `async` at all)
+- ~~`src/app/platform/provisioning/page.tsx`~~ (same compounding bug)
 
-**Why Stage 4 "done" didn't mean these routes/pages work:** Stage 4's charter (see its row above)
-lists service files — `tenants.ts`, `provisioning.ts`, `requirements/templates.ts`,
+**Why Stage 4 "done" didn't mean these routes/pages worked:** Stage 4's charter (see its row
+above) lists service files — `tenants.ts`, `provisioning.ts`, `requirements/templates.ts`,
 `billing/{quantity-sync,worker,stripe-webhook}.ts` — never their callers. Every file in this list
-calls one of those already-converted, already-`async`/`Db`-typed functions through the dead
+called one of those already-converted, already-`async`/`Db`-typed functions through the dead
 `getRawDb()`, the exact bootstrap.ts/instrumentation.ts pattern (Stage 8a) at much larger scale:
-the entire `/platform` UI and several billing/webhook routes have been non-functional since
+the entire `/platform` UI and several billing/webhook routes had been non-functional since
 Stage 1, and nothing in the stage plan ever claimed ownership of fixing that, because the plan
 was written against service-file boundaries, not HTTP-reachability.
 
-**Not fixed in this sweep — reconciliation, not conversion, per instruction.** Recommended
-placement, for whoever plans the next stage: these are pure connective-tissue fixes (identical
-shape to Stage 8a's `instrumentation.ts` and Stage 8b's two routes — swap `getRawDb`→`getDb`, add
-`await`), not new conversion work, since every callee is already done. They don't obviously
-belong to Stage 8c (exports) or Stage 9 (reports/search) by subject matter, and grouping them
-under either would blur that stage's own scope. Options: (a) a dedicated slice before Stage 10,
-(b) folded into Stage 10's cutover pass since Stage 10 already has to sweep the whole repo for
-`better-sqlite3` references anyway. Left as an open call, not decided here.
+**Placement decided: its own stage (8d), not folded into 8c/9/10** — matches the recommendation
+this section originally flagged. See ADR-013-01's Stage 8d entry for the full triage report
+(mechanical/blocked split, the compounding missing-`await` bug found in 13 of 16, the three
+files promoted to `async` Server Components, and the new fresh-singleton test harness that made
+all 16 genuinely test-reachable for the first time).
 
 ## Repo infrastructure added mid-migration
 
@@ -151,18 +149,19 @@ repo-wide currently fails on pre-existing, out-of-scope violations; see below).
   auth/tokens, tenants/provisioning/billing) is 100% clean against both rules — checked directly,
   not assumed.
 - **Stage 5's own files are 100% clean.**
-- **Stage 6a's, 6b's, 7's, 8a's, 8b's, and 8c's own files are 100% clean** — `vendors.ts`, `resend-invite.ts`,
+- **Stage 6a's, 6b's, 7's, 8a's, 8b's, 8c's, and 8d's own files are 100% clean** — `vendors.ts`, `resend-invite.ts`,
   `decision.ts`, `invite-token.ts`, `vendor-token.ts`, `vendor-fsm.ts`, `vendor-onboarding.ts`,
   `notifications/renewal.ts` (now converted in full, including `applyExpirationFlip`),
   `verification/run.ts`, `requirements/resolver.ts`, `requirements/re-eval.ts`,
   `services/requirements.ts`, `add-to-locations.ts`, `extractor.ts`, `retention/worker.ts`,
   `instrumentation.ts`, `notifications/{worker,digest,resend-webhook}.ts`,
   `services/manual-reminder.ts`, `exports/{content,audit-export,worker}.ts`,
-  `workers/bootstrap.ts`, and every converted route/page checked directly.
-- **44 pre-existing violations remain** (down from 142 after Stage 5, 101 after Stage 6b, 73
-  after Stage 7, 70 after Stage 8a, 60 after Stage 8b, as each stage clears its own portion), all
-  in NOT-yet-converted modules — `reports/*`, `search/search.ts` — or in pre-existing React
-  client-component floating promises unrelated to this migration entirely.
+  `workers/bootstrap.ts`, all 16 Stage 8d files (the `/platform` UI + billing/webhook routes),
+  and every converted route/page checked directly.
+- **40 pre-existing violations remain** (down from 142 after Stage 5, 101 after Stage 6b, 73
+  after Stage 7, 70 after Stage 8a, 60 after Stage 8b, 44 after Stage 8c, as each stage clears
+  its own portion), all in NOT-yet-converted modules — `reports/*`, `search/search.ts` — or in
+  pre-existing React client-component floating promises unrelated to this migration entirely.
   Left untouched — out of scope until those modules' own stages, flagged here so each stage
   clears its own portion rather than rediscovering this from scratch.
 
