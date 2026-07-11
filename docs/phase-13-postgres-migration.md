@@ -5,7 +5,7 @@ correctness contract — the running pass count against Postgres is the tracking
 stages. Decision record: `docs/decisions.md` ADR-013-01 (rationale, fresh-baseline choice,
 Kysely choice, and the cross-stage invariants/landmines discovered along the way).
 
-**Running pass count: 534 / 1165** (as of Stage 8a). Every failure not yet converted has been
+**Running pass count: 552 / 1183** (as of Stage 8b). Every failure not yet converted has been
 confirmed to be the same "old code calling the new async/Kysely API synchronously" shape — no
 suite has failed for a different, real-behavior reason.
 
@@ -31,7 +31,7 @@ suite has failed for a different, real-behavior reason.
 | 6b | vendor onboarding portal (`/v/[token]`): `vendor-token.ts`, `vendor-fsm.ts`, `vendor-onboarding.ts`, a narrow slice of `notifications/renewal.ts` (`scheduleRenewalReminders`, `supersedeReminders`, `handleCoiUploadChase`), and the portal routes/page except `submit/route.ts` (deferred — see Shortcuts & gaps). Wires up the `revoked_at IS NULL` check in `validateInviteToken()`. **The wrong-vendor authz test passed clean — no leak found.** | ✅ done | `fa476ac` |
 | 7 | verification/requirements engine, converted as ONE unit (confirmed no natural seam — `runVerification` interleaves reads/writes with no cut line): `verification/run.ts` (`runVerification`/`loadExtractionBundle`/`runRulesOnlyReeval`), `requirements/resolver.ts`'s `resolveRequirements`. Picks up `add-to-locations.ts` + its route (Stage 6a), `submit/route.ts` (Stage 6b), and the `requirements/*` routes + `services/requirements.ts` + `requirements/re-eval.ts` — 4 of the 5 originally-identified blocked callers. `exports/content.ts` discovered mid-stage to cascade into the whole audit-export subsystem — deferred to Stage 8, see Shortcuts & gaps. Also: `runVerification`'s 4-table write now atomic via `withTransaction()` (deliberate correctness change, not preservation — see ADR-013-01), and date normalization centralized at the Vision extraction boundary (`dateField()` in `extractor.ts`), superseding Stage 6a's per-path fix | ✅ done | `15e5d8b` |
 | 8a | retention: `retention/worker.ts` (the only retention file — idempotent full-scan mark, no claim-then-process/`claimed_at`). Plus a flagged pre-existing-bug fix: `workers/bootstrap.ts`'s `db` param was mistyped as `Database.Database` (silently broken since Stage 4) and `instrumentation.ts` called the Stage-1-removed `getRawDb` — both fixed as findings, not bundled into the conversion diff; see ADR-013-01 | ✅ done | `2dfe352` |
-| 8b | notifications: the notification worker + `notifications/renewal.ts`'s remaining un-converted function `applyExpirationFlip` (rest of the file converted in Stage 6b as a narrow portal-upload hard dependency), the `notifications/queue.ts` N+1 (`notifyTenantAdmins`, already fixed in Stage 3) | not started | — |
+| 8b | notifications: `worker.ts`, `digest.ts`, `resend-webhook.ts` (+ its route), `notifications/renewal.ts`'s remaining un-converted function `applyExpirationFlip` (rest of the file converted in Stage 6b as a narrow portal-upload hard dependency), `services/manual-reminder.ts` (+ its route) — mechanical, no architecture change. Checked the claim for a multi-instance concurrency gap and found none (already safe by construction, corroborated by OPS-6 — see ADR-013-01); attached OPS-6's single-instance caveat at the digest/retention worker entry points (was orphaned for retention since Stage 8a) | ✅ done | `0c6c90f` |
 | 8c | audit exports: `exports/content.ts` + `exports/audit-export.ts` + the exports worker/routes (deferred from Stage 7 — see ADR-013-01 and Shortcuts & gaps) | not started | — |
 | 9 | reports/search — last, depends on nearly everything; fixes the two `reports/builders.ts` N+1 spots, the `MIN(json_extract(...))` type-safety spot found during Stage 5's post-hoc JSON1 audit (the one remaining known JSON1 spot as of Stage 6b — see the cross-stage invariants below, items 5/6), and `search.ts`'s `rowid` spot (re-scoped here from the original Stage 8 charter — unrelated to notifications/retention/audit-exports, more naturally reports/search's territory; found during Stage 8's pre-kickoff scoping trace) | not started | — |
 | 10 | dev scripts (`dev-seed.ts`, `eval-test-dataset.ts`), cutover cleanup, remove `better-sqlite3` dependency | not started | — |
@@ -78,24 +78,24 @@ duplicated here) for the full original module map and per-stage rationale.
   now being async means `content.ts` fails one call site further than before — expected, the
   standard "downstream not-yet-converted file breaks further as its dependency converts"
   pattern, not a new failure category. Not silently skipped — flagged here and in ADR-013-01.
-- **`src/lib/workers/bootstrap.ts`'s three not-yet-converted call sites (Stage 8a).**
-  `startNotificationWorker`/`startDigestWorker`/`startAuditExportWorker` still expect
-  `Database.Database`, so now that `bootstrap.ts`'s own `db` param is correctly typed `Db`
-  (Stage 8a's bug fix), those three calls show a `tsc` error at their own call site inside
-  `bootstrap.ts` rather than a vaguer one at the `startBillingSyncWorker` call. Expected; clears
-  as Stage 8b (notification/digest workers) and 8c (audit-export worker) land. See ADR-013-01's
-  Stage 8a entry for the full "did the workers ever run" investigation.
-- **`src/lib/services/manual-reminder.ts` is undocumented and unassigned to any stage** —
-  surfaced during Stage 8's pre-kickoff scoping trace, not yet reconciled. Flagged, not fixed.
+- **`src/lib/workers/bootstrap.ts`'s one remaining not-yet-converted call site (Stage 8a, narrowed by 8b).**
+  `startAuditExportWorker` still expects `Database.Database`, so now that `bootstrap.ts`'s own
+  `db` param is correctly typed `Db` (Stage 8a's bug fix) and Stage 8b converted notification +
+  digest, only this one call shows a `tsc` error at its own call site inside `bootstrap.ts`
+  (down from three after Stage 8a). Expected; clears when Stage 8c (audit-export worker) lands.
+  See ADR-013-01's Stage 8a entry for the full "did the workers ever run" investigation.
+- ~~`src/lib/services/manual-reminder.ts` is undocumented and unassigned to any stage.~~
+  **Closed in Stage 8b** — converted alongside notifications (its two DB dependencies,
+  `queueNotification` and `chase.ts`'s `vendorExpiry`, were already converted in Stages 3 and 5
+  respectively, so it was a cheap pickup, not a scope expansion).
 - **Tracking-doc drift, flagged for a pre-Stage-10 reconciliation pass, not fixed now.** Three
-  files have surfaced during conversion work that the *original* stage-plan document (the Phase
-  13 kickoff investigation report) never listed: `exports/content.ts` (Stage 7), `bootstrap.ts`
-  (Stage 8a — now documented above), and `manual-reminder.ts` (still unassigned, immediately
-  above). Each was caught and handled individually as it surfaced, but nobody has re-run the
-  original module inventory against the actual current codebase since Stage 0 to confirm the
-  stage plan is still exhaustive. Do this reconciliation pass before Stage 10 (the final
-  drop-`better-sqlite3` stage) — not now, and not silently deferred without a marker: this is
-  that marker.
+  files surfaced during conversion work that the *original* stage-plan document (the Phase 13
+  kickoff investigation report) never listed: `exports/content.ts` (Stage 7), `bootstrap.ts`
+  (Stage 8a), `manual-reminder.ts` (Stage 8a found it, Stage 8b converted it) — all three now
+  documented, but nobody has re-run the original module inventory against the actual current
+  codebase since Stage 0 to confirm the stage plan is still exhaustive. Do this reconciliation
+  pass before Stage 10 (the final drop-`better-sqlite3` stage) — not now, and not silently
+  deferred without a marker: this is that marker.
 
 ## Repo infrastructure added mid-migration
 
@@ -115,17 +115,18 @@ repo-wide currently fails on pre-existing, out-of-scope violations; see below).
   auth/tokens, tenants/provisioning/billing) is 100% clean against both rules — checked directly,
   not assumed.
 - **Stage 5's own files are 100% clean.**
-- **Stage 6a's, 6b's, 7's, and 8a's own files are 100% clean** — `vendors.ts`, `resend-invite.ts`,
+- **Stage 6a's, 6b's, 7's, 8a's, and 8b's own files are 100% clean** — `vendors.ts`, `resend-invite.ts`,
   `decision.ts`, `invite-token.ts`, `vendor-token.ts`, `vendor-fsm.ts`, `vendor-onboarding.ts`,
-  the converted portion of `notifications/renewal.ts`, `verification/run.ts`,
-  `requirements/resolver.ts`, `requirements/re-eval.ts`, `services/requirements.ts`,
-  `add-to-locations.ts`, `extractor.ts`, `retention/worker.ts`, `instrumentation.ts`, and every
-  converted route/page checked directly.
-- **70 pre-existing violations remain** (down from 142 after Stage 5, 101 after Stage 6b, 73
-  after Stage 7, as each stage clears its own portion), all in NOT-yet-converted modules — `exports/*`
-  (`content.ts`/`audit-export.ts`/`worker.ts`, deferred from Stage 7 — see Shortcuts & gaps),
-  `reports/*`, the notifications workers, `renewal.ts`'s remaining `applyExpirationFlip` — or in
-  pre-existing React client-component floating promises unrelated to this migration entirely.
+  `notifications/renewal.ts` (now converted in full, including `applyExpirationFlip`),
+  `verification/run.ts`, `requirements/resolver.ts`, `requirements/re-eval.ts`,
+  `services/requirements.ts`, `add-to-locations.ts`, `extractor.ts`, `retention/worker.ts`,
+  `instrumentation.ts`, `notifications/{worker,digest,resend-webhook}.ts`,
+  `services/manual-reminder.ts`, and every converted route/page checked directly.
+- **60 pre-existing violations remain** (down from 142 after Stage 5, 101 after Stage 6b, 73
+  after Stage 7, 70 after Stage 8a, as each stage clears its own portion), all in
+  NOT-yet-converted modules — `exports/*` (`content.ts`/`audit-export.ts`/`worker.ts`, deferred
+  from Stage 7 — see Shortcuts & gaps), `reports/*` — or in pre-existing React client-component
+  floating promises unrelated to this migration entirely.
   Left untouched — out of scope until those modules' own stages, flagged here so each stage
   clears its own portion rather than rediscovering this from scratch.
 
