@@ -1,6 +1,5 @@
 import { randomUUID } from 'crypto';
-import type Database from 'better-sqlite3';
-import { TenantDB } from '@/lib/db/tenant';
+import type { Db } from '@/lib/db/client';
 import { logAudit } from '@/lib/audit';
 import { issueToken } from '@/lib/auth/jwt';
 
@@ -36,8 +35,9 @@ export function isValidSlug(slug: string): boolean {
 }
 
 /** True if `slug` is already in use by another tenant. Pre-check for the wizard's Tenant step. */
-export function isSlugTaken(db: Database.Database, slug: string): boolean {
-  return !!db.prepare('SELECT 1 FROM tenants WHERE slug = ?').get(slug);
+export async function isSlugTaken(db: Db, slug: string): Promise<boolean> {
+  const row = await db.selectFrom('tenants').select('id').where('slug', '=', slug).executeTakeFirst();
+  return !!row;
 }
 
 export interface UpdateTenantInput {
@@ -54,37 +54,48 @@ const VALID_TRANSITIONS: Record<string, string[]> = {
   offboarded: ['active'],
 };
 
-export function createTenant(
-  db: Database.Database,
+const TENANT_COLUMNS = [
+  'id', 'name', 'slug', 'lifecycle_state', 'monthly_rate_cents', 'setup_fee_cents',
+  'stripe_customer_id', 'stripe_subscription_id', 'stripe_setup_intent_id', 'applied_template_id', 'created_at',
+] as const;
+
+export async function createTenant(
+  db: Db,
   input: CreateTenantInput,
   actorId: string
-): Tenant {
+): Promise<Tenant> {
   const id = randomUUID();
-  const now = new Date().toISOString();
+  const now = new Date();
   const rate = input.monthlyRateCents ?? 9000;
 
   // Backstop to the wizard's slug-uniqueness pre-check: a UNIQUE constraint violation here
   // (e.g. a race between two concurrent provisions) surfaces as a clean 409, not a raw
-  // SQLite error deep in the transaction.
+  // Postgres error deep in the transaction. Postgres's unique_violation SQLSTATE is '23505'
+  // (was SQLite_CONSTRAINT_UNIQUE).
   try {
-    db.prepare(
-      'INSERT INTO tenants (id, name, slug, lifecycle_state, monthly_rate_cents, setup_fee_cents, timezone, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
-    ).run(id, input.name.trim(), input.slug ?? null, 'provisioning', rate, input.setupFeeCents ?? null, input.timezone ?? null, now);
+    await db
+      .insertInto('tenants')
+      .values({
+        id, name: input.name.trim(), slug: input.slug ?? null, lifecycle_state: 'provisioning',
+        monthly_rate_cents: rate, setup_fee_cents: input.setupFeeCents ?? null, timezone: input.timezone ?? null, created_at: now,
+      })
+      .execute();
   } catch (err) {
-    if ((err as { code?: string }).code === 'SQLITE_CONSTRAINT_UNIQUE' && input.slug) {
+    if ((err as { code?: string }).code === '23505' && input.slug) {
       throw Object.assign(new Error(`Slug "${input.slug}" is already in use`), { status: 409 });
     }
     throw err;
   }
 
   // Initial billing snapshot (0 locations) and requirement settings defaults
-  const tdb = new TenantDB(db, id);
-  tdb.insert('billing_snapshots', { id: randomUUID(), billable_locations: 0, amount_cents: 0, changed: 1, created_at: now });
-  db.prepare(
-    'INSERT OR IGNORE INTO requirement_settings (tenant_id, precedence_policy) VALUES (?, ?)'
-  ).run(id, 'strictest');
+  await db.insertInto('billing_snapshots').values({ id: randomUUID(), tenant_id: id, billable_locations: 0, amount_cents: 0, changed: true, created_at: now }).execute();
+  await db
+    .insertInto('requirement_settings')
+    .values({ tenant_id: id, precedence_policy: 'strictest' })
+    .onConflict((oc) => oc.doNothing())
+    .execute();
 
-  logAudit(db, {
+  await logAudit(db, {
     tenantId: id,
     actorType: 'platform',
     actorId,
@@ -94,26 +105,25 @@ export function createTenant(
     payload: { name: input.name },
   });
 
-  return db.prepare('SELECT id, name, slug, lifecycle_state, monthly_rate_cents, setup_fee_cents, stripe_customer_id, stripe_subscription_id, stripe_setup_intent_id, applied_template_id, created_at FROM tenants WHERE id = ?').get(id) as Tenant;
+  return db.selectFrom('tenants').select(TENANT_COLUMNS).where('id', '=', id).executeTakeFirstOrThrow() as Promise<Tenant>;
 }
 
-export function listTenants(db: Database.Database): Tenant[] {
-  return db.prepare('SELECT id, name, slug, lifecycle_state, monthly_rate_cents, setup_fee_cents, stripe_customer_id, stripe_subscription_id, stripe_setup_intent_id, applied_template_id, created_at FROM tenants ORDER BY created_at DESC').all() as Tenant[];
+export async function listTenants(db: Db): Promise<Tenant[]> {
+  return db.selectFrom('tenants').select(TENANT_COLUMNS).orderBy('created_at', 'desc').execute() as Promise<Tenant[]>;
 }
 
-export function getTenantById(db: Database.Database, tenantId: string): Tenant | null {
-  return (
-    (db.prepare('SELECT id, name, slug, lifecycle_state, monthly_rate_cents, setup_fee_cents, stripe_customer_id, stripe_subscription_id, stripe_setup_intent_id, applied_template_id, created_at FROM tenants WHERE id = ?').get(tenantId) as Tenant | undefined) ?? null
-  );
+export async function getTenantById(db: Db, tenantId: string): Promise<Tenant | null> {
+  const row = await db.selectFrom('tenants').select(TENANT_COLUMNS).where('id', '=', tenantId).executeTakeFirst();
+  return (row as Tenant | undefined) ?? null;
 }
 
-export function updateTenant(
-  db: Database.Database,
+export async function updateTenant(
+  db: Db,
   tenantId: string,
   input: UpdateTenantInput,
   actorId: string
-): Tenant {
-  const tenant = getTenantById(db, tenantId);
+): Promise<Tenant> {
+  const tenant = await getTenantById(db, tenantId);
   if (!tenant) throw Object.assign(new Error('Tenant not found'), { status: 404 });
 
   if (input.lifecycleState && input.lifecycleState !== tenant.lifecycle_state) {
@@ -124,9 +134,9 @@ export function updateTenant(
         { status: 400 }
       );
     }
-    db.prepare('UPDATE tenants SET lifecycle_state = ? WHERE id = ?').run(input.lifecycleState, tenantId);
+    await db.updateTable('tenants').set({ lifecycle_state: input.lifecycleState }).where('id', '=', tenantId).execute();
 
-    logAudit(db, {
+    await logAudit(db, {
       tenantId,
       actorType: 'platform',
       actorId,
@@ -140,21 +150,21 @@ export function updateTenant(
   const settingsChanges: Record<string, { from: unknown; to: unknown }> = {};
   if (input.name !== undefined && input.name.trim() !== tenant.name) {
     settingsChanges['name'] = { from: tenant.name, to: input.name.trim() };
-    db.prepare('UPDATE tenants SET name = ? WHERE id = ?').run(input.name.trim(), tenantId);
+    await db.updateTable('tenants').set({ name: input.name.trim() }).where('id', '=', tenantId).execute();
   }
   if (input.monthlyRateCents !== undefined && input.monthlyRateCents !== tenant.monthly_rate_cents) {
     settingsChanges['monthly_rate_cents'] = { from: tenant.monthly_rate_cents, to: input.monthlyRateCents };
-    db.prepare('UPDATE tenants SET monthly_rate_cents = ? WHERE id = ?').run(input.monthlyRateCents, tenantId);
+    await db.updateTable('tenants').set({ monthly_rate_cents: input.monthlyRateCents }).where('id', '=', tenantId).execute();
   }
   if (input.setupFeeCents !== undefined && input.setupFeeCents !== tenant.setup_fee_cents) {
     settingsChanges['setup_fee_cents'] = { from: tenant.setup_fee_cents, to: input.setupFeeCents };
-    db.prepare('UPDATE tenants SET setup_fee_cents = ? WHERE id = ?').run(input.setupFeeCents, tenantId);
+    await db.updateTable('tenants').set({ setup_fee_cents: input.setupFeeCents }).where('id', '=', tenantId).execute();
   }
 
   // Audit tenant settings changes (name / billing rate) with before→after. A billing-rate
   // change with no trail is a defensibility hole (Audit_Trail.md). No Sensitive values here.
   if (Object.keys(settingsChanges).length > 0) {
-    logAudit(db, {
+    await logAudit(db, {
       tenantId,
       actorType: 'platform',
       actorId,
@@ -165,21 +175,26 @@ export function updateTenant(
     });
   }
 
-  return getTenantById(db, tenantId) as Tenant;
+  return getTenantById(db, tenantId) as Promise<Tenant>;
 }
 
-export function impersonateTenant(
-  db: Database.Database,
+export async function impersonateTenant(
+  db: Db,
   tenantId: string,
   platformUserId: string
-): string {
-  const tenant = getTenantById(db, tenantId);
+): Promise<string> {
+  const tenant = await getTenantById(db, tenantId);
   if (!tenant) throw Object.assign(new Error('Tenant not found'), { status: 404 });
 
   // Use the first active admin's ID as the subject, or a synthetic one if none exists
-  const firstAdmin = db
-    .prepare("SELECT id FROM users WHERE tenant_id = ? AND role = 'admin' AND status != 'disabled' LIMIT 1")
-    .get(tenantId) as { id: string } | undefined;
+  const firstAdmin = await db
+    .selectFrom('users')
+    .select('id')
+    .where('tenant_id', '=', tenantId)
+    .where('role', '=', 'admin')
+    .where('status', '!=', 'disabled')
+    .limit(1)
+    .executeTakeFirst();
   const sub = firstAdmin?.id ?? `system:${tenantId}`;
 
   const token = issueToken({
@@ -190,7 +205,7 @@ export function impersonateTenant(
     impersonatedBy: platformUserId,
   });
 
-  logAudit(db, {
+  await logAudit(db, {
     tenantId,
     actorType: 'platform',
     actorId: platformUserId,

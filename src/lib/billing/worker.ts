@@ -3,7 +3,7 @@
 // unref'd so it never keeps the process alive on its own, wrapping a pure/testable function
 // (syncBillingQuantities) that tests call directly with a frozen clock.
 
-import type Database from 'better-sqlite3';
+import type { Db } from '@/lib/db/client';
 import { env } from '@/lib/env';
 import type { BillingProvider } from './provider';
 import { syncBillingQuantities } from './quantity-sync';
@@ -13,7 +13,7 @@ export interface BillingSyncWorkerHandle {
 }
 
 export function startBillingSyncWorker(
-  db: Database.Database,
+  db: Db,
   billing: BillingProvider,
   intervalSeconds: number = env.billing.syncWorkerPollSeconds
 ): BillingSyncWorkerHandle {

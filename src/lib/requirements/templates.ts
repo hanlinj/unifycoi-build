@@ -15,7 +15,8 @@
  */
 
 import { randomUUID } from 'crypto';
-import type Database from 'better-sqlite3';
+import type { Db } from '@/lib/db/client';
+import { withTransaction } from '@/lib/db/transaction';
 import { logAudit } from '@/lib/audit';
 
 export interface TemplatePayload {
@@ -26,7 +27,10 @@ export interface TemplatePayload {
 export interface RequirementTemplate {
   id: string;
   name: string;
-  payload_json: string;
+  // jsonb column — Kysely/pg returns it already-parsed as an object, not a JSON string
+  // (Phase 13 migration note: this differs from the old SQLite TEXT column, which needed
+  // JSON.parse() on every read; do not re-parse this).
+  payload_json: TemplatePayload;
   created_at: string;
 }
 
@@ -102,28 +106,24 @@ export const PLATFORM_TEMPLATES: Array<{ id: string; name: string; payload: Temp
  * Insert platform templates that don't already exist. Idempotent — safe to call at
  * every startup. Uses stable IDs so re-seeding is a no-op for existing rows.
  */
-export function seedTemplates(db: Database.Database): void {
-  const stmt = db.prepare(
-    'INSERT OR IGNORE INTO requirement_templates (id, name, payload_json, created_at) VALUES (?, ?, ?, ?)'
-  );
-  const now = new Date().toISOString();
+export async function seedTemplates(db: Db): Promise<void> {
+  const now = new Date();
   for (const tpl of PLATFORM_TEMPLATES) {
-    stmt.run(tpl.id, tpl.name, JSON.stringify(tpl.payload), now);
+    await db
+      .insertInto('requirement_templates')
+      .values({ id: tpl.id, name: tpl.name, payload_json: JSON.stringify(tpl.payload), created_at: now })
+      .onConflict((oc) => oc.doNothing())
+      .execute();
   }
 }
 
-export function listTemplates(db: Database.Database): RequirementTemplate[] {
-  return db
-    .prepare('SELECT id, name, payload_json, created_at FROM requirement_templates ORDER BY name')
-    .all() as RequirementTemplate[];
+export async function listTemplates(db: Db): Promise<RequirementTemplate[]> {
+  return db.selectFrom('requirement_templates').selectAll().orderBy('name').execute() as Promise<RequirementTemplate[]>;
 }
 
-export function getTemplate(db: Database.Database, templateId: string): RequirementTemplate | null {
-  return (
-    (db
-      .prepare('SELECT id, name, payload_json, created_at FROM requirement_templates WHERE id = ?')
-      .get(templateId) as RequirementTemplate | undefined) ?? null
-  );
+export async function getTemplate(db: Db, templateId: string): Promise<RequirementTemplate | null> {
+  const row = await db.selectFrom('requirement_templates').selectAll().where('id', '=', templateId).executeTakeFirst();
+  return (row as RequirementTemplate | undefined) ?? null;
 }
 
 /**
@@ -136,45 +136,53 @@ export function getTemplate(db: Database.Database, templateId: string): Requirem
  *
  * @param actorId  The platform user or admin who triggered provisioning.
  */
-export function applyTemplate(
-  db: Database.Database,
+export async function applyTemplate(
+  db: Db,
   tenantId: string,
   templateId: string,
   actorId: string
-): void {
-  const tpl = getTemplate(db, templateId);
+): Promise<void> {
+  const tpl = await getTemplate(db, templateId);
   if (!tpl) throw Object.assign(new Error(`Template not found: ${templateId}`), { status: 404 });
 
-  const payload = JSON.parse(tpl.payload_json) as TemplatePayload;
-  const now = new Date().toISOString();
+  const payload = tpl.payload_json; // jsonb — already an object, not a JSON string (see RequirementTemplate)
+  const now = new Date();
 
-  db.transaction(() => {
+  await withTransaction(db, async (trx) => {
     // Seed org-level requirement_rules from template defaults
-    const insertRule = db.prepare(
-      `INSERT INTO requirement_rules
-         (id, tenant_id, scope_type, scope_ref, requirement_key, required_value, created_by, reason, created_at)
-       VALUES (?, ?, 'org', NULL, ?, ?, ?, ?, ?)`
-    );
     for (const [key, value] of Object.entries(payload.defaults)) {
-      insertRule.run(randomUUID(), tenantId, key, value, actorId, 'Initial template application', now);
+      await trx
+        .insertInto('requirement_rules')
+        .values({
+          id: randomUUID(),
+          tenant_id: tenantId,
+          scope_type: 'org',
+          scope_ref: null,
+          requirement_key: key,
+          required_value: value,
+          created_by: actorId,
+          reason: 'Initial template application',
+          created_at: now,
+        })
+        .execute();
     }
 
     // Upsert requirement_settings with the floor snapshot
-    db.prepare(
-      `INSERT INTO requirement_settings (tenant_id, precedence_policy, floor_json)
-       VALUES (?, 'strictest', ?)
-       ON CONFLICT(tenant_id) DO UPDATE SET floor_json = excluded.floor_json`
-    ).run(tenantId, JSON.stringify(payload.floor));
+    await trx
+      .insertInto('requirement_settings')
+      .values({ tenant_id: tenantId, precedence_policy: 'strictest', floor_json: JSON.stringify(payload.floor) })
+      .onConflict((oc) => oc.column('tenant_id').doUpdateSet({ floor_json: JSON.stringify(payload.floor) }))
+      .execute();
 
     // Record which template was applied
-    db.prepare('UPDATE tenants SET applied_template_id = ? WHERE id = ?').run(templateId, tenantId);
-  })();
+    await trx.updateTable('tenants').set({ applied_template_id: templateId }).where('id', '=', tenantId).execute();
+  });
 
   // Audit the template application (provisioning). Spec: "template applications" are a
   // logged requirement-change event (Audit_Trail.md). Actor is the tenant admin who
   // triggers provisioning — the rules' created_by FK references tenant users(id), so the
   // actor is necessarily a tenant user, not the platform user. No Sensitive values here.
-  logAudit(db, {
+  await logAudit(db, {
     tenantId,
     actorType: 'user',
     actorId,

@@ -10,8 +10,8 @@
 // still 'provisioning', so a redelivered webhook event (Stripe retries on anything but a 2xx,
 // and can occasionally redeliver even after one) never double-activates or double-invites.
 
-import type Database from 'better-sqlite3';
 import type Stripe from 'stripe';
+import type { Db } from '@/lib/db/client';
 import { activateTenantOnFirstPayment } from '@/lib/services/provisioning';
 
 export interface StripeWebhookResult {
@@ -19,7 +19,7 @@ export interface StripeWebhookResult {
   reason?: string;
 }
 
-export function handleStripeEvent(db: Database.Database, event: Stripe.Event): StripeWebhookResult {
+export async function handleStripeEvent(db: Db, event: Stripe.Event): Promise<StripeWebhookResult> {
   if (event.type !== 'invoice.paid') {
     return { handled: false, reason: `ignored event type: ${event.type}` };
   }
@@ -32,10 +32,10 @@ export function handleStripeEvent(db: Database.Database, event: Stripe.Event): S
   const customerId = typeof invoice.customer === 'string' ? invoice.customer : invoice.customer?.id;
   if (!customerId) return { handled: false, reason: 'invoice has no customer' };
 
-  const tenant = db.prepare('SELECT id FROM tenants WHERE stripe_customer_id = ?').get(customerId) as { id: string } | undefined;
+  const tenant = await db.selectFrom('tenants').select('id').where('stripe_customer_id', '=', customerId).executeTakeFirst();
   if (!tenant) return { handled: false, reason: 'no tenant for this Stripe customer' };
 
-  const result = activateTenantOnFirstPayment(db, tenant.id);
+  const result = await activateTenantOnFirstPayment(db, tenant.id);
   if (!result) return { handled: false, reason: 'tenant already active (idempotent no-op) or has no admin' };
 
   return { handled: true };

@@ -1,11 +1,20 @@
 import { randomUUID } from 'crypto';
 import type Database from 'better-sqlite3';
+import type { Db } from '@/lib/db/client';
 import { TenantDB } from '@/lib/db/tenant';
 import { hashPassword } from '@/lib/auth/password';
 import { logAudit } from '@/lib/audit';
 import { userManageableByScope, type Scope } from '@/lib/scope';
 import { issueInviteToken } from './password-reset';
 import { env } from '@/lib/env';
+
+// Phase 13 migration, Stage 4: userWithScope() and createUser() are converted (a hard
+// dependency of provisionTenant's first-Admin creation) — the REST of this file (listUsers,
+// getUserById, usersForManagement, updateUser, inviteUser, sendUserInvite) stays on the old
+// synchronous better-sqlite3 API until Stage 5 (locations/users) converts it properly. Those
+// functions all call userWithScope() synchronously without await, so they will not compile
+// until Stage 5 updates them too — expected, same as any other not-yet-converted downstream
+// code; just happens to sit in the same file as what this stage does need.
 
 export interface User {
   id: string;
@@ -45,13 +54,13 @@ export interface UpdateUserInput {
 
 const VALID_ROLES = ['admin', 'district_manager', 'store_manager'] as const;
 
-function userWithScope(db: Database.Database, tenantId: string, userId: string): UserWithScope | null {
+async function userWithScope(db: Db, tenantId: string, userId: string): Promise<UserWithScope | null> {
   const tdb = new TenantDB(db, tenantId);
-  const user = tdb.get<User>('SELECT id, tenant_id, email, name, role, status, invite_sent_at, created_at FROM users WHERE tenant_id = ? AND id = ?', [userId]);
+  const user = await tdb.get<User>('SELECT id, tenant_id, email, name, role, status, invite_sent_at, created_at FROM users WHERE tenant_id = $1 AND id = $2', [userId]);
   if (!user) return null;
 
-  const regionRows = tdb.all<{ region_id: string }>('SELECT region_id FROM user_regions WHERE tenant_id = ? AND user_id = ?', [userId]);
-  const locRows = tdb.all<{ location_id: string }>('SELECT location_id FROM user_locations WHERE tenant_id = ? AND user_id = ?', [userId]);
+  const regionRows = await tdb.all<{ region_id: string }>('SELECT region_id FROM user_regions WHERE tenant_id = $1 AND user_id = $2', [userId]);
+  const locRows = await tdb.all<{ location_id: string }>('SELECT location_id FROM user_locations WHERE tenant_id = $1 AND user_id = $2', [userId]);
 
   return {
     ...user,
@@ -60,14 +69,14 @@ function userWithScope(db: Database.Database, tenantId: string, userId: string):
   };
 }
 
-export function createUser(
-  db: Database.Database,
+export async function createUser(
+  db: Db,
   tenantId: string,
   input: CreateUserInput,
   actorId: string,
   callerScope: Scope,
   callerRole: string
-): UserWithScope {
+): Promise<UserWithScope> {
   if (!VALID_ROLES.includes(input.role as (typeof VALID_ROLES)[number])) {
     throw Object.assign(new Error(`Invalid role: ${input.role}`), { status: 400 });
   }
@@ -82,17 +91,18 @@ export function createUser(
   }
 
   const tdb = new TenantDB(db, tenantId);
-  const existing = tdb.get<User>('SELECT id FROM users WHERE tenant_id = ? AND email = ? COLLATE NOCASE', [input.email]);
+  // COLLATE NOCASE -> lower() (Stage 0's catalogued rework spot)
+  const existing = await tdb.get<User>('SELECT id FROM users WHERE tenant_id = $1 AND lower(email) = lower($2)', [input.email]);
   if (existing) {
     throw Object.assign(new Error('A user with this email already exists in this tenant'), { status: 409 });
   }
 
   const id = randomUUID();
-  const now = new Date().toISOString();
+  const now = new Date();
   const status = input.password ? 'active' : 'invited';
   const passwordHash = input.password ? hashPassword(input.password) : null;
 
-  tdb.insert('users', {
+  await tdb.insert('users', {
     id,
     email: input.email.toLowerCase().trim(),
     name: input.name.trim(),
@@ -121,13 +131,13 @@ export function createUser(
   }
 
   for (const rid of regionIds) {
-    tdb.insert('user_regions', { user_id: id, region_id: rid }, { orIgnore: true });
+    await tdb.insert('user_regions', { user_id: id, region_id: rid }, { orIgnore: true });
   }
   for (const lid of locationIds) {
-    tdb.insert('user_locations', { user_id: id, location_id: lid }, { orIgnore: true });
+    await tdb.insert('user_locations', { user_id: id, location_id: lid }, { orIgnore: true });
   }
 
-  logAudit(db, {
+  await logAudit(db, {
     tenantId,
     actorType: 'user',
     actorId,
@@ -137,7 +147,7 @@ export function createUser(
     payload: { role: input.role, email: input.email },
   });
 
-  return userWithScope(db, tenantId, id)!;
+  return (await userWithScope(db, tenantId, id))!;
 }
 
 export function listUsers(

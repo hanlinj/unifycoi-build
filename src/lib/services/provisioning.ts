@@ -29,12 +29,18 @@
 // customer → SetupIntent → subscription (rate × current billable_locations, + an optional
 // one-time setup-fee invoice item on the first invoice only). Location-count changes AFTER
 // activation are pushed to the subscription's quantity by a separate worker
-// (src/lib/billing/quantity-sync.ts) polling billing_snapshots — see that file for why this
-// can't just happen inline in createLocation/updateLocation (db.transaction() callbacks must
-// be fully synchronous; a Stripe call can't live inside one).
+// (src/lib/billing/quantity-sync.ts) polling billing_snapshots.
+//
+// Phase 13 migration note: this split was originally forced by better-sqlite3's requirement
+// that a db.transaction() callback be fully synchronous (a Stripe call couldn't live inside
+// one). Kysely/Postgres transactions ARE async-capable, so that specific constraint no longer
+// applies — but the separate-poller architecture is kept as-is this pass (foundation only, no
+// behavior/design changes); revisiting it is a deliberate future call, not something to change
+// incidentally while just swapping the data layer underneath it.
 
 import { randomUUID } from 'crypto';
-import type Database from 'better-sqlite3';
+import type { Db } from '@/lib/db/client';
+import { withTransaction } from '@/lib/db/transaction';
 import { logAudit } from '@/lib/audit';
 import { isValidTimeZone } from '@/lib/time/zone';
 import { env } from '@/lib/env';
@@ -98,16 +104,21 @@ function conflict(message: string): never {
  * after a partial failure reuses whatever already succeeded — no dupes.
  */
 export async function attachBilling(
-  db: Database.Database,
+  db: Db,
   tenantId: string,
   billing: BillingProvider,
   platformUserId: string
 ): Promise<BillingAttachResult> {
-  const tenant = getTenantById(db, tenantId);
+  const tenant = await getTenantById(db, tenantId);
   if (!tenant) throw Object.assign(new Error('Tenant not found'), { status: 404 });
-  const admin = db
-    .prepare(`SELECT id, email, name FROM users WHERE tenant_id = ? AND role = 'admin' ORDER BY created_at LIMIT 1`)
-    .get(tenantId) as { id: string; email: string; name: string } | undefined;
+  const admin = await db
+    .selectFrom('users')
+    .select(['id', 'email', 'name'])
+    .where('tenant_id', '=', tenantId)
+    .where('role', '=', 'admin')
+    .orderBy('created_at')
+    .limit(1)
+    .executeTakeFirst();
   if (!admin) throw Object.assign(new Error('Tenant has no admin user to bill'), { status: 409 });
 
   try {
@@ -123,12 +134,17 @@ export async function attachBilling(
     // Quantity is authoritative from billing_snapshots — the latest row is the current
     // billable count (createTenant always writes an initial 0-location row, then createLocation
     // writes one per location added during provisioning, so this reads the just-provisioned
-    // count). Ordered by rowid, not created_at: provisioning can write several snapshot rows
-    // within the same millisecond (one per location), and ISO-string created_at ties resolve
-    // arbitrarily — rowid is a reliable, monotonically-increasing insertion-order tiebreaker.
-    const latestSnapshot = db
-      .prepare(`SELECT billable_locations FROM billing_snapshots WHERE tenant_id = ? ORDER BY rowid DESC LIMIT 1`)
-      .get(tenantId) as { billable_locations: number } | undefined;
+    // count). Ordered by seq, not created_at: provisioning can write several snapshot rows
+    // within the same millisecond (one per location), and timestamp ties resolve arbitrarily —
+    // seq (bigserial, Stage 4's rowid replacement) is a reliable, monotonically-increasing
+    // insertion-order tiebreaker.
+    const latestSnapshot = await db
+      .selectFrom('billing_snapshots')
+      .select('billable_locations')
+      .where('tenant_id', '=', tenantId)
+      .orderBy('seq', 'desc')
+      .limit(1)
+      .executeTakeFirst();
     const quantity = latestSnapshot?.billable_locations ?? 0;
 
     const subscription = await billing.createSubscription({
@@ -139,17 +155,23 @@ export async function attachBilling(
       idempotencyKey: `${idempotencyKey}:subscription`,
     });
 
-    db.prepare('UPDATE tenants SET stripe_customer_id = ?, stripe_subscription_id = ?, stripe_setup_intent_id = ? WHERE id = ?')
-      .run(customer.customerId, subscription.subscriptionId, si.setupIntentId, tenantId);
+    await db
+      .updateTable('tenants')
+      .set({ stripe_customer_id: customer.customerId, stripe_subscription_id: subscription.subscriptionId, stripe_setup_intent_id: si.setupIntentId })
+      .where('id', '=', tenantId)
+      .execute();
 
     // The subscription's initial quantity already reflects every snapshot taken up to this
     // point (all pre-activation) — mark them synced so the quantity-sync worker's first tick
     // after activation doesn't redundantly re-push the same number it just saw appear.
-    const nowIso = new Date().toISOString();
-    db.prepare(`UPDATE billing_snapshots SET stripe_synced_at = ? WHERE tenant_id = ? AND stripe_synced_at IS NULL`)
-      .run(nowIso, tenantId);
+    await db
+      .updateTable('billing_snapshots')
+      .set({ stripe_synced_at: new Date() })
+      .where('tenant_id', '=', tenantId)
+      .where('stripe_synced_at', 'is', null)
+      .execute();
 
-    logAudit(db, {
+    await logAudit(db, {
       tenantId,
       actorType: 'platform',
       actorId: platformUserId,
@@ -158,7 +180,7 @@ export async function attachBilling(
       targetId: tenantId,
       payload: { attached: true },
     });
-    logAudit(db, {
+    await logAudit(db, {
       tenantId,
       actorType: 'platform',
       actorId: platformUserId,
@@ -171,7 +193,7 @@ export async function attachBilling(
     // The link the operator sends the customer (Slice 5a.1) — revisitable, not single-use, so
     // a fresh one each successful attach/retry is harmless (old ones for this tenant still
     // resolve fine too; nothing invalidates them).
-    const { rawToken } = issueBillingSetupToken(db, { tenantId, userId: admin.id });
+    const { rawToken } = await issueBillingSetupToken(db, { tenantId, userId: admin.id });
     const billingSetupUrl = `${env.app.baseUrl}/billing/setup?token=${rawToken}`;
 
     return {
@@ -193,26 +215,31 @@ export async function attachBilling(
  * an already-active tenant is a no-op (returns null), never a duplicate invite/activation.
  * This is where Slice 4's invite issuance moved to — gated on payment, not on the DB commit.
  */
-export function activateTenantOnFirstPayment(
-  db: Database.Database,
+export async function activateTenantOnFirstPayment(
+  db: Db,
   tenantId: string,
   now: Date = new Date()
-): ActivationResult | null {
-  const tenant = getTenantById(db, tenantId);
+): Promise<ActivationResult | null> {
+  const tenant = await getTenantById(db, tenantId);
   if (!tenant || tenant.lifecycle_state !== 'provisioning') return null; // already active, or unknown tenant
 
-  const admin = db
-    .prepare(`SELECT id FROM users WHERE tenant_id = ? AND role = 'admin' ORDER BY created_at LIMIT 1`)
-    .get(tenantId) as { id: string } | undefined;
+  const admin = await db
+    .selectFrom('users')
+    .select('id')
+    .where('tenant_id', '=', tenantId)
+    .where('role', '=', 'admin')
+    .orderBy('created_at')
+    .limit(1)
+    .executeTakeFirst();
   if (!admin) return null; // shouldn't happen — provisioning always creates one
 
   // updateTenant's audit call is hardcoded actorType:'platform' — there's no 'webhook' actor
   // type in the audit vocabulary (system|ai|user|vendor|platform) that fits better; actorId
   // 'stripe-webhook' at least distinguishes this from an actual platform-user click.
-  updateTenant(db, tenantId, { lifecycleState: 'active' }, 'stripe-webhook');
+  await updateTenant(db, tenantId, { lifecycleState: 'active' }, 'stripe-webhook');
 
-  const { rawToken, expiresAt } = issueInviteToken(db, { tenantId, userId: admin.id }, now);
-  logAudit(db, {
+  const { rawToken, expiresAt } = await issueInviteToken(db, { tenantId, userId: admin.id }, now);
+  await logAudit(db, {
     tenantId,
     actorType: 'system',
     actorId: 'stripe-webhook',
@@ -241,26 +268,31 @@ export interface ResendResult {
  * non-invalidating resend semantics (confirmPasswordReset invalidates every sibling token the
  * moment any one is used, so there is never more than one *usable* outcome).
  */
-export function resendFirstAdminInvite(
-  db: Database.Database,
+export async function resendFirstAdminInvite(
+  db: Db,
   tenantId: string,
   platformUserId: string,
   now: Date = new Date()
-): ResendResult {
-  const tenant = getTenantById(db, tenantId);
+): Promise<ResendResult> {
+  const tenant = await getTenantById(db, tenantId);
   if (!tenant) throw Object.assign(new Error('Tenant not found'), { status: 404 });
-  const admin = db
-    .prepare(`SELECT id, status FROM users WHERE tenant_id = ? AND role = 'admin' ORDER BY created_at LIMIT 1`)
-    .get(tenantId) as { id: string; status: string } | undefined;
+  const admin = await db
+    .selectFrom('users')
+    .select(['id', 'status'])
+    .where('tenant_id', '=', tenantId)
+    .where('role', '=', 'admin')
+    .orderBy('created_at')
+    .limit(1)
+    .executeTakeFirst();
   if (!admin) throw Object.assign(new Error('Tenant has no admin user to invite'), { status: 409 });
   if (admin.status !== 'invited') {
     throw Object.assign(new Error('The first Admin has already accepted their invite — nothing to resend'), { status: 409 });
   }
 
-  const { rawToken, expiresAt } = issueInviteToken(db, { tenantId, userId: admin.id }, now);
-  db.prepare('UPDATE users SET invite_sent_at = ? WHERE id = ? AND tenant_id = ?').run(now.toISOString(), admin.id, tenantId);
+  const { rawToken, expiresAt } = await issueInviteToken(db, { tenantId, userId: admin.id }, now);
+  await db.updateTable('users').set({ invite_sent_at: now }).where('id', '=', admin.id).where('tenant_id', '=', tenantId).execute();
 
-  logAudit(db, {
+  await logAudit(db, {
     tenantId,
     actorType: 'platform',
     actorId: platformUserId,
@@ -278,25 +310,30 @@ export function resendFirstAdminInvite(
  * a billing-setup link isn't gated on the target user's account state (it never touches a
  * password), so it's always resendable once a subscription exists to attach a card to.
  */
-export function resendBillingSetupLink(
-  db: Database.Database,
+export async function resendBillingSetupLink(
+  db: Db,
   tenantId: string,
   platformUserId: string,
   now: Date = new Date()
-): ResendResult {
-  const tenant = getTenantById(db, tenantId);
+): Promise<ResendResult> {
+  const tenant = await getTenantById(db, tenantId);
   if (!tenant) throw Object.assign(new Error('Tenant not found'), { status: 404 });
   if (!tenant.stripe_customer_id) {
     throw Object.assign(new Error('Billing has not been attached for this tenant yet — nothing to send'), { status: 409 });
   }
-  const admin = db
-    .prepare(`SELECT id FROM users WHERE tenant_id = ? AND role = 'admin' ORDER BY created_at LIMIT 1`)
-    .get(tenantId) as { id: string } | undefined;
+  const admin = await db
+    .selectFrom('users')
+    .select('id')
+    .where('tenant_id', '=', tenantId)
+    .where('role', '=', 'admin')
+    .orderBy('created_at')
+    .limit(1)
+    .executeTakeFirst();
   if (!admin) throw Object.assign(new Error('Tenant has no admin user to bill'), { status: 409 });
 
-  const { rawToken, expiresAt } = issueBillingSetupToken(db, { tenantId, userId: admin.id }, now);
+  const { rawToken, expiresAt } = await issueBillingSetupToken(db, { tenantId, userId: admin.id }, now);
 
-  logAudit(db, {
+  await logAudit(db, {
     tenantId,
     actorType: 'platform',
     actorId: platformUserId,
@@ -330,13 +367,13 @@ export interface RateUpdateResult {
  * attachBilling will use whenever it eventually runs.
  */
 export async function updateTenantRate(
-  db: Database.Database,
+  db: Db,
   tenantId: string,
   newRateCents: number,
   billing: BillingProvider,
   actorId: string
 ): Promise<RateUpdateResult> {
-  const tenant = getTenantById(db, tenantId);
+  const tenant = await getTenantById(db, tenantId);
   if (!tenant) throw Object.assign(new Error('Tenant not found'), { status: 404 });
   if (!Number.isInteger(newRateCents) || newRateCents < 0) {
     throw Object.assign(new Error('rate must be a non-negative integer number of cents'), { status: 400 });
@@ -345,7 +382,7 @@ export async function updateTenantRate(
   if (!tenant.stripe_subscription_id) {
     // Pre-attach: nothing live to push to. The local column IS the source of truth until
     // attachBilling runs and reads it.
-    updateTenant(db, tenantId, { monthlyRateCents: newRateCents }, actorId);
+    await updateTenant(db, tenantId, { monthlyRateCents: newRateCents }, actorId);
     return { monthlyRateCents: newRateCents, pushedToStripe: false };
   }
 
@@ -362,12 +399,12 @@ export async function updateTenantRate(
   }
 
   // Stripe confirmed the swap — NOW (and only now) commit the local column to match.
-  updateTenant(db, tenantId, { monthlyRateCents: newRateCents }, actorId);
+  await updateTenant(db, tenantId, { monthlyRateCents: newRateCents }, actorId);
   // Distinct from tenant.settings_changed (which updateTenant already logs with a from/to
   // payload) — this one specifically attests that the change actually reached Stripe, not just
   // the local column, for the same defensibility reason attachBilling logs
   // billing.subscription_created as its own event alongside billing.customer_attached.
-  logAudit(db, {
+  await logAudit(db, {
     tenantId,
     actorType: 'platform',
     actorId,
@@ -398,13 +435,13 @@ export interface SetupFeeUpdateResult {
  * after attach). Pre-attach, this is a plain local column write (no Stripe call at all — there
  * is nothing to push to yet).
  */
-export function updateTenantSetupFee(
-  db: Database.Database,
+export async function updateTenantSetupFee(
+  db: Db,
   tenantId: string,
   newFeeCents: number | null,
   actorId: string
-): SetupFeeUpdateResult {
-  const tenant = getTenantById(db, tenantId);
+): Promise<SetupFeeUpdateResult> {
+  const tenant = await getTenantById(db, tenantId);
   if (!tenant) throw Object.assign(new Error('Tenant not found'), { status: 404 });
   if (newFeeCents !== null && (!Number.isInteger(newFeeCents) || newFeeCents < 0)) {
     throw Object.assign(new Error('setup fee must be a non-negative integer number of cents, or null for none'), { status: 400 });
@@ -418,12 +455,12 @@ export function updateTenantSetupFee(
     };
   }
 
-  updateTenant(db, tenantId, { setupFeeCents: newFeeCents }, actorId);
+  await updateTenant(db, tenantId, { setupFeeCents: newFeeCents }, actorId);
   return { setupFeeCents: newFeeCents, updated: true };
 }
 
 export async function provisionTenant(
-  db: Database.Database,
+  db: Db,
   input: ProvisionInput,
   platformUserId: string,
   billing: BillingProvider
@@ -431,11 +468,11 @@ export async function provisionTenant(
   // ── Validate up front (before any writes) — fails loud, never half-written ──
   if (!input.name?.trim()) bad('name is required');
   if (!isValidSlug(input.slug ?? '')) bad('a valid slug (lowercase letters, numbers, hyphens) is required');
-  if (isSlugTaken(db, input.slug)) conflict(`Slug "${input.slug}" is already in use`);
+  if (await isSlugTaken(db, input.slug)) conflict(`Slug "${input.slug}" is already in use`);
   if (!isValidTimeZone(input.timezone)) bad('a valid IANA timezone is required');
   if (!input.firstAdmin || !EMAIL_RE.test(input.firstAdmin.email ?? '')) bad('a valid first-admin email is required');
   if (!input.firstAdmin.name?.trim()) bad('first-admin name is required');
-  if (!input.templateId || !getTemplate(db, input.templateId)) bad('a valid requirements template is required');
+  if (!input.templateId || !(await getTemplate(db, input.templateId))) bad('a valid requirements template is required');
   if (input.monthlyRateCents !== undefined && (!Number.isInteger(input.monthlyRateCents) || input.monthlyRateCents < 0)) {
     bad('per-location rate must be a non-negative integer number of cents');
   }
@@ -447,28 +484,37 @@ export async function provisionTenant(
   }
 
   // ── 1. Atomic DB core (all-or-nothing) ──
-  const tx = db.transaction((): { tenant: Tenant; adminUserId: string; locationIds: string[] } => {
-    const tenant = createTenant(
-      db,
+  const core = await withTransaction(db, async (trx): Promise<{ tenant: Tenant; adminUserId: string; locationIds: string[] }> => {
+    const tenant = await createTenant(
+      trx,
       { name: input.name, slug: input.slug, monthlyRateCents: input.monthlyRateCents, setupFeeCents: input.setupFeeCents, timezone: input.timezone },
       platformUserId
     );
-    const admin = createUser(
-      db,
+    const admin = await createUser(
+      trx,
       tenant.id,
       { email: input.firstAdmin.email, name: input.firstAdmin.name, role: 'admin' }, // no password → 'invited'
       platformUserId,
       { locationIds: null, regionIds: null }, // org-wide (admin); scope checks skipped for role='admin'
       'admin'
     );
-    const locationIds = (input.locations ?? []).map(
-      (l) => createLocation(db, tenant.id, { name: l.name, address: l.address }, platformUserId).id
-    );
+    // Stage 0's catalogued N+1-in-.map() finding, live: recordBillingSnapshot (called by
+    // createLocation) reads the current active-location COUNT then inserts the next snapshot —
+    // running these concurrently (Promise.all) could interleave two reads of the same count and
+    // produce a WRONG billing snapshot (e.g. two locations both reading count=2, both writing
+    // count=3, losing the count=4 snapshot entirely). Sequential for...of preserves the same
+    // one-at-a-time behavior the original synchronous .map() had — required for correctness
+    // here, not just a mechanical await-insertion.
+    const locationIds: string[] = [];
+    for (const l of input.locations ?? []) {
+      const loc = await createLocation(trx, tenant.id, { name: l.name, address: l.address }, platformUserId);
+      locationIds.push(loc.id);
+    }
     // Template rules are attributed to the first Admin (requirement_rules.created_by → users(id));
     // the platform user isn't a tenant user, so it can't be the creator.
-    applyTemplate(db, tenant.id, input.templateId, admin.id);
+    await applyTemplate(trx, tenant.id, input.templateId, admin.id);
 
-    logAudit(db, {
+    await logAudit(trx, {
       tenantId: tenant.id,
       actorType: 'platform',
       actorId: platformUserId,
@@ -478,8 +524,7 @@ export async function provisionTenant(
       payload: { admin_user_id: admin.id, location_count: locationIds.length, template_id: input.templateId, timezone: input.timezone },
     });
     return { tenant, adminUserId: admin.id, locationIds };
-  });
-  const core = tx(); // COMMITS here
+  }); // COMMITS here
 
   // ── 2. Billing attach — AFTER commit (external call; can't be inside the DB tx) ──
   // No invite is issued here anymore (Slice 5a) — activateTenantOnFirstPayment mints it once

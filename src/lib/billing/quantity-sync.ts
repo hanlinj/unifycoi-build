@@ -1,35 +1,29 @@
 // Location-count → Stripe subscription quantity sync (Slice 5a, ADR-012-05).
 //
 // Why this is a separate poller and not inline in createLocation/updateLocation: those
-// functions run (in the provisioning path) INSIDE provisionTenant's db.transaction() callback,
-// and better-sqlite3 requires that callback to be fully synchronous — it throws
-// `TypeError('Transaction function cannot return a promise')` if it isn't (confirmed straight
-// from node_modules/better-sqlite3/lib/methods/transaction.js). A Stripe network call cannot
-// live inside that callback. So instead: createLocation/updateLocation/bulkImportLocations
-// keep doing exactly what they already did (an unconditional/conditional write to
-// billing_snapshots via recordBillingSnapshot, unchanged) — that write IS the trigger this
-// worker polls for. Same "commit synchronously, push to the external system afterward on a
-// separate cadence" shape as attachBilling's DB/Stripe boundary, just recurring instead of
-// one-shot.
+// functions run (in the provisioning path) inside provisionTenant's transaction, and this
+// split was originally forced by better-sqlite3 requiring that callback to be fully
+// synchronous — a Stripe call couldn't live inside one. Kysely/Postgres transactions ARE
+// async-capable (Phase 13 migration), so that specific constraint no longer applies, but the
+// separate-poller architecture is kept as-is this pass (foundation only — see provisioning.ts's
+// matching note). createLocation/updateLocation/bulkImportLocations keep doing exactly what
+// they already did (an unconditional/conditional write to billing_snapshots via
+// recordBillingSnapshot, unchanged) — that write IS the trigger this worker polls for. Same
+// "commit, push to the external system afterward on a separate cadence" shape as attachBilling's
+// DB/Stripe boundary, just recurring instead of one-shot.
 //
 // Quantity, not delta: a snapshot row is a point-in-time billable_locations count, not an
 // increment. Only the LATEST unsynced row per tenant needs a Stripe call — any earlier unsynced
 // row for the same tenant is a superseded intermediate value and is marked synced without its
 // own API call.
 
-import type Database from 'better-sqlite3';
+import type { Db } from '@/lib/db/client';
 import { logAudit } from '@/lib/audit';
 import type { BillingProvider } from './provider';
 
 export interface QuantitySyncResult {
   synced: number;
   failed: number;
-}
-
-interface UnsyncedSnapshot {
-  tenant_id: string;
-  billable_locations: number;
-  stripe_subscription_id: string;
 }
 
 /**
@@ -42,31 +36,30 @@ interface UnsyncedSnapshot {
  * quantity takes effect at the tenant's NEXT billing cycle, never a mid-month partial charge.
  */
 export async function syncBillingQuantities(
-  db: Database.Database,
+  db: Db,
   billing: BillingProvider,
   now: Date = new Date()
 ): Promise<QuantitySyncResult> {
-  // Ordered by rowid, not created_at: multiple snapshot rows for a tenant can land in the same
-  // millisecond, and ISO-string created_at ties resolve arbitrarily — rowid is a reliable,
-  // monotonically-increasing insertion-order tiebreaker (see provisioning.ts's attachBilling
-  // for the same fix).
-  const rows = db
-    .prepare(
-      `SELECT bs.tenant_id, bs.billable_locations, t.stripe_subscription_id
-       FROM billing_snapshots bs
-       JOIN tenants t ON t.id = bs.tenant_id
-       WHERE bs.changed = 1 AND bs.stripe_synced_at IS NULL AND t.stripe_subscription_id IS NOT NULL
-       ORDER BY bs.rowid ASC`
-    )
-    .all() as UnsyncedSnapshot[];
+  // Ordered by seq, not created_at: multiple snapshot rows for a tenant can land in the same
+  // millisecond, and timestamp ties resolve arbitrarily — seq (bigserial, Stage 4's rowid
+  // replacement — Postgres has no stable implicit row-order id) is a reliable, monotonically-
+  // increasing insertion-order tiebreaker (see provisioning.ts's attachBilling for the same fix).
+  const rows = await db
+    .selectFrom('billing_snapshots as bs')
+    .innerJoin('tenants as t', 't.id', 'bs.tenant_id')
+    .select(['bs.tenant_id', 'bs.billable_locations', 't.stripe_subscription_id'])
+    .where('bs.changed', '=', true)
+    .where('bs.stripe_synced_at', 'is', null)
+    .where('t.stripe_subscription_id', 'is not', null)
+    .orderBy('bs.seq', 'asc')
+    .execute();
 
   // Collapse to the latest row per tenant (rows are ASC, so a later Map.set wins).
-  const latestByTenant = new Map<string, UnsyncedSnapshot>();
-  for (const row of rows) latestByTenant.set(row.tenant_id, row);
+  const latestByTenant = new Map<string, { tenant_id: string; billable_locations: number; stripe_subscription_id: string }>();
+  for (const row of rows) latestByTenant.set(row.tenant_id, row as { tenant_id: string; billable_locations: number; stripe_subscription_id: string });
 
   let synced = 0;
   let failed = 0;
-  const nowIso = now.toISOString();
 
   for (const row of latestByTenant.values()) {
     try {
@@ -74,11 +67,13 @@ export async function syncBillingQuantities(
         subscriptionId: row.stripe_subscription_id,
         quantity: row.billable_locations,
       });
-      db.prepare(`UPDATE billing_snapshots SET stripe_synced_at = ? WHERE tenant_id = ? AND stripe_synced_at IS NULL`).run(
-        nowIso,
-        row.tenant_id
-      );
-      logAudit(db, {
+      await db
+        .updateTable('billing_snapshots')
+        .set({ stripe_synced_at: now })
+        .where('tenant_id', '=', row.tenant_id)
+        .where('stripe_synced_at', 'is', null)
+        .execute();
+      await logAudit(db, {
         tenantId: row.tenant_id,
         actorType: 'system',
         actorId: 'billing-sync-worker',

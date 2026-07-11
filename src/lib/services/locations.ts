@@ -1,9 +1,16 @@
 import { randomUUID } from 'crypto';
 import type Database from 'better-sqlite3';
+import type { Db } from '@/lib/db/client';
 import { TenantDB } from '@/lib/db/tenant';
 import { logAudit } from '@/lib/audit';
 import { parseCSV } from '@/lib/csv';
 import type { Scope } from '@/lib/scope';
+
+// Phase 13 migration, Stage 4: recordBillingSnapshot()/createLocation()/getLocationById() are
+// converted (hard dependencies of provisionTenant's location creation) — the REST of this file
+// (listLocations, updateLocation, bulkImportLocations, etc.) stays on the old synchronous
+// better-sqlite3 API until Stage 5 converts it properly; they call getLocationById()
+// synchronously without await and will not compile until then — expected.
 
 export interface Location {
   id: string;
@@ -53,23 +60,25 @@ export interface ImportResult {
   failures: { row: number; reasons: string[] }[];
 }
 
-function recordBillingSnapshot(db: Database.Database, tenantId: string): void {
-  const tenant = db.prepare('SELECT monthly_rate_cents FROM tenants WHERE id = ?').get(tenantId) as { monthly_rate_cents: number } | undefined;
+async function recordBillingSnapshot(db: Db, tenantId: string): Promise<void> {
+  const tenant = await db.selectFrom('tenants').select('monthly_rate_cents').where('id', '=', tenantId).executeTakeFirst();
   if (!tenant) return;
   const tdb = new TenantDB(db, tenantId);
-  const { count } = tdb.get<{ count: number }>("SELECT COUNT(*) as count FROM locations WHERE tenant_id = ? AND status = 'active'")!;
-  // rowid, not created_at: two locations created in the same millisecond (e.g. provisioning's
-  // batch) would tie on the ISO-string timestamp and resolve arbitrarily; rowid is a reliable,
+  const countRow = await tdb.get<{ count: string }>("SELECT COUNT(*) as count FROM locations WHERE tenant_id = $1 AND status = 'active'");
+  const count = Number(countRow!.count);
+  // seq, not created_at: two locations created in the same millisecond (e.g. provisioning's
+  // batch) would tie on the timestamp and resolve arbitrarily; seq (bigserial, Stage 4's
+  // rowid replacement — Postgres has no stable implicit row-order id) is a reliable,
   // monotonically-increasing insertion-order tiebreaker (Slice 5a — this flag drives the
   // billing quantity-sync worker's trigger).
-  const last = tdb.get<{ billable_locations: number }>('SELECT billable_locations FROM billing_snapshots WHERE tenant_id = ? ORDER BY rowid DESC LIMIT 1');
-  const changed = !last || last.billable_locations !== count ? 1 : 0;
-  tdb.insert('billing_snapshots', {
+  const last = await tdb.get<{ billable_locations: number }>('SELECT billable_locations FROM billing_snapshots WHERE tenant_id = $1 ORDER BY seq DESC LIMIT 1');
+  const changed = !last || last.billable_locations !== count;
+  await tdb.insert('billing_snapshots', {
     id: randomUUID(),
     billable_locations: count,
     amount_cents: count * tenant.monthly_rate_cents,
     changed,
-    created_at: new Date().toISOString(),
+    created_at: new Date(),
   });
 }
 
@@ -84,17 +93,17 @@ function findOrCreateRegion(tdb: TenantDB, regionName: string): string {
   return id;
 }
 
-export function createLocation(
-  db: Database.Database,
+export async function createLocation(
+  db: Db,
   tenantId: string,
   input: CreateLocationInput,
   actorId: string
-): LocationWithRegion {
+): Promise<LocationWithRegion> {
   const tdb = new TenantDB(db, tenantId);
   const id = randomUUID();
-  const now = new Date().toISOString();
+  const now = new Date();
 
-  tdb.insert('locations', {
+  await tdb.insert('locations', {
     id,
     region_id: input.regionId ?? null,
     name: input.name.trim(),
@@ -103,9 +112,9 @@ export function createLocation(
     created_at: now,
   });
 
-  recordBillingSnapshot(db, tenantId);
+  await recordBillingSnapshot(db, tenantId);
 
-  logAudit(db, {
+  await logAudit(db, {
     tenantId,
     actorType: 'user',
     actorId,
@@ -115,7 +124,7 @@ export function createLocation(
     payload: { name: input.name },
   });
 
-  return getLocationById(db, tenantId, id)!;
+  return (await getLocationById(db, tenantId, id))!;
 }
 
 export function listLocations(
@@ -147,21 +156,20 @@ export function listLocations(
   );
 }
 
-export function getLocationById(
-  db: Database.Database,
+export async function getLocationById(
+  db: Db,
   tenantId: string,
   locationId: string
-): LocationWithRegion | null {
+): Promise<LocationWithRegion | null> {
   const tdb = new TenantDB(db, tenantId);
-  return (
-    tdb.get<LocationWithRegion>(
-      `SELECT l.id, l.tenant_id, l.region_id, l.name, l.address, l.status, l.created_at,
-              r.name as region_name
-       FROM locations l LEFT JOIN regions r ON r.id = l.region_id
-       WHERE l.tenant_id = ? AND l.id = ?`,
-      [locationId]
-    ) ?? null
+  const row = await tdb.get<LocationWithRegion>(
+    `SELECT l.id, l.tenant_id, l.region_id, l.name, l.address, l.status, l.created_at,
+            r.name as region_name
+     FROM locations l LEFT JOIN regions r ON r.id = l.region_id
+     WHERE l.tenant_id = $1 AND l.id = $2`,
+    [locationId]
   );
+  return row ?? null;
 }
 
 export function updateLocation(
