@@ -5,7 +5,7 @@ correctness contract — the running pass count against Postgres is the tracking
 stages. Decision record: `docs/decisions.md` ADR-013-01 (rationale, fresh-baseline choice,
 Kysely choice, and the cross-stage invariants/landmines discovered along the way).
 
-**Running pass count: 584 / 1215** (as of Stage 8d). Every failure not yet converted has been
+**Running pass count: 598 / 1229** (as of Stage 9). Every failure not yet converted has been
 confirmed to be the same "old code calling the new async/Kysely API synchronously" shape — no
 suite has failed for a different, real-behavior reason.
 
@@ -34,8 +34,8 @@ suite has failed for a different, real-behavior reason.
 | 8b | notifications: `worker.ts`, `digest.ts`, `resend-webhook.ts` (+ its route), `notifications/renewal.ts`'s remaining un-converted function `applyExpirationFlip` (rest of the file converted in Stage 6b as a narrow portal-upload hard dependency), `services/manual-reminder.ts` (+ its route) — mechanical, no architecture change. Checked the claim for a multi-instance concurrency gap and found none (already safe by construction, corroborated by OPS-6 — see ADR-013-01); attached OPS-6's single-instance caveat at the digest/retention worker entry points (was orphaned for retention since Stage 8a) | ✅ done | `0c6c90f` |
 | 8c | audit exports: `exports/content.ts` + `exports/audit-export.ts` + `exports/worker.ts` + all three `app/api/exports/**` routes (deferred from Stage 7 — see ADR-013-01 and Shortcuts & gaps). Local `inClausePg` helper (not `reports/index.ts`'s SQLite one) for IN-clauses; caught and fixed a live invariant-2 landmine in `decryptedSensitiveFor`'s Sensitive-decrypt path | ✅ done | `2bfbd3d` |
 | 8d | the unclaimed `getRawDb` platform/billing surface (16 files, found by the pre-8c reconciliation sweep) — the `/platform` UI (layout, fleet page, provisioning page), `billing/setup/{confirm route,page}`, and 10 platform-tenant/webhook routes. All 16 triaged mechanical (0 deferred to Stage 9) before converting. Found 13 files also missing `await` on the now-async callee, and 3 non-`async` page/layout components promoted to `async` Server Components. New test harness (fresh-singleton + ephemeral DB via `jest.resetModules()`) makes all 16 genuinely test-reachable for the first time — see ADR-013-01 | ✅ done | `d7aae9b` |
-| 9 | reports/search — last, depends on nearly everything; fixes the two `reports/builders.ts` N+1 spots, the `MIN(json_extract(...))` type-safety spot found during Stage 5's post-hoc JSON1 audit (the one remaining known JSON1 spot as of Stage 6b — see the cross-stage invariants below, items 5/6), and `search.ts`'s `rowid` spot (re-scoped here from the original Stage 8 charter — unrelated to notifications/retention/audit-exports, more naturally reports/search's territory; found during Stage 8's pre-kickoff scoping trace) | not started | — |
-| 10 | dev scripts (`dev-seed.ts`, `eval-test-dataset.ts`), cutover cleanup, remove `better-sqlite3` dependency | not started | — |
+| 9 | reports/search — the last conversion stage, converted reports-then-search in one stage (separable call graphs, but `search.ts`'s only cross-subsystem dependency is `inClause` from `reports/index.ts`, so reports converts first to make it Postgres-aware once, no shim/handoff). `reports/index.ts` (+ the real `inClause` fix, retiring Stage 8c's two local shims), `reports/builders.ts` (the `MIN(json_extract(...))` → `->>`/`DISTINCT ON` rewrite, invariants 5–6; the `coiCoverageSummary` jsonb `JSON.parse()` fix, invariant 2, caught pre-flight), `search/search.ts` (the `rowid`→`seq` fix), both routes. `renewalForecast`'s N+1 collapsed cleanly; `vendorRoster`'s N+1 deferred (involved) — see Shortcuts & gaps. **Closing deliverable: the Stage-10-readiness grep is clean — `better-sqlite3` surface in `src/` is empty.** | ✅ done | `6dc8252` |
+| 10 | dev scripts (`dev-seed.ts`, `eval-test-dataset.ts`), cutover cleanup, remove `better-sqlite3` dependency, remove the 17 dead `src/migrations/*.sql` files. Confirmed safe by Stage 9's readiness grep — see ADR-013-01 | not started | — |
 
 Stage boundaries and reasoning: see the Phase 13 kickoff investigation report (chat, not
 duplicated here) for the full original module map and per-stage rationale.
@@ -89,6 +89,19 @@ duplicated here) for the full original module map and per-stage rationale.
   clean — see the new section immediately below. **This does not retire the obligation for a
   final pass before Stage 10** — it found a bigger gap than expected, which is itself a reason to
   re-run this sweep again once Stage 8c/9 land, not to consider reconciliation "done."
+- **`reports/builders.ts`'s `vendorRoster` N+1, deliberately deferred (Stage 9) — a post-migration
+  performance item, not a correctness gap.** Four queries per vendor (vendor row, its locations,
+  `coiCoverageSummary`'s latest-COI-document lookup, latest-extraction lookup), fanning out with
+  the full org-wide vendor count — unbounded, unlike Stage 5's manager-bounded N+1. Converted
+  correctly (async, behavior preserved, the jsonb `JSON.parse()` landmine fixed) but NOT
+  collapsed: a clean collapse needs two more `DISTINCT ON` batches (latest active COI per vendor,
+  latest extraction per document) and a reshape of `coiCoverageSummary`'s contract from
+  one-vendor-at-a-time to batch — a real rewrite, not a mechanical one, and judged out of scope
+  per Stage 9's explicit "correctness first, don't expand scope on the involved one" instruction.
+  `renewalForecast`'s sibling N+1 WAS collapsed (two batched `IN (...)` queries) — same file,
+  different judgment call, both explained in ADR-013-01's Stage 9 entry. **Trigger:** before this
+  report is run at meaningfully large org-wide vendor counts (tens to hundreds); today's design
+  partner / pilot scale (`docs/launch-prep.md`'s v1 definition) doesn't hit this.
 
 ## Discovered, unassigned surface (pre-8c reconciliation, 2026-07-11) — CLOSED in Stage 8d
 
@@ -149,7 +162,7 @@ repo-wide currently fails on pre-existing, out-of-scope violations; see below).
   auth/tokens, tenants/provisioning/billing) is 100% clean against both rules — checked directly,
   not assumed.
 - **Stage 5's own files are 100% clean.**
-- **Stage 6a's, 6b's, 7's, 8a's, 8b's, 8c's, and 8d's own files are 100% clean** — `vendors.ts`, `resend-invite.ts`,
+- **Stage 6a's, 6b's, 7's, 8a's, 8b's, 8c's, 8d's, and 9's own files are 100% clean** — `vendors.ts`, `resend-invite.ts`,
   `decision.ts`, `invite-token.ts`, `vendor-token.ts`, `vendor-fsm.ts`, `vendor-onboarding.ts`,
   `notifications/renewal.ts` (now converted in full, including `applyExpirationFlip`),
   `verification/run.ts`, `requirements/resolver.ts`, `requirements/re-eval.ts`,
@@ -157,13 +170,14 @@ repo-wide currently fails on pre-existing, out-of-scope violations; see below).
   `instrumentation.ts`, `notifications/{worker,digest,resend-webhook}.ts`,
   `services/manual-reminder.ts`, `exports/{content,audit-export,worker}.ts`,
   `workers/bootstrap.ts`, all 16 Stage 8d files (the `/platform` UI + billing/webhook routes),
-  and every converted route/page checked directly.
-- **40 pre-existing violations remain** (down from 142 after Stage 5, 101 after Stage 6b, 73
-  after Stage 7, 70 after Stage 8a, 60 after Stage 8b, 44 after Stage 8c, as each stage clears
-  its own portion), all in NOT-yet-converted modules — `reports/*`, `search/search.ts` — or in
-  pre-existing React client-component floating promises unrelated to this migration entirely.
-  Left untouched — out of scope until those modules' own stages, flagged here so each stage
-  clears its own portion rather than rediscovering this from scratch.
+  `reports/{index,builders}.ts`, `search/search.ts`, both routes, and every converted route/page
+  checked directly. **Zero converted files remain outside this clean list** — Stage 9 was the
+  last conversion stage.
+- **34 pre-existing violations remain** (down from 142 after Stage 5, 101 after Stage 6b, 73
+  after Stage 7, 70 after Stage 8a, 60 after Stage 8b, 44 after Stage 8c, 40 after Stage 8d, as
+  each stage cleared its own portion), entirely in pre-existing React client-component floating
+  promises unrelated to this migration — no backend module has any left. Out of scope for
+  Phase 13 entirely (not tied to any remaining stage) — a separate cleanup if ever prioritized.
 
 ## What "green" means each stage
 
