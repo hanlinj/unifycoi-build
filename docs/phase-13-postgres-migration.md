@@ -5,7 +5,7 @@ correctness contract — the running pass count against Postgres is the tracking
 stages. Decision record: `docs/decisions.md` ADR-013-01 (rationale, fresh-baseline choice,
 Kysely choice, and the cross-stage invariants/landmines discovered along the way).
 
-**Running pass count: 469 / 1100** (as of Stage 5). Every failure not yet converted has been
+**Running pass count: 488 / 1119** (as of Stage 6a). Every failure not yet converted has been
 confirmed to be the same "old code calling the new async/Kysely API synchronously" shape — no
 suite has failed for a different, real-behavior reason.
 
@@ -27,7 +27,8 @@ suite has failed for a different, real-behavior reason.
 | 3 | `auth.ts`, `rate-limit.ts`, `password-reset.ts` (+ `notifications/queue.ts` hard dependency), the 5 auth routes + reset-password page | ✅ done | `d70db30` |
 | 4 | `tenants.ts`, `provisioning.ts`, `requirements/templates.ts`, `billing/{quantity-sync,worker,stripe-webhook}.ts` (+ narrow `createUser`/`createLocation` slices) | ✅ done | `dd8393b` |
 | 5 | locations/users/dashboards — the biggest tenant-scoped CRUD cluster; finishes Stage 4's partial `users.ts`/`locations.ts` conversions, plus remaining `COLLATE NOCASE`/`INSERT OR IGNORE` spots and the `listUsers` N+1. Also: the `chase.ts` JSON1→jsonb rewrite, its `MIN()`/ordering type-safety fix (and the `expiryBoundaryMs` DATE_ONLY regression that fix nearly introduced — caught pre-commit), a durable normalize-on-write fix for unpadded expiration dates (`toIsoDateStr`, `earliestExpiration`), and the repo's first ESLint infra (see below) | ✅ done | `c9d9841` |
-| 6 | vendors + vendor onboarding portal (`/v/[token]`) — vendor lifecycle, invites, FSM; includes its own transaction-boundary rewrites | not started | — |
+| 6a | vendors operator-side data access: `vendors.ts`, `resend-invite.ts`, `decision.ts`, the shared `issueInviteToken()` choke point (`src/lib/auth/invite-token.ts`), and 5 of 6 `src/app/api/vendors/**` routes. Lands **revoke-on-issue** for vendor invite tokens — a deliberate security change, see ADR-013-01. `add-to-locations.ts` + its route deferred — see Shortcuts & gaps | ✅ done | `9c06fe2` |
+| 6b | vendor onboarding portal (`/v/[token]`): `vendor-token.ts`, `vendor-fsm.ts`, `vendor-onboarding.ts`, the portal routes/page. Must add the `revoked_at IS NULL` check to `validateInviteToken()` — 6a only writes revocation, reading it is 6b's job | not started | — |
 | 7 | verification/requirements engine — depends on stages 4–6 | not started | — |
 | 8 | notifications + retention + audit exports — the cross-tenant worker group, migrated together (claim-then-process pattern); fixes `search.ts`'s `rowid` spot, the `notifications/queue.ts` N+1 (`notifyTenantAdmins`, already fixed in Stage 3), and the `json_extract` spot in `notifications/renewal.ts` (see the cross-stage invariants below, items 8/9) | not started | — |
 | 9 | reports/search — last, depends on nearly everything; fixes the two `reports/builders.ts` N+1 spots AND the `MIN(json_extract(...))` type-safety spot found during Stage 5's post-hoc JSON1 audit (see the cross-stage invariants below, items 8/9) | not started | — |
@@ -35,6 +36,33 @@ suite has failed for a different, real-behavior reason.
 
 Stage boundaries and reasoning: see the Phase 13 kickoff investigation report (chat, not
 duplicated here) for the full original module map and per-stage rationale.
+
+## Shortcuts & gaps
+
+- **`add-to-locations.ts` + `POST /api/vendors/:id/locations` (discovered Stage 6a, not
+  converted).** `addVendorToLocations()` calls `runRulesOnlyReeval()` → `runVerification()` →
+  `loadExtractionBundle()` (`src/lib/verification/run.ts`) and `resolveRequirements()`
+  (`src/lib/requirements/resolver.ts`) — genuinely Stage 7's charter (the whole verification
+  pipeline orchestrator), not a narrow slice like prior stages' hard dependencies. These same
+  functions are also called from the portal's submit route (Stage 6b) and
+  `src/lib/requirements/re-eval.ts` (a third, separate consumer) — converting them now would
+  silently do a meaningful chunk of Stage 7's work as an unplanned expansion of Stage 6a, well
+  past "the four operator files." Left un-converted this stage; both the service function and
+  its route still import the removed `getRawDb` and will not compile until Stage 7 (or a
+  dedicated slice of it) lands. Not silently skipped — flagged here and in ADR-013-01.
+- **`validateInviteToken()`'s `revoked_at` check is NOT yet wired up.** Stage 6a writes
+  `revoked_at` correctly (see ADR-013-01's revoke-on-issue entry) but does not touch the
+  portal-side read path — a revoked token still validates successfully until Stage 6b adds the
+  `WHERE revoked_at IS NULL` check. This is a real, temporary gap (the column exists and is
+  correctly populated; nothing reads it yet), not an oversight — explicitly Stage 6b's opening
+  task, not deferred silently.
+- **`GET /api/vendors/:id`'s `flags_json`/`evidence_json` re-`JSON.stringify()` (Stage 6a) is a
+  temporary shim, tied to one specific file.** `src/app/vendors/[vendorId]/page.tsx` still does
+  its own `JSON.parse()` on `flags_json` (not converted this stage). **Remove the
+  re-stringify in `src/app/api/vendors/[id]/route.ts` the moment that page converts** — once its
+  own `JSON.parse()` call is gone, the re-stringify becomes active double-encoding (a jsonb
+  object stringified for no consumer, immediately breaking whatever replaces the old
+  `JSON.parse()` call). See ADR-013-01 invariant 9 for the full mechanism.
 
 ## Repo infrastructure added mid-migration
 
