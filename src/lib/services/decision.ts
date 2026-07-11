@@ -2,10 +2,10 @@
 // Per-location status writes (invariant #5). All mutations go through TenantDB.
 
 import { randomUUID } from 'crypto';
-import type Database from 'better-sqlite3';
+import type { Db } from '@/lib/db/client';
 import { TenantDB } from '@/lib/db/tenant';
 import { logAudit } from '@/lib/audit';
-import { generateInviteToken } from '@/lib/auth/invite-token';
+import { issueInviteToken } from '@/lib/auth/invite-token';
 import { logDevInviteUrl } from '@/lib/dev/log-invite-url';
 import { notifyTenantAdmins } from '@/lib/notifications/queue';
 
@@ -15,7 +15,7 @@ const MIN_REASONING_LENGTH = 10;
 export type DecisionAction = 'approve' | 'reject' | 'request_correction';
 
 export interface DecisionInput {
-  db: Database.Database;
+  db: Db;
   tenantId: string;
   vendorId: string;
   actorUserId: string;
@@ -29,7 +29,7 @@ export interface DecisionInput {
 // ── Accept uncertain evaluation ───────────────────────────────────────────────
 
 export interface AcceptEvaluationInput {
-  db: Database.Database;
+  db: Db;
   tenantId: string;
   vendorId: string;
   evaluationId: string;
@@ -46,7 +46,7 @@ export class AcceptEvaluationError extends Error {
   }
 }
 
-export function acceptUncertainEvaluation(input: AcceptEvaluationInput): void {
+export async function acceptUncertainEvaluation(input: AcceptEvaluationInput): Promise<void> {
   const { db, tenantId, vendorId, evaluationId, actorUserId, reasoning } = input;
 
   if (!reasoning || reasoning.trim().length < MIN_REASONING_LENGTH) {
@@ -59,9 +59,9 @@ export function acceptUncertainEvaluation(input: AcceptEvaluationInput): void {
   const tdb = new TenantDB(db, tenantId);
 
   interface EvalRow { id: string; vendor_id: string; requirement_key: string; outcome: string }
-  const evaluation = tdb.get<EvalRow>(
+  const evaluation = await tdb.get<EvalRow>(
     `SELECT id, vendor_id, requirement_key, outcome FROM requirement_evaluations
-     WHERE tenant_id = ? AND id = ? AND vendor_id = ?`,
+     WHERE tenant_id = $1 AND id = $2 AND vendor_id = $3`,
     [evaluationId, vendorId]
   );
 
@@ -73,7 +73,7 @@ export function acceptUncertainEvaluation(input: AcceptEvaluationInput): void {
     );
   }
 
-  logAudit(db, {
+  await logAudit(db, {
     tenantId,
     actorType: 'user',
     actorId: actorUserId,
@@ -105,14 +105,14 @@ export class DecisionError extends Error {
   }
 }
 
-export function applyDecision(input: DecisionInput): DecisionResult {
+export async function applyDecision(input: DecisionInput): Promise<DecisionResult> {
   const { db, tenantId, vendorId, actorUserId, action, locationIds, reason, acceptedUncertaintyIds, deficientRequirements } = input;
   const tdb = new TenantDB(db, tenantId);
-  const now = new Date().toISOString();
+  const now = new Date();
 
   interface VendorRow { id: string; business_name: string; contact_email: string | null }
-  const vendor = tdb.get<VendorRow>(
-    'SELECT id, business_name, contact_email FROM vendors WHERE tenant_id = ? AND id = ?',
+  const vendor = await tdb.get<VendorRow>(
+    'SELECT id, business_name, contact_email FROM vendors WHERE tenant_id = $1 AND id = $2',
     [vendorId]
   );
   if (!vendor) throw new DecisionError('Vendor not found', 'NOT_FOUND');
@@ -122,9 +122,10 @@ export function applyDecision(input: DecisionInput): DecisionResult {
     const skipped: string[] = [];
 
     for (const locId of locationIds) {
-      interface VLRow { id: string; location_id: string; status: string; flags_json: string | null }
-      const vl = tdb.get<VLRow>(
-        'SELECT id, location_id, status, flags_json FROM vendor_locations WHERE tenant_id = ? AND vendor_id = ? AND location_id = ?',
+      // flags_json is jsonb — Kysely/pg returns it already parsed, never a string to JSON.parse().
+      interface VLRow { id: string; location_id: string; status: string; flags_json: Record<string, unknown> | null }
+      const vl = await tdb.get<VLRow>(
+        'SELECT id, location_id, status, flags_json FROM vendor_locations WHERE tenant_id = $1 AND vendor_id = $2 AND location_id = $3',
         [vendorId, locId]
       );
       if (!vl) { skipped.push(locId); continue; }
@@ -137,17 +138,17 @@ export function applyDecision(input: DecisionInput): DecisionResult {
       }
 
       if (action === 'approve') {
-        const flags = vl.flags_json ? JSON.parse(vl.flags_json) : {};
+        const flags = vl.flags_json ? { ...vl.flags_json } : {};
         delete flags.action_needed;
         const newFlags = Object.keys(flags).length > 0 ? JSON.stringify(flags) : null;
 
-        tdb.update(
+        await tdb.update(
           'vendor_locations',
           { status: 'approved', approved_by: actorUserId, approved_at: now, flags_json: newFlags },
           { vendor_id: vendorId, location_id: locId }
         );
 
-        logAudit(db, {
+        await logAudit(db, {
           tenantId,
           actorType: 'user',
           actorId: actorUserId,
@@ -161,13 +162,13 @@ export function applyDecision(input: DecisionInput): DecisionResult {
           },
         });
       } else {
-        tdb.update(
+        await tdb.update(
           'vendor_locations',
           { status: 'declined' },
           { vendor_id: vendorId, location_id: locId }
         );
 
-        logAudit(db, {
+        await logAudit(db, {
           tenantId,
           actorType: 'user',
           actorId: actorUserId,
@@ -186,7 +187,7 @@ export function applyDecision(input: DecisionInput): DecisionResult {
     // notification per decline, to all admins. (Recipient choice documented in the
     // Phase 7 checkpoint — the spec catalog has no dedicated declined-vendor row.)
     if (action === 'reject' && updated.length > 0) {
-      notifyTenantAdmins(db, tenantId, {
+      await notifyTenantAdmins(db, tenantId, {
         type: 'vendor_declined',
         vendor_id: vendorId,
         vendor_name: vendor.business_name,
@@ -199,10 +200,10 @@ export function applyDecision(input: DecisionInput): DecisionResult {
   }
 
   // request_correction: ALL under_review locations → onboarding + action_needed flag
-  interface VLRow { id: string; location_id: string; status: string; flags_json: string | null }
-  const underReview = tdb.all<VLRow>(
+  interface VLRow { id: string; location_id: string; status: string; flags_json: Record<string, unknown> | null }
+  const underReview = await tdb.all<VLRow>(
     `SELECT id, location_id, status, flags_json FROM vendor_locations
-     WHERE tenant_id = ? AND vendor_id = ? AND status = 'under_review'`,
+     WHERE tenant_id = $1 AND vendor_id = $2 AND status = 'under_review'`,
     [vendorId]
   );
 
@@ -211,33 +212,30 @@ export function applyDecision(input: DecisionInput): DecisionResult {
   }
 
   for (const vl of underReview) {
-    const flags = vl.flags_json ? JSON.parse(vl.flags_json) : {};
+    const flags = vl.flags_json ? { ...vl.flags_json } : {};
     flags.action_needed = true;
-    tdb.update(
+    await tdb.update(
       'vendor_locations',
       { status: 'onboarding', flags_json: JSON.stringify(flags) },
       { vendor_id: vendorId, location_id: vl.location_id }
     );
   }
 
-  const { rawToken, tokenHash } = generateInviteToken();
-  logDevInviteUrl(rawToken, 'correction request');
-  const inviteId = randomUUID();
-  const expiresAt = new Date(Date.now() + CORRECTION_INVITE_LIFETIME_MS).toISOString();
-
-  tdb.insert('invites', {
-    id: inviteId,
-    vendor_id: vendorId,
-    inviter_user_id: actorUserId,
-    token: tokenHash,
-    token_expires_at: expiresAt,
+  // Routes through the shared revoke-on-issue choke point (ADR-013-01) — a correction
+  // request revokes ANY prior still-live invite for this vendor, regardless of purpose
+  // (e.g. a still-outstanding onboarding link becomes invalid the moment a correction is
+  // requested), not just prior correction tokens.
+  const { rawToken, inviteId, expiresAt } = await issueInviteToken(db, {
+    tenantId,
+    vendorId,
+    inviterUserId: actorUserId,
     purpose: 'correction',
-    delivery_state: 'sent',
-    created_at: now,
+    ttlMs: CORRECTION_INVITE_LIFETIME_MS,
   });
+  logDevInviteUrl(rawToken, 'correction request');
 
   if (vendor.contact_email) {
-    tdb.insert('notifications', {
+    await tdb.insert('notifications', {
       id: randomUUID(),
       recipient_type: 'vendor',
       recipient_ref: vendor.contact_email,
@@ -251,7 +249,7 @@ export function applyDecision(input: DecisionInput): DecisionResult {
         vendor_id: vendorId,
         vendor_name: vendor.business_name,
         invite_path: `/v/${rawToken}`,
-        expires_at: expiresAt,
+        expires_at: expiresAt.toISOString(),
         ...(reason ? { reason } : {}),
         ...(deficientRequirements?.length ? { deficient_requirements: deficientRequirements } : {}),
       }),
@@ -259,7 +257,7 @@ export function applyDecision(input: DecisionInput): DecisionResult {
     });
   }
 
-  logAudit(db, {
+  await logAudit(db, {
     tenantId,
     actorType: 'user',
     actorId: actorUserId,

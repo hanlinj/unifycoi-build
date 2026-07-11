@@ -4,7 +4,7 @@
 // resolved by an Admin with required written reasoning, logged to the audit trail.
 
 import { NextResponse } from 'next/server';
-import { getRawDb } from '@/lib/db/client';
+import { getDb } from '@/lib/db/client';
 import { requireTenantAuth, isResponse, forbidden, badRequest, notFound, conflict } from '@/lib/api';
 import { acceptUncertainEvaluation, AcceptEvaluationError } from '@/lib/services/decision';
 
@@ -33,8 +33,8 @@ export async function POST(
   const reasoning = typeof b.reasoning === 'string' ? b.reasoning : '';
 
   try {
-    acceptUncertainEvaluation({
-      db: getRawDb(),
+    await acceptUncertainEvaluation({
+      db: getDb(),
       tenantId: auth.tenantId,
       vendorId: params.id,
       evaluationId: params.evalId,

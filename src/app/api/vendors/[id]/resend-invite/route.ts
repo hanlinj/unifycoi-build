@@ -4,7 +4,7 @@
 // vendor's locations in scope (mirrors POST /api/vendors/invite).
 
 import { NextResponse } from 'next/server';
-import { getRawDb } from '@/lib/db/client';
+import { getDb } from '@/lib/db/client';
 import { TenantDB } from '@/lib/db/tenant';
 import { requireTenantAuth, isResponse, forbidden, notFound, badRequest } from '@/lib/api';
 import { resolveScope, scopeIncludesLocation } from '@/lib/scope';
@@ -21,21 +21,21 @@ export async function POST(
   if (isResponse(auth)) return auth;
   if (!auth.tenantId) return forbidden();
 
-  const db = getRawDb();
+  const db = getDb();
   const tdb = new TenantDB(db, auth.tenantId);
 
   // Scope check: the vendor must touch at least one in-scope location.
-  const locs = tdb.all<{ location_id: string }>(
-    'SELECT location_id FROM vendor_locations WHERE tenant_id = ? AND vendor_id = ?',
+  const locs = await tdb.all<{ location_id: string }>(
+    'SELECT location_id FROM vendor_locations WHERE tenant_id = $1 AND vendor_id = $2',
     [params.id]
   );
   if (locs.length === 0) return notFound('Vendor not found');
-  const scope = resolveScope(db, auth.tenantId, auth.sub, auth.role);
+  const scope = await resolveScope(db, auth.tenantId, auth.sub, auth.role);
   const inScope = locs.some((l) => scopeIncludesLocation(scope, l.location_id));
   if (!inScope) return forbidden();
 
   try {
-    const result = resendInvite(db, auth.tenantId, params.id, auth.sub);
+    const result = await resendInvite(db, auth.tenantId, params.id, auth.sub);
     return NextResponse.json({ data: { invite_id: result.inviteId, token_expires_at: result.tokenExpiresAt } });
   } catch (err) {
     if (err instanceof ResendInviteError) {

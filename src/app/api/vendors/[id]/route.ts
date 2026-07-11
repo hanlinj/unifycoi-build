@@ -5,7 +5,7 @@
 // Sensitive fields (TIN, ACH account/routing) are masked server-side for non-Admin (invariant #8).
 
 import { NextResponse } from 'next/server';
-import { getRawDb } from '@/lib/db/client';
+import { getDb } from '@/lib/db/client';
 import { TenantDB } from '@/lib/db/tenant';
 import { requireTenantAuth, isResponse, forbidden, notFound } from '@/lib/api';
 import { resolveScope, scopeIncludesLocation } from '@/lib/scope';
@@ -28,7 +28,10 @@ interface VendorLocationRow {
   location_id: string;
   location_name: string;
   status: string;
-  flags_json: string | null;
+  // jsonb — Kysely/pg returns it already parsed; re-stringified before the response goes out
+  // to preserve the existing wire contract (src/app/vendors/[vendorId]/page.tsx still does its
+  // own JSON.parse() on this field — not part of this stage's scope to touch).
+  flags_json: Record<string, unknown> | null;
   approved_by: string | null;
   approved_at: string | null;
 }
@@ -57,7 +60,7 @@ interface AdvisoryRow {
   key: string;
   severity: string;
   message: string;
-  evidence_json: string;
+  evidence_json: Record<string, unknown>; // jsonb — see the flags_json note above
 }
 
 interface DocumentRow {
@@ -78,24 +81,24 @@ export async function GET(
   const vendorId = params.id;
   const tenantId = auth.tenantId;
   const isAdmin = auth.role === 'admin';
-  const db = getRawDb();
+  const db = getDb();
   const tdb = new TenantDB(db, tenantId);
 
   // Load vendor
-  const vendor = tdb.get<VendorRow>(
+  const vendor = await tdb.get<VendorRow>(
     `SELECT id, business_name, trade, contact_name, contact_email, contact_phone
-     FROM vendors WHERE tenant_id = ? AND id = ?`,
+     FROM vendors WHERE tenant_id = $1 AND id = $2`,
     [vendorId]
   );
   if (!vendor) return notFound('Vendor not found');
 
   // Load per-location statuses with location names
-  const allLocations = tdb.all<VendorLocationRow>(
+  const allLocations = await tdb.all<VendorLocationRow>(
     `SELECT vl.id, vl.location_id, l.name AS location_name, vl.status, vl.flags_json,
             vl.approved_by, vl.approved_at
      FROM vendor_locations vl
      JOIN locations l ON l.id = vl.location_id AND l.tenant_id = vl.tenant_id
-     WHERE vl.tenant_id = ? AND vl.vendor_id = ?
+     WHERE vl.tenant_id = $1 AND vl.vendor_id = $2
      ORDER BY l.name`,
     [vendorId]
   );
@@ -104,7 +107,7 @@ export async function GET(
   // only if ≥1 of the vendor's locations is in their scope, and then ONLY their in-scope
   // location rows. Out-of-scope → uniform 404 (enumeration-resistant, same shape/code as a
   // genuinely-missing vendor — Search.md). Admin (scope.locationIds === null) sees all rows.
-  const scope = resolveScope(db, tenantId, auth.sub, auth.role);
+  const scope = await resolveScope(db, tenantId, auth.sub, auth.role);
   const locations = scope.locationIds === null
     ? allLocations
     : allLocations.filter((vl) => scopeIncludesLocation(scope, vl.location_id));
@@ -112,7 +115,7 @@ export async function GET(
   if (!isAdmin && locations.length === 0) {
     // The vendor exists but is entirely outside the caller's scope — a real out-of-scope
     // access attempt. Log the security event (no Sensitive values), then 404.
-    logAudit(db, {
+    await logAudit(db, {
       tenantId,
       actorType: 'user',
       actorId: auth.sub,
@@ -129,17 +132,17 @@ export async function GET(
   }
 
   // Record the in-scope view (standard-access grain) — powers Search recent-viewed. No Sensitive.
-  logAudit(db, {
+  await logAudit(db, {
     tenantId, actorType: 'user', actorId: auth.sub,
     eventType: 'vendor.viewed', targetType: 'vendor', targetId: vendorId,
     payload: { role: auth.role },
   });
 
   // Documents (metadata only — no storage_key, no encryption_json)
-  const documents = tdb.all<DocumentRow>(
+  const documents = await tdb.all<DocumentRow>(
     `SELECT id, doc_type, original_filename, uploaded_at
      FROM documents
-     WHERE tenant_id = ? AND vendor_id = ? AND state = 'active' AND superseded_by IS NULL
+     WHERE tenant_id = $1 AND vendor_id = $2 AND state = 'active' AND superseded_by IS NULL
      ORDER BY uploaded_at DESC`,
     [vendorId]
   );
@@ -159,7 +162,7 @@ export async function GET(
           location_id: vl.location_id,
           location_name: vl.location_name,
           status: vl.status,
-          flags_json: vl.flags_json,
+          flags_json: vl.flags_json ? JSON.stringify(vl.flags_json) : null,
         })),
         documents: documents.map((d) => ({
           id: d.id,
@@ -172,36 +175,40 @@ export async function GET(
   }
 
   // Admin view: full workbench — latest verification run + evaluations + advisories
-  const latestRun = tdb.get<VerificationRunRow>(
+  const latestRun = await tdb.get<VerificationRunRow>(
     `SELECT id, trigger, recommendation, created_at
      FROM verification_runs
-     WHERE tenant_id = ? AND vendor_id = ?
+     WHERE tenant_id = $1 AND vendor_id = $2
      ORDER BY created_at DESC
      LIMIT 1`,
     [vendorId]
   );
 
-  let verificationRun: (VerificationRunRow & { evaluations: EvaluationRow[]; advisories: AdvisoryRow[] }) | null = null;
+  let verificationRun: (VerificationRunRow & { evaluations: EvaluationRow[]; advisories: (Omit<AdvisoryRow, 'evidence_json'> & { evidence_json: string })[] }) | null = null;
 
   if (latestRun) {
-    const evaluations = tdb.all<EvaluationRow>(
+    const evaluations = await tdb.all<EvaluationRow>(
       `SELECT id, location_id, requirement_key, required_value, extracted_value_ref,
               comparison_result, confidence_band, outcome, note
        FROM requirement_evaluations
-       WHERE tenant_id = ? AND run_id = ?
+       WHERE tenant_id = $1 AND run_id = $2
        ORDER BY location_id, requirement_key`,
       [latestRun.id]
     );
 
-    const advisories = tdb.all<AdvisoryRow>(
+    const advisories = await tdb.all<AdvisoryRow>(
       `SELECT id, key, severity, message, evidence_json
        FROM engine_advisories
-       WHERE tenant_id = ? AND verification_run_id = ?
+       WHERE tenant_id = $1 AND verification_run_id = $2
        ORDER BY severity DESC, key`,
       [latestRun.id]
     );
 
-    verificationRun = { ...latestRun, evaluations, advisories };
+    verificationRun = {
+      ...latestRun,
+      evaluations,
+      advisories: advisories.map((a) => ({ ...a, evidence_json: JSON.stringify(a.evidence_json) })),
+    };
   }
 
   return NextResponse.json({
@@ -219,7 +226,7 @@ export async function GET(
         location_id: vl.location_id,
         location_name: vl.location_name,
         status: vl.status,
-        flags_json: vl.flags_json,
+        flags_json: vl.flags_json ? JSON.stringify(vl.flags_json) : null,
         approved_by: vl.approved_by,
         approved_at: vl.approved_at,
       })),

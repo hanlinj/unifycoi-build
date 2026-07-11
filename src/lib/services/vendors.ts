@@ -1,8 +1,9 @@
 import { randomUUID } from 'crypto';
-import type Database from 'better-sqlite3';
+import type { Db } from '@/lib/db/client';
 import { TenantDB } from '@/lib/db/tenant';
+import { withTransaction } from '@/lib/db/transaction';
 import { logAudit } from '@/lib/audit';
-import { generateInviteToken } from '@/lib/auth/invite-token';
+import { issueInviteToken } from '@/lib/auth/invite-token';
 import { logDevInviteUrl } from '@/lib/dev/log-invite-url';
 
 // Single shared trade enum (see src/lib/trades.ts) — re-exported for existing importers.
@@ -41,16 +42,17 @@ export type CreateInviteResult = InviteCreated | InviteDuplicate;
 
 const INVITE_LIFETIME_MS = 14 * 24 * 60 * 60 * 1000;
 
-export function createVendorInvite(
-  db: Database.Database,
+export async function createVendorInvite(
+  db: Db,
   tenantId: string,
   input: CreateInviteInput
-): CreateInviteResult {
+): Promise<CreateInviteResult> {
   const tdb = new TenantDB(db, tenantId);
 
   // Duplicate check: same email already exists for this tenant
-  const existing = tdb.get<{ id: string; business_name: string }>(
-    'SELECT id, business_name FROM vendors WHERE tenant_id = ? AND contact_email = ?',
+  // COLLATE NOCASE -> lower() (Stage 0's catalogued rework spot)
+  const existing = await tdb.get<{ id: string; business_name: string }>(
+    'SELECT id, business_name FROM vendors WHERE tenant_id = $1 AND lower(contact_email) = lower($2)',
     [input.email]
   );
   if (existing) {
@@ -59,9 +61,9 @@ export function createVendorInvite(
 
   // Location validation: all must exist and be active within this tenant
   for (const locId of input.locationIds) {
-    const loc = tdb.get<{ id: string }>(
-      'SELECT id FROM locations WHERE tenant_id = ? AND id = ? AND status = ?',
-      [locId, 'active']
+    const loc = await tdb.get<{ id: string }>(
+      `SELECT id FROM locations WHERE tenant_id = $1 AND id = $2 AND status = 'active'`,
+      [locId]
     );
     if (!loc) {
       const err = new Error(`Location not found or not active: ${locId}`);
@@ -70,15 +72,13 @@ export function createVendorInvite(
     }
   }
 
-  const { rawToken, tokenHash } = generateInviteToken();
-  logDevInviteUrl(rawToken, `onboarding invite · ${input.businessName}`);
   const vendorId = randomUUID();
-  const inviteId = randomUUID();
-  const now = new Date().toISOString();
-  const expiresAt = new Date(Date.now() + INVITE_LIFETIME_MS).toISOString();
+  const now = new Date();
 
-  return tdb.transaction((txTdb) => {
-    txTdb.insert('vendors', {
+  return withTransaction(db, async (trx) => {
+    const txTdb = new TenantDB(trx, tenantId);
+
+    await txTdb.insert('vendors', {
       id: vendorId,
       business_name: input.businessName,
       contact_name: `${input.contactFirstName} ${input.contactLastName}`.trim(),
@@ -88,20 +88,20 @@ export function createVendorInvite(
       created_at: now,
     });
 
-    // token column stores the SHA-256 hash; raw token goes to the vendor only via email
-    txTdb.insert('invites', {
-      id: inviteId,
-      vendor_id: vendorId,
-      inviter_user_id: input.inviterUserId,
-      token: tokenHash,
-      token_expires_at: expiresAt,
+    // Routes through the shared revoke-on-issue choke point (ADR-013-01) — a brand-new
+    // vendor has no prior invites to revoke, so this is a harmless no-op UPDATE here, but
+    // every mint site uses the same path uniformly; none writes `invites` directly.
+    const { rawToken, inviteId, expiresAt } = await issueInviteToken(trx, {
+      tenantId,
+      vendorId,
+      inviterUserId: input.inviterUserId,
       purpose: 'onboarding',
-      delivery_state: 'sent',
-      created_at: now,
+      ttlMs: INVITE_LIFETIME_MS,
     });
+    logDevInviteUrl(rawToken, `onboarding invite · ${input.businessName}`);
 
     for (const locationId of input.locationIds) {
-      txTdb.insert('vendor_locations', {
+      await txTdb.insert('vendor_locations', {
         id: randomUUID(),
         vendor_id: vendorId,
         location_id: locationId,
@@ -116,7 +116,7 @@ export function createVendorInvite(
     // Tradeoff note: raw token appears here so the email sender can construct the URL.
     // The notifications table is a short-lived operational queue (not the enumeration
     // attack surface that the invites.token hash protects against).
-    txTdb.insert('notifications', {
+    await txTdb.insert('notifications', {
       id: randomUUID(),
       recipient_type: 'vendor',
       recipient_ref: input.email,
@@ -130,13 +130,13 @@ export function createVendorInvite(
         business_name: input.businessName,
         contact_first_name: input.contactFirstName,
         invite_path: `/v/${rawToken}`,
-        expires_at: expiresAt,
+        expires_at: expiresAt.toISOString(),
         custom_notes: input.customNotes ?? null,
       }),
       created_at: now,
     });
 
-    logAudit(db, {
+    await logAudit(trx, {
       tenantId,
       actorType: 'user',
       actorId: input.inviterUserId,
@@ -155,7 +155,7 @@ export function createVendorInvite(
       type: 'created',
       vendorId,
       inviteId,
-      tokenExpiresAt: expiresAt,
+      tokenExpiresAt: expiresAt.toISOString(),
       deliveryState: 'sent',
     } satisfies InviteCreated;
   });

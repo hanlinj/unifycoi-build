@@ -3,7 +3,7 @@
 // Delegates to applyDecision() service for testable business logic.
 
 import { NextResponse } from 'next/server';
-import { getRawDb } from '@/lib/db/client';
+import { getDb } from '@/lib/db/client';
 import { requireTenantAuth, isResponse, forbidden, badRequest, notFound, conflict } from '@/lib/api';
 import { applyDecision, DecisionError } from '@/lib/services/decision';
 
@@ -45,8 +45,8 @@ export async function POST(
   }
 
   try {
-    const result = applyDecision({
-      db: getRawDb(),
+    const result = await applyDecision({
+      db: getDb(),
       tenantId: auth.tenantId,
       vendorId: params.id,
       actorUserId: auth.sub,

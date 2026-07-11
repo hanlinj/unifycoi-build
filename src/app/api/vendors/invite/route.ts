@@ -4,7 +4,7 @@
 // Store/District callers are scoped to locations they're authorized for.
 
 import { NextResponse } from 'next/server';
-import { getRawDb } from '@/lib/db/client';
+import { getDb } from '@/lib/db/client';
 import { requireTenantAuth, isResponse, created, badRequest, forbidden, conflict } from '@/lib/api';
 import { resolveScope, scopeIncludesLocation } from '@/lib/scope';
 import { createVendorInvite, VALID_TRADES } from '@/lib/services/vendors';
@@ -43,13 +43,13 @@ export async function POST(request: Request): Promise<NextResponse> {
     return badRequest('locationIds must be an array of strings');
   }
 
-  const db = getRawDb();
-  const scope = resolveScope(db, auth.tenantId, auth.sub, auth.role);
+  const db = getDb();
+  const scope = await resolveScope(db, auth.tenantId, auth.sub, auth.role);
 
   for (const locId of locationIds as string[]) {
     if (!scopeIncludesLocation(scope, locId)) {
       // Out-of-scope invite attempt — log the violation (Phase 8 security-pass grain) then 403.
-      logAudit(db, {
+      await logAudit(db, {
         tenantId: auth.tenantId, actorType: 'user', actorId: auth.sub,
         eventType: 'security.scope_violation', targetType: 'location', targetId: locId,
         payload: { role: auth.role, scope_region_ids: scope.regionIds, attempted: 'POST /api/vendors/invite' },
@@ -59,7 +59,7 @@ export async function POST(request: Request): Promise<NextResponse> {
   }
 
   try {
-    const result = createVendorInvite(db, auth.tenantId, {
+    const result = await createVendorInvite(db, auth.tenantId, {
       businessName,
       contactFirstName,
       contactLastName,

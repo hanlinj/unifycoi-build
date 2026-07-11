@@ -2,10 +2,9 @@
 // a bounce or an expired invite) and re-queues the branded invite email. Distinct from
 // createVendorInvite (which creates a new vendor); this reuses the vendor record.
 
-import { randomUUID } from 'crypto';
-import type Database from 'better-sqlite3';
+import type { Db } from '@/lib/db/client';
 import { TenantDB } from '@/lib/db/tenant';
-import { generateInviteToken } from '@/lib/auth/invite-token';
+import { issueInviteToken } from '@/lib/auth/invite-token';
 import { logDevInviteUrl } from '@/lib/dev/log-invite-url';
 import { queueNotification } from '@/lib/notifications/queue';
 import { logAudit } from '@/lib/audit';
@@ -23,38 +22,33 @@ export interface ResendResult {
   tokenExpiresAt: string;
 }
 
-export function resendInvite(
-  db: Database.Database,
+export async function resendInvite(
+  db: Db,
   tenantId: string,
   vendorId: string,
   actorUserId: string
-): ResendResult {
+): Promise<ResendResult> {
   const tdb = new TenantDB(db, tenantId);
-  const vendor = tdb.get<{ id: string; business_name: string; contact_email: string | null; contact_name: string | null }>(
-    'SELECT id, business_name, contact_email, contact_name FROM vendors WHERE tenant_id = ? AND id = ?',
+  const vendor = await tdb.get<{ id: string; business_name: string; contact_email: string | null; contact_name: string | null }>(
+    'SELECT id, business_name, contact_email, contact_name FROM vendors WHERE tenant_id = $1 AND id = $2',
     [vendorId]
   );
   if (!vendor) throw new ResendInviteError('Vendor not found', 'NOT_FOUND');
   if (!vendor.contact_email) throw new ResendInviteError('Vendor has no contact email to resend to', 'NO_EMAIL');
 
-  const { rawToken, tokenHash } = generateInviteToken();
-  logDevInviteUrl(rawToken, `resent onboarding invite · ${vendor.business_name ?? 'vendor'}`);
-  const inviteId = randomUUID();
-  const now = new Date().toISOString();
-  const expiresAt = new Date(Date.now() + INVITE_LIFETIME_MS).toISOString();
-
-  tdb.insert('invites', {
-    id: inviteId,
-    vendor_id: vendorId,
-    inviter_user_id: actorUserId,
-    token: tokenHash,
-    token_expires_at: expiresAt,
+  // Routes through the shared revoke-on-issue choke point (ADR-013-01) — this is the mint
+  // site the revocation invariant matters most for: a resend is precisely when a prior
+  // still-live token (e.g. one that bounced) should stop being usable.
+  const { rawToken, inviteId, expiresAt } = await issueInviteToken(db, {
+    tenantId,
+    vendorId,
+    inviterUserId: actorUserId,
     purpose: 'onboarding',
-    delivery_state: 'sent',
-    created_at: now,
+    ttlMs: INVITE_LIFETIME_MS,
   });
+  logDevInviteUrl(rawToken, `resent onboarding invite · ${vendor.business_name ?? 'vendor'}`);
 
-  queueNotification(db, tenantId, {
+  await queueNotification(db, tenantId, {
     recipientType: 'vendor',
     recipientRef: vendor.contact_email,
     kind: 'exception', // vendor-facing onboarding link — immediate
@@ -63,12 +57,12 @@ export function resendInvite(
       business_name: vendor.business_name,
       contact_name: vendor.contact_name,
       invite_path: `/v/${rawToken}`,
-      expires_at: expiresAt,
+      expires_at: expiresAt.toISOString(),
       resent: true,
     },
   });
 
-  logAudit(db, {
+  await logAudit(db, {
     tenantId,
     actorType: 'user',
     actorId: actorUserId,
@@ -78,5 +72,5 @@ export function resendInvite(
     payload: { invite_id: inviteId },
   });
 
-  return { inviteId, tokenExpiresAt: expiresAt };
+  return { inviteId, tokenExpiresAt: expiresAt.toISOString() };
 }

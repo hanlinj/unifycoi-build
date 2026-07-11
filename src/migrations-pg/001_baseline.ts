@@ -172,6 +172,7 @@ export async function up(db: Kysely<any>): Promise<void> {
     .addColumn('purpose', 'text', (c) => c.notNull()) // onboarding|renewal|correction
     .addColumn('delivery_state', 'text', (c) => c.notNull()) // sent|unverified|bounced|expired_invite
     .addColumn('created_at', 'timestamptz', (c) => c.notNull())
+    .addColumn('revoked_at', 'timestamptz') // Stage 6a — revoke-on-issue; nullable, null = live
     .execute();
   await db.schema.createIndex('idx_invites_tenant_vendor').on('invites').columns(['tenant_id', 'vendor_id']).execute();
 
