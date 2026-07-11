@@ -5,7 +5,7 @@ correctness contract — the running pass count against Postgres is the tracking
 stages. Decision record: `docs/decisions.md` ADR-013-01 (rationale, fresh-baseline choice,
 Kysely choice, and the cross-stage invariants/landmines discovered along the way).
 
-**Running pass count: 488 / 1119** (as of Stage 6a). Every failure not yet converted has been
+**Running pass count: 506 / 1137** (as of Stage 6b). Every failure not yet converted has been
 confirmed to be the same "old code calling the new async/Kysely API synchronously" shape — no
 suite has failed for a different, real-behavior reason.
 
@@ -28,10 +28,10 @@ suite has failed for a different, real-behavior reason.
 | 4 | `tenants.ts`, `provisioning.ts`, `requirements/templates.ts`, `billing/{quantity-sync,worker,stripe-webhook}.ts` (+ narrow `createUser`/`createLocation` slices) | ✅ done | `dd8393b` |
 | 5 | locations/users/dashboards — the biggest tenant-scoped CRUD cluster; finishes Stage 4's partial `users.ts`/`locations.ts` conversions, plus remaining `COLLATE NOCASE`/`INSERT OR IGNORE` spots and the `listUsers` N+1. Also: the `chase.ts` JSON1→jsonb rewrite, its `MIN()`/ordering type-safety fix (and the `expiryBoundaryMs` DATE_ONLY regression that fix nearly introduced — caught pre-commit), a durable normalize-on-write fix for unpadded expiration dates (`toIsoDateStr`, `earliestExpiration`), and the repo's first ESLint infra (see below) | ✅ done | `c9d9841` |
 | 6a | vendors operator-side data access: `vendors.ts`, `resend-invite.ts`, `decision.ts`, the shared `issueInviteToken()` choke point (`src/lib/auth/invite-token.ts`), and 5 of 6 `src/app/api/vendors/**` routes. Lands **revoke-on-issue** for vendor invite tokens — a deliberate security change, see ADR-013-01. `add-to-locations.ts` + its route deferred — see Shortcuts & gaps | ✅ done | `9c06fe2` |
-| 6b | vendor onboarding portal (`/v/[token]`): `vendor-token.ts`, `vendor-fsm.ts`, `vendor-onboarding.ts`, the portal routes/page. Must add the `revoked_at IS NULL` check to `validateInviteToken()` — 6a only writes revocation, reading it is 6b's job | not started | — |
-| 7 | verification/requirements engine — depends on stages 4–6 | not started | — |
-| 8 | notifications + retention + audit exports — the cross-tenant worker group, migrated together (claim-then-process pattern); fixes `search.ts`'s `rowid` spot, the `notifications/queue.ts` N+1 (`notifyTenantAdmins`, already fixed in Stage 3), and the `json_extract` spot in `notifications/renewal.ts` (see the cross-stage invariants below, items 8/9) | not started | — |
-| 9 | reports/search — last, depends on nearly everything; fixes the two `reports/builders.ts` N+1 spots AND the `MIN(json_extract(...))` type-safety spot found during Stage 5's post-hoc JSON1 audit (see the cross-stage invariants below, items 8/9) | not started | — |
+| 6b | vendor onboarding portal (`/v/[token]`): `vendor-token.ts`, `vendor-fsm.ts`, `vendor-onboarding.ts`, a narrow slice of `notifications/renewal.ts` (`scheduleRenewalReminders`, `supersedeReminders`, `handleCoiUploadChase`), and the portal routes/page except `submit/route.ts` (deferred — see Shortcuts & gaps). Wires up the `revoked_at IS NULL` check in `validateInviteToken()`. **The wrong-vendor authz test passed clean — no leak found.** | ✅ done | `fa476ac` |
+| 7 | verification/requirements engine (`verification/run.ts`'s `runVerification`/`loadExtractionBundle`, `requirements/resolver.ts`'s `resolveRequirements`) — depends on stages 4–6. Also picks up `add-to-locations.ts` + its route (deferred from Stage 6a) and `src/app/api/v/[token]/submit/route.ts` (deferred from Stage 6b — the exact seam is line 80's `runVerification()` call), both blocked on this same engine | not started | — |
+| 8 | notifications + retention + audit exports — the cross-tenant worker group, migrated together (claim-then-process pattern); fixes `search.ts`'s `rowid` spot, the `notifications/queue.ts` N+1 (`notifyTenantAdmins`, already fixed in Stage 3), and `notifications/renewal.ts`'s remaining un-converted function, `applyExpirationFlip` (Stage 6b converted the rest of the file as a narrow portal-upload hard dependency — see ADR-013-01) | not started | — |
+| 9 | reports/search — last, depends on nearly everything; fixes the two `reports/builders.ts` N+1 spots AND the `MIN(json_extract(...))` type-safety spot found during Stage 5's post-hoc JSON1 audit — the one remaining known JSON1 spot as of Stage 6b (see the cross-stage invariants below, items 5/6) | not started | — |
 | 10 | dev scripts (`dev-seed.ts`, `eval-test-dataset.ts`), cutover cleanup, remove `better-sqlite3` dependency | not started | — |
 
 Stage boundaries and reasoning: see the Phase 13 kickoff investigation report (chat, not
@@ -50,19 +50,34 @@ duplicated here) for the full original module map and per-stage rationale.
   past "the four operator files." Left un-converted this stage; both the service function and
   its route still import the removed `getRawDb` and will not compile until Stage 7 (or a
   dedicated slice of it) lands. Not silently skipped — flagged here and in ADR-013-01.
-- **`validateInviteToken()`'s `revoked_at` check is NOT yet wired up.** Stage 6a writes
-  `revoked_at` correctly (see ADR-013-01's revoke-on-issue entry) but does not touch the
-  portal-side read path — a revoked token still validates successfully until Stage 6b adds the
-  `WHERE revoked_at IS NULL` check. This is a real, temporary gap (the column exists and is
-  correctly populated; nothing reads it yet), not an oversight — explicitly Stage 6b's opening
-  task, not deferred silently.
+- ~~`validateInviteToken()`'s `revoked_at` check is NOT yet wired up.`~~ **Closed in Stage 6b** —
+  `validateInviteToken()` now rejects `revoked_at IS NOT NULL`, joining the same uniform-null
+  path as unknown/expired/bounced. See ADR-013-01's Stage 6b entry for the indistinguishability
+  proof.
 - **`GET /api/vendors/:id`'s `flags_json`/`evidence_json` re-`JSON.stringify()` (Stage 6a) is a
   temporary shim, tied to one specific file.** `src/app/vendors/[vendorId]/page.tsx` still does
-  its own `JSON.parse()` on `flags_json` (not converted this stage). **Remove the
-  re-stringify in `src/app/api/vendors/[id]/route.ts` the moment that page converts** — once its
-  own `JSON.parse()` call is gone, the re-stringify becomes active double-encoding (a jsonb
-  object stringified for no consumer, immediately breaking whatever replaces the old
-  `JSON.parse()` call). See ADR-013-01 invariant 9 for the full mechanism.
+  its own `JSON.parse()` on `flags_json` (not converted this stage, not touched by 6b either).
+  **Remove the re-stringify in `src/app/api/vendors/[id]/route.ts` the moment that page
+  converts** — once its own `JSON.parse()` call is gone, the re-stringify becomes active
+  double-encoding (a jsonb object stringified for no consumer, immediately breaking whatever
+  replaces the old `JSON.parse()` call). See ADR-013-01 invariant 9 for the full mechanism.
+- **`src/app/api/v/[token]/submit/route.ts` (discovered Stage 6b, not converted) — the exact
+  Stage 7 seam.** Everything up to and including the FSM `submit` transition and the
+  required-docs precheck converts cleanly (no verification dependency); the route hands off at
+  line 80's `result = await runVerification(db, { tenantId, vendorId, vendorTrade: vendor.trade,
+  trigger })`. `runVerification`/`loadExtractionBundle` (`src/lib/verification/run.ts`) and
+  `resolveRequirements` (`src/lib/requirements/resolver.ts`) are genuinely Stage 7's charter —
+  the same dependency that made Stage 6a defer `add-to-locations.ts`, and also depended on by a
+  third consumer, `src/lib/requirements/re-eval.ts`, outside the portal entirely. Converting up
+  to line 80 and stopping isn't meaningful for one route function, so the whole file stays on
+  `getRawDb`/synchronous calls until Stage 7 lands. Still imports the removed `getRawDb` and will
+  not compile until then. Not silently skipped — flagged here and in ADR-013-01.
+- **`notifications/renewal.ts`'s `applyExpirationFlip` remains un-converted** (Stage 8's own
+  worker-only function — `notifications/worker.ts` is its only caller, zero portal dependency).
+  The rest of the file converted in Stage 6b as a narrow hard-dependency slice of the upload
+  route. Still imports `better-sqlite3`'s `Database` type and calls the now-Kysely-typed
+  `TenantDB`/`logAudit`/`notifyTenantAdmins` with the wrong type — expected, matches every other
+  not-yet-converted function.
 
 ## Repo infrastructure added mid-migration
 
@@ -82,11 +97,17 @@ repo-wide currently fails on pre-existing, out-of-scope violations; see below).
   auth/tokens, tenants/provisioning/billing) is 100% clean against both rules — checked directly,
   not assumed.
 - **Stage 5's own files are 100% clean.**
-- **142 pre-existing violations remain, all in NOT-yet-converted Stage 6–9 modules**
-  (`vendors.ts`, `verification/run.ts`, `exports/*`, `reports/*`, the notifications workers,
-  `v/[token]/*`, etc.) or in pre-existing React client-component floating promises unrelated to
-  this migration entirely. Left untouched — out of scope for Stage 5, flagged here so Stages 6–9
-  clear their own portion as they convert, rather than rediscovering this from scratch.
+- **Stage 6a's and 6b's own files are 100% clean** — `vendors.ts`, `resend-invite.ts`,
+  `decision.ts`, `invite-token.ts`, `vendor-token.ts`, `vendor-fsm.ts`, `vendor-onboarding.ts`,
+  the converted portion of `notifications/renewal.ts`, and every converted route/page checked
+  directly.
+- **101 pre-existing violations remain** (down from 142 after Stage 5, as Stages 6a/6b cleared
+  their portion), all in NOT-yet-converted modules — `verification/run.ts`, `exports/*`,
+  `reports/*`, the notifications workers, `requirements/re-eval.ts`, `add-to-locations.ts`,
+  `submit/route.ts`, `renewal.ts`'s remaining `applyExpirationFlip` — or in pre-existing React
+  client-component floating promises unrelated to this migration entirely. Left untouched — out
+  of scope until those modules' own stages, flagged here so each stage clears its own portion
+  rather than rediscovering this from scratch.
 
 ## What "green" means each stage
 
@@ -138,10 +159,10 @@ See ADR-013-01 in `docs/decisions.md` for the full write-up. Summary:
    `listUsers` (Stage 5, `Promise.all`). Remaining: `reports/builders.ts` ×2 (Stage 9).
 8. **SQLite's `json_extract()`/JSON1 functions have no Postgres equivalent — rewrite to the `->>`
    jsonb text-extraction operator.** Missed by the Stage 0 investigation (DDL-only audit, not
-   application queries). Fixed: `chase.ts` (Stage 5). A post-hoc repo-wide grep found two more
-   un-converted spots — `notifications/renewal.ts:76` (Stage 8) and `reports/builders.ts:84-91`
-   (Stage 9, same shape as item 9 below). **That grep was not re-run after Stages 6-8 land — Stage
-   9 should re-grep before assuming this list is exhaustive.**
+   application queries). Fixed: `chase.ts` (Stage 5), `notifications/renewal.ts`'s
+   `scheduleRenewalReminders` (Stage 6b). **One remaining known spot** — `reports/builders.ts:84-91`
+   (Stage 9, same shape as item 9 below). **The Stage 5 grep was not re-run after Stage 7/8 land —
+   Stage 9 should re-grep before assuming this list is exhaustive.**
 9. **`MIN()`/ordering over a jsonb `->>`-extracted value is a lexicographic TEXT comparison, not
    a chronological one**, unless cast to its real type first. Found in `chase.ts` via an unpadded
    date fixture (Stage 5, pre-commit review). The straightforward fix (cast + reformat via
@@ -164,3 +185,19 @@ See ADR-013-01 in `docs/decisions.md` for the full write-up. Summary:
     choke point every renewal-chase payload's `expiration_date` flows through) via
     `toIsoDateStr()` (extended to also zero-pad unpadded ISO-dash dates, not just US slash format)
     — not a Postgres-specific fix, applies regardless of SQL engine.
+11. **`TenantDB.update()` can only express `col = val` equality WHERE predicates.** Anything
+    needing `IS NULL`/`>`/`<` drops to the Kysely builder directly, manually re-adding the same
+    tenant_id scoping `TenantDB` enforces internally. Found in Stage 6a's `issueInviteToken()`
+    revoke query — likely to recur wherever a future stage needs a conditional bulk UPDATE.
+12. **A jsonb column's WIRE shape can silently diverge from what a not-yet-converted consumer
+    still expects.** `GET /api/vendors/:id` (Stage 6a) re-`JSON.stringify()`s `flags_json`/
+    `evidence_json` at the response boundary specifically to preserve the string shape
+    `src/app/vendors/[vendorId]/page.tsx` still `JSON.parse()`s — a temporary shim, remove it the
+    moment that page converts (see Shortcuts & gaps).
+13. **Inside `withTransaction()`, every nested DB call must take `trx`, never the outer
+    `db`/`getDb()` handle.** SQLite's single connection made this an accidental non-issue;
+    Kysely's separate connections make a stray outer-`db` call commit independently and survive
+    a surrounding rollback — a correctness bug, not style. Caught in `confirmPasswordReset`
+    (Stage 3) and `createVendorInvite`'s audit-log call (Stage 6a). Audited exhaustively across
+    every `withTransaction(` call site through Stage 6a before that stage's commit — clean, one
+    instance found and fixed, no others.
