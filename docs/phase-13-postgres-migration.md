@@ -5,7 +5,7 @@ correctness contract — the running pass count against Postgres is the tracking
 stages. Decision record: `docs/decisions.md` ADR-013-01 (rationale, fresh-baseline choice,
 Kysely choice, and the cross-stage invariants/landmines discovered along the way).
 
-**Running pass count: 506 / 1137** (as of Stage 6b). Every failure not yet converted has been
+**Running pass count: 525 / 1156** (as of Stage 7). Every failure not yet converted has been
 confirmed to be the same "old code calling the new async/Kysely API synchronously" shape — no
 suite has failed for a different, real-behavior reason.
 
@@ -29,8 +29,8 @@ suite has failed for a different, real-behavior reason.
 | 5 | locations/users/dashboards — the biggest tenant-scoped CRUD cluster; finishes Stage 4's partial `users.ts`/`locations.ts` conversions, plus remaining `COLLATE NOCASE`/`INSERT OR IGNORE` spots and the `listUsers` N+1. Also: the `chase.ts` JSON1→jsonb rewrite, its `MIN()`/ordering type-safety fix (and the `expiryBoundaryMs` DATE_ONLY regression that fix nearly introduced — caught pre-commit), a durable normalize-on-write fix for unpadded expiration dates (`toIsoDateStr`, `earliestExpiration`), and the repo's first ESLint infra (see below) | ✅ done | `c9d9841` |
 | 6a | vendors operator-side data access: `vendors.ts`, `resend-invite.ts`, `decision.ts`, the shared `issueInviteToken()` choke point (`src/lib/auth/invite-token.ts`), and 5 of 6 `src/app/api/vendors/**` routes. Lands **revoke-on-issue** for vendor invite tokens — a deliberate security change, see ADR-013-01. `add-to-locations.ts` + its route deferred — see Shortcuts & gaps | ✅ done | `9c06fe2` |
 | 6b | vendor onboarding portal (`/v/[token]`): `vendor-token.ts`, `vendor-fsm.ts`, `vendor-onboarding.ts`, a narrow slice of `notifications/renewal.ts` (`scheduleRenewalReminders`, `supersedeReminders`, `handleCoiUploadChase`), and the portal routes/page except `submit/route.ts` (deferred — see Shortcuts & gaps). Wires up the `revoked_at IS NULL` check in `validateInviteToken()`. **The wrong-vendor authz test passed clean — no leak found.** | ✅ done | `fa476ac` |
-| 7 | verification/requirements engine (`verification/run.ts`'s `runVerification`/`loadExtractionBundle`, `requirements/resolver.ts`'s `resolveRequirements`) — depends on stages 4–6. Also picks up `add-to-locations.ts` + its route (deferred from Stage 6a) and `src/app/api/v/[token]/submit/route.ts` (deferred from Stage 6b — the exact seam is line 80's `runVerification()` call), both blocked on this same engine | not started | — |
-| 8 | notifications + retention + audit exports — the cross-tenant worker group, migrated together (claim-then-process pattern); fixes `search.ts`'s `rowid` spot, the `notifications/queue.ts` N+1 (`notifyTenantAdmins`, already fixed in Stage 3), and `notifications/renewal.ts`'s remaining un-converted function, `applyExpirationFlip` (Stage 6b converted the rest of the file as a narrow portal-upload hard dependency — see ADR-013-01) | not started | — |
+| 7 | verification/requirements engine, converted as ONE unit (confirmed no natural seam — `runVerification` interleaves reads/writes with no cut line): `verification/run.ts` (`runVerification`/`loadExtractionBundle`/`runRulesOnlyReeval`), `requirements/resolver.ts`'s `resolveRequirements`. Picks up `add-to-locations.ts` + its route (Stage 6a), `submit/route.ts` (Stage 6b), and the `requirements/*` routes + `services/requirements.ts` + `requirements/re-eval.ts` — 4 of the 5 originally-identified blocked callers. `exports/content.ts` discovered mid-stage to cascade into the whole audit-export subsystem — deferred to Stage 8, see Shortcuts & gaps. Also: `runVerification`'s 4-table write now atomic via `withTransaction()` (deliberate correctness change, not preservation — see ADR-013-01), and date normalization centralized at the Vision extraction boundary (`dateField()` in `extractor.ts`), superseding Stage 6a's per-path fix | ✅ done | `15e5d8b` |
+| 8 | notifications + retention + audit exports — the cross-tenant worker group, migrated together (claim-then-process pattern); fixes `search.ts`'s `rowid` spot, the `notifications/queue.ts` N+1 (`notifyTenantAdmins`, already fixed in Stage 3), `notifications/renewal.ts`'s remaining un-converted function `applyExpirationFlip` (Stage 6b converted the rest of the file as a narrow portal-upload hard dependency), and now also `exports/content.ts` + `exports/audit-export.ts` + the exports worker/routes (deferred from Stage 7 — see ADR-013-01 and Shortcuts & gaps) | not started | — |
 | 9 | reports/search — last, depends on nearly everything; fixes the two `reports/builders.ts` N+1 spots AND the `MIN(json_extract(...))` type-safety spot found during Stage 5's post-hoc JSON1 audit — the one remaining known JSON1 spot as of Stage 6b (see the cross-stage invariants below, items 5/6) | not started | — |
 | 10 | dev scripts (`dev-seed.ts`, `eval-test-dataset.ts`), cutover cleanup, remove `better-sqlite3` dependency | not started | — |
 
@@ -39,45 +39,43 @@ duplicated here) for the full original module map and per-stage rationale.
 
 ## Shortcuts & gaps
 
-- **`add-to-locations.ts` + `POST /api/vendors/:id/locations` (discovered Stage 6a, not
-  converted).** `addVendorToLocations()` calls `runRulesOnlyReeval()` → `runVerification()` →
-  `loadExtractionBundle()` (`src/lib/verification/run.ts`) and `resolveRequirements()`
-  (`src/lib/requirements/resolver.ts`) — genuinely Stage 7's charter (the whole verification
-  pipeline orchestrator), not a narrow slice like prior stages' hard dependencies. These same
-  functions are also called from the portal's submit route (Stage 6b) and
-  `src/lib/requirements/re-eval.ts` (a third, separate consumer) — converting them now would
-  silently do a meaningful chunk of Stage 7's work as an unplanned expansion of Stage 6a, well
-  past "the four operator files." Left un-converted this stage; both the service function and
-  its route still import the removed `getRawDb` and will not compile until Stage 7 (or a
-  dedicated slice of it) lands. Not silently skipped — flagged here and in ADR-013-01.
+- ~~`add-to-locations.ts` + `POST /api/vendors/:id/locations` (discovered Stage 6a, not
+  converted).~~ **Closed in Stage 7** — converted alongside the verification engine it was
+  blocked on.
 - ~~`validateInviteToken()`'s `revoked_at` check is NOT yet wired up.`~~ **Closed in Stage 6b** —
   `validateInviteToken()` now rejects `revoked_at IS NOT NULL`, joining the same uniform-null
   path as unknown/expired/bounced. See ADR-013-01's Stage 6b entry for the indistinguishability
   proof.
 - **`GET /api/vendors/:id`'s `flags_json`/`evidence_json` re-`JSON.stringify()` (Stage 6a) is a
   temporary shim, tied to one specific file.** `src/app/vendors/[vendorId]/page.tsx` still does
-  its own `JSON.parse()` on `flags_json` (not converted this stage, not touched by 6b either).
-  **Remove the re-stringify in `src/app/api/vendors/[id]/route.ts` the moment that page
-  converts** — once its own `JSON.parse()` call is gone, the re-stringify becomes active
-  double-encoding (a jsonb object stringified for no consumer, immediately breaking whatever
-  replaces the old `JSON.parse()` call). See ADR-013-01 invariant 9 for the full mechanism.
-- **`src/app/api/v/[token]/submit/route.ts` (discovered Stage 6b, not converted) — the exact
-  Stage 7 seam.** Everything up to and including the FSM `submit` transition and the
-  required-docs precheck converts cleanly (no verification dependency); the route hands off at
-  line 80's `result = await runVerification(db, { tenantId, vendorId, vendorTrade: vendor.trade,
-  trigger })`. `runVerification`/`loadExtractionBundle` (`src/lib/verification/run.ts`) and
-  `resolveRequirements` (`src/lib/requirements/resolver.ts`) are genuinely Stage 7's charter —
-  the same dependency that made Stage 6a defer `add-to-locations.ts`, and also depended on by a
-  third consumer, `src/lib/requirements/re-eval.ts`, outside the portal entirely. Converting up
-  to line 80 and stopping isn't meaningful for one route function, so the whole file stays on
-  `getRawDb`/synchronous calls until Stage 7 lands. Still imports the removed `getRawDb` and will
-  not compile until then. Not silently skipped — flagged here and in ADR-013-01.
+  its own `JSON.parse()` on `flags_json` (not converted through Stage 7). **Remove the
+  re-stringify in `src/app/api/vendors/[id]/route.ts` the moment that page converts** — once its
+  own `JSON.parse()` call is gone, the re-stringify becomes active double-encoding (a jsonb
+  object stringified for no consumer, immediately breaking whatever replaces the old
+  `JSON.parse()` call). See ADR-013-01 invariant 9 for the full mechanism.
+- ~~`src/app/api/v/[token]/submit/route.ts` (discovered Stage 6b, not converted) — the exact
+  Stage 7 seam.~~ **Closed in Stage 7** — converted alongside the verification engine.
 - **`notifications/renewal.ts`'s `applyExpirationFlip` remains un-converted** (Stage 8's own
   worker-only function — `notifications/worker.ts` is its only caller, zero portal dependency).
   The rest of the file converted in Stage 6b as a narrow hard-dependency slice of the upload
   route. Still imports `better-sqlite3`'s `Database` type and calls the now-Kysely-typed
   `TenantDB`/`logAudit`/`notifyTenantAdmins` with the wrong type — expected, matches every other
   not-yet-converted function.
+- **`src/lib/exports/content.ts` + `src/lib/exports/audit-export.ts` (discovered Stage 7, not
+  converted) — cascades into the whole audit-export subsystem, genuinely Stage 8's charter.**
+  `content.ts`'s one `resolveRequirements()` call site sits inside `gatherAuditExportContent()`
+  — a ~140-line, fully-synchronous function sharing one `db` parameter across a dozen other raw
+  queries — whose only caller, `audit-export.ts`'s `buildAuditExportBytes`, is itself called by
+  `createAuditExport`/`generateExportArtifact`, both explicitly Stage 8's charter ("notifications
+  + retention + audit exports — the cross-tenant worker group, migrated together"). Converting
+  content.ts's one call site would have cascaded into converting the entire subsystem
+  (`audit-export.ts`, the exports worker's claim-then-process pattern, 3-4 routes) as an
+  unplanned mid-Stage-7 expansion — discovered mid-stage (not before), same class of finding as
+  Stage 6a's `add-to-locations.ts` and Stage 6b's submit route, just found one caller later than
+  the original five-consumer scoping report anticipated. Left un-converted; `resolveRequirements`
+  now being async means `content.ts` fails one call site further than before — expected, the
+  standard "downstream not-yet-converted file breaks further as its dependency converts"
+  pattern, not a new failure category. Not silently skipped — flagged here and in ADR-013-01.
 
 ## Repo infrastructure added mid-migration
 
@@ -97,17 +95,18 @@ repo-wide currently fails on pre-existing, out-of-scope violations; see below).
   auth/tokens, tenants/provisioning/billing) is 100% clean against both rules — checked directly,
   not assumed.
 - **Stage 5's own files are 100% clean.**
-- **Stage 6a's and 6b's own files are 100% clean** — `vendors.ts`, `resend-invite.ts`,
+- **Stage 6a's, 6b's, and 7's own files are 100% clean** — `vendors.ts`, `resend-invite.ts`,
   `decision.ts`, `invite-token.ts`, `vendor-token.ts`, `vendor-fsm.ts`, `vendor-onboarding.ts`,
-  the converted portion of `notifications/renewal.ts`, and every converted route/page checked
-  directly.
-- **101 pre-existing violations remain** (down from 142 after Stage 5, as Stages 6a/6b cleared
-  their portion), all in NOT-yet-converted modules — `verification/run.ts`, `exports/*`,
-  `reports/*`, the notifications workers, `requirements/re-eval.ts`, `add-to-locations.ts`,
-  `submit/route.ts`, `renewal.ts`'s remaining `applyExpirationFlip` — or in pre-existing React
-  client-component floating promises unrelated to this migration entirely. Left untouched — out
-  of scope until those modules' own stages, flagged here so each stage clears its own portion
-  rather than rediscovering this from scratch.
+  the converted portion of `notifications/renewal.ts`, `verification/run.ts`,
+  `requirements/resolver.ts`, `requirements/re-eval.ts`, `services/requirements.ts`,
+  `add-to-locations.ts`, `extractor.ts`, and every converted route/page checked directly.
+- **73 pre-existing violations remain** (down from 142 after Stage 5, 101 after Stage 6b, as
+  each stage clears its own portion), all in NOT-yet-converted modules — `exports/*`
+  (`content.ts`/`audit-export.ts`/`worker.ts`, deferred from Stage 7 — see Shortcuts & gaps),
+  `reports/*`, the notifications workers, `renewal.ts`'s remaining `applyExpirationFlip` — or in
+  pre-existing React client-component floating promises unrelated to this migration entirely.
+  Left untouched — out of scope until those modules' own stages, flagged here so each stage
+  clears its own portion rather than rediscovering this from scratch.
 
 ## What "green" means each stage
 
