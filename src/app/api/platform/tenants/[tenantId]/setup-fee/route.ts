@@ -4,7 +4,7 @@
 // instead of silently no-op'ing — the operator sees why.
 
 import { NextResponse } from 'next/server';
-import { getRawDb } from '@/lib/db/client';
+import { getDb } from '@/lib/db/client';
 import { updateTenantSetupFee } from '@/lib/services/provisioning';
 import { requirePlatformAuth, isResponse, ok, badRequest, apiError } from '@/lib/api';
 import { captureError } from '@/lib/observability';
@@ -27,7 +27,7 @@ export async function PATCH(
   }
 
   try {
-    const result = updateTenantSetupFee(getRawDb(), params.tenantId, setupFeeCents, auth.sub);
+    const result = await updateTenantSetupFee(getDb(), params.tenantId, setupFeeCents, auth.sub);
     return ok(result);
   } catch (err) {
     const status = (err as { status?: number }).status ?? 500;

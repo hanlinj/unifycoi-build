@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server';
-import { getRawDb } from '@/lib/db/client';
+import { getDb } from '@/lib/db/client';
 import { createTenant, listTenants } from '@/lib/services/tenants';
 import { requirePlatformAuth, isResponse, ok, created, badRequest } from '@/lib/api';
 
@@ -10,8 +10,8 @@ export async function GET(request: Request): Promise<NextResponse> {
   const auth = requirePlatformAuth(request);
   if (isResponse(auth)) return auth;
 
-  const db = getRawDb();
-  return ok(listTenants(db));
+  const db = getDb();
+  return ok(await listTenants(db));
 }
 
 export async function POST(request: Request): Promise<NextResponse> {
@@ -26,8 +26,8 @@ export async function POST(request: Request): Promise<NextResponse> {
     return badRequest('name is required');
   }
 
-  const db = getRawDb();
-  const tenant = createTenant(
+  const db = getDb();
+  const tenant = await createTenant(
     db,
     { name, monthlyRateCents: typeof monthlyRateCents === 'number' ? monthlyRateCents : undefined },
     auth.sub

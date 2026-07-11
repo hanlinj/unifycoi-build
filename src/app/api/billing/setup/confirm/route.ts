@@ -9,7 +9,7 @@
 // posture as /api/auth/password-reset/confirm; structurally CSRF-exempt (ADR-011-06).
 
 import { NextResponse } from 'next/server';
-import { getRawDb } from '@/lib/db/client';
+import { getDb } from '@/lib/db/client';
 import { getTenantById } from '@/lib/services/tenants';
 import { resolveBillingSetupToken } from '@/lib/services/password-reset';
 import { defaultBillingProvider } from '@/lib/billing/stripe';
@@ -28,11 +28,11 @@ export async function POST(request: Request): Promise<NextResponse> {
   const { token } = body as Record<string, unknown>;
   if (typeof token !== 'string' || !token) return badRequest('token is required');
 
-  const db = getRawDb();
-  const peek = resolveBillingSetupToken(db, token);
+  const db = getDb();
+  const peek = await resolveBillingSetupToken(db, token);
   if (peek.status !== 'valid') return apiError('This billing link is invalid or has expired.', 400);
 
-  const tenant = getTenantById(db, peek.tenantId as string);
+  const tenant = await getTenantById(db, peek.tenantId as string);
   if (!tenant || !tenant.stripe_customer_id || !tenant.stripe_setup_intent_id) {
     return apiError('Billing setup is not ready for this tenant.', 409);
   }

@@ -3,7 +3,7 @@
 // issueBillingSetupToken verbatim (same issuer attachBilling calls).
 
 import { NextResponse } from 'next/server';
-import { getRawDb } from '@/lib/db/client';
+import { getDb } from '@/lib/db/client';
 import { resendBillingSetupLink } from '@/lib/services/provisioning';
 import { requirePlatformAuth, isResponse, ok, apiError } from '@/lib/api';
 import { captureError } from '@/lib/observability';
@@ -19,7 +19,7 @@ export async function POST(
   if (isResponse(auth)) return auth;
 
   try {
-    const result = resendBillingSetupLink(getRawDb(), params.tenantId, auth.sub);
+    const result = await resendBillingSetupLink(getDb(), params.tenantId, auth.sub);
     return ok(result);
   } catch (err) {
     const status = (err as { status?: number }).status ?? 500;

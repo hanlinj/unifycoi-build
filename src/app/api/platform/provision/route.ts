@@ -3,7 +3,7 @@
 // template + validated timezone in one audited DB commit, then attaches the Stripe customer.
 
 import { NextResponse } from 'next/server';
-import { getRawDb } from '@/lib/db/client';
+import { getDb } from '@/lib/db/client';
 import { provisionTenant, type ProvisionInput } from '@/lib/services/provisioning';
 import { defaultBillingProvider } from '@/lib/billing/stripe';
 import { requirePlatformAuth, isResponse, created, badRequest, apiError } from '@/lib/api';
@@ -20,7 +20,7 @@ export async function POST(request: Request): Promise<NextResponse> {
   try { body = await request.json(); } catch { return badRequest('JSON body required'); }
 
   try {
-    const result = await provisionTenant(getRawDb(), body as ProvisionInput, auth.sub, defaultBillingProvider);
+    const result = await provisionTenant(getDb(), body as ProvisionInput, auth.sub, defaultBillingProvider);
     return created(result);
   } catch (err) {
     const status = (err as { status?: number }).status ?? 500;

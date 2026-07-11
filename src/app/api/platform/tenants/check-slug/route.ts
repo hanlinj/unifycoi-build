@@ -4,7 +4,7 @@
 // re-validate at submit time (this is a UX convenience, not the enforcement point).
 
 import { NextResponse } from 'next/server';
-import { getRawDb } from '@/lib/db/client';
+import { getDb } from '@/lib/db/client';
 import { isSlugTaken, isValidSlug } from '@/lib/services/tenants';
 import { requirePlatformAuth, isResponse, ok, badRequest } from '@/lib/api';
 
@@ -18,5 +18,5 @@ export async function GET(request: Request): Promise<NextResponse> {
   const slug = new URL(request.url).searchParams.get('slug') ?? '';
   if (!isValidSlug(slug)) return badRequest('slug must be lowercase letters, numbers, and hyphens');
 
-  return ok({ slug, available: !isSlugTaken(getRawDb(), slug) });
+  return ok({ slug, available: !(await isSlugTaken(getDb(), slug)) });
 }

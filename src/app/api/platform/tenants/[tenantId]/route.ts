@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server';
-import { getRawDb } from '@/lib/db/client';
+import { getDb } from '@/lib/db/client';
 import { getTenantById, updateTenant } from '@/lib/services/tenants';
 import { requirePlatformAuth, isResponse, ok, notFound, badRequest } from '@/lib/api';
 
@@ -13,8 +13,8 @@ export async function GET(
   const auth = requirePlatformAuth(request);
   if (isResponse(auth)) return auth;
 
-  const db = getRawDb();
-  const tenant = getTenantById(db, params.tenantId);
+  const db = getDb();
+  const tenant = await getTenantById(db, params.tenantId);
   if (!tenant) return notFound('Tenant not found');
   return ok(tenant);
 }
@@ -29,9 +29,9 @@ export async function PATCH(
   let body: unknown;
   try { body = await request.json(); } catch { return badRequest('JSON body required'); }
 
-  const db = getRawDb();
+  const db = getDb();
   try {
-    const tenant = updateTenant(db, params.tenantId, body as Record<string, unknown>, auth.sub);
+    const tenant = await updateTenant(db, params.tenantId, body as Record<string, unknown>, auth.sub);
     return ok(tenant);
   } catch (e: unknown) {
     const err = e as { message: string; status?: number };

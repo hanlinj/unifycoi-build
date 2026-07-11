@@ -4,7 +4,7 @@
 // non-throwing shape as attachBilling/retry-billing) — never a local rate Stripe isn't charging.
 
 import { NextResponse } from 'next/server';
-import { getRawDb } from '@/lib/db/client';
+import { getDb } from '@/lib/db/client';
 import { updateTenantRate } from '@/lib/services/provisioning';
 import { defaultBillingProvider } from '@/lib/billing/stripe';
 import { requirePlatformAuth, isResponse, ok, badRequest, apiError } from '@/lib/api';
@@ -26,7 +26,7 @@ export async function PATCH(
   if (typeof monthlyRateCents !== 'number') return badRequest('monthlyRateCents (number) is required');
 
   try {
-    const result = await updateTenantRate(getRawDb(), params.tenantId, monthlyRateCents, defaultBillingProvider, auth.sub);
+    const result = await updateTenantRate(getDb(), params.tenantId, monthlyRateCents, defaultBillingProvider, auth.sub);
     return ok(result);
   } catch (err) {
     const status = (err as { status?: number }).status ?? 500;

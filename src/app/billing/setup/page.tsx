@@ -5,7 +5,7 @@
 // /reset-password page), and re-fetches a live SetupIntent client secret from Stripe — the one
 // from the original provisioning response was never persisted and only ever existed once.
 
-import { getRawDb } from '@/lib/db/client';
+import { getDb } from '@/lib/db/client';
 import { getTenantById } from '@/lib/services/tenants';
 import { resolveBillingSetupToken } from '@/lib/services/password-reset';
 import { defaultBillingProvider } from '@/lib/billing/stripe';
@@ -17,8 +17,8 @@ export const dynamic = 'force-dynamic';
 
 export default async function BillingSetupPage({ searchParams }: { searchParams: { token?: string } }) {
   const token = searchParams.token;
-  const db = getRawDb();
-  const peek = token ? resolveBillingSetupToken(db, token) : { status: 'invalid' as const };
+  const db = getDb();
+  const peek = token ? await resolveBillingSetupToken(db, token) : { status: 'invalid' as const };
 
   if (peek.status === 'invalid') {
     return (
@@ -35,7 +35,7 @@ export default async function BillingSetupPage({ searchParams }: { searchParams:
     );
   }
 
-  const tenant = getTenantById(db, peek.tenantId as string);
+  const tenant = await getTenantById(db, peek.tenantId as string);
   if (!tenant) {
     return (
       <DeadEnd icon="⚠️" title="This link isn&rsquo;t valid">

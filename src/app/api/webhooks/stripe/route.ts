@@ -6,7 +6,7 @@
 
 import { NextResponse } from 'next/server';
 import Stripe from 'stripe';
-import { getRawDb } from '@/lib/db/client';
+import { getDb } from '@/lib/db/client';
 import { env } from '@/lib/env';
 import { handleStripeEvent } from '@/lib/billing/stripe-webhook';
 
@@ -36,7 +36,7 @@ export async function POST(request: Request): Promise<NextResponse> {
     return NextResponse.json({ error: 'invalid signature' }, { status: 400 });
   }
 
-  const result = handleStripeEvent(getRawDb(), event);
+  const result = await handleStripeEvent(getDb(), event);
   // Always 2xx once authenticated so Stripe doesn't retry-storm on an ignored/unknown event.
   return NextResponse.json(result, { status: 200 });
 }
