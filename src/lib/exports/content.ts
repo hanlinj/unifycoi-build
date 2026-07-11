@@ -9,6 +9,7 @@ import { TenantDB } from '@/lib/db/tenant';
 import { resolveRequirements, type Precedence } from '@/lib/requirements/resolver';
 import { chaseExpiryByVendor } from '@/lib/notifications/chase';
 import { decryptField } from '@/lib/crypto/field';
+import { inClause } from '@/lib/reports';
 import { scopeAuditEvents, type ExportScope } from './audit-export';
 
 const DAY = 86_400_000;
@@ -27,15 +28,6 @@ export interface AuditExportContent {
 
 interface ScopeSets { vendorIds: string[]; locationIds: string[] | null }
 
-/**
- * Postgres-parameterized IN(...) placeholder list, starting at $<startAt>. `reports/index.ts`'s
- * `inClause()` is SQLite `?`-only (still Stage 9's file, un-converted) — a narrow local helper
- * here avoids pulling that whole not-yet-scoped file into this stage's conversion.
- */
-function inClausePg(count: number, startAt: number): string {
-  return Array.from({ length: count }, (_, i) => `$${startAt + i}`).join(', ');
-}
-
 async function scopeSets(db: Db, tenantId: string, scope: ExportScope, scopeRef: string | null): Promise<ScopeSets> {
   const tdb = new TenantDB(db, tenantId);
   if (scope === 'org' || scope === 'tenant_offboard') {
@@ -52,7 +44,7 @@ async function scopeSets(db: Db, tenantId: string, scope: ExportScope, scopeRef:
   // region
   const locIds = (await tdb.all<{ id: string }>('SELECT id FROM locations WHERE tenant_id = $1 AND region_id = $2', [scopeRef])).map((r) => r.id);
   const vIds = locIds.length
-    ? (await tdb.all<{ vendor_id: string }>(`SELECT DISTINCT vendor_id FROM vendor_locations WHERE tenant_id = $1 AND location_id IN (${inClausePg(locIds.length, 2)})`, locIds)).map((r) => r.vendor_id)
+    ? (await tdb.all<{ vendor_id: string }>(`SELECT DISTINCT vendor_id FROM vendor_locations WHERE tenant_id = $1 AND location_id IN (${inClause(locIds.length, 2)})`, locIds)).map((r) => r.vendor_id)
     : [];
   return { vendorIds: vIds, locationIds: locIds };
 }
@@ -77,7 +69,7 @@ export async function gatherAuditExportContent(
   ];
 
   // 2. Posture (current vendor_location status counts for the scope)
-  const locClause = locationIds === null ? '' : locationIds.length === 0 ? ' AND 1=0' : ` AND location_id IN (${inClausePg(locationIds.length, 2)})`;
+  const locClause = locationIds === null ? '' : locationIds.length === 0 ? ' AND 1=0' : ` AND location_id IN (${inClause(locationIds.length, 2)})`;
   const statusRows = await tdb.all<{ status: string; n: string }>(
     `SELECT status, COUNT(*) AS n FROM vendor_locations WHERE tenant_id = $1${locClause} GROUP BY status`,
     locationIds ?? []
@@ -104,7 +96,7 @@ export async function gatherAuditExportContent(
   const precedence = (settings?.precedence_policy as Precedence) ?? 'strictest';
   const reqLocations = locationIds === null
     ? await tdb.all<{ id: string; name: string }>(`SELECT id, name FROM locations WHERE tenant_id = $1 AND status = 'active'`)
-    : locationIds.length ? await tdb.all<{ id: string; name: string }>(`SELECT id, name FROM locations WHERE tenant_id = $1 AND id IN (${inClausePg(locationIds.length, 2)})`, locationIds) : [];
+    : locationIds.length ? await tdb.all<{ id: string; name: string }>(`SELECT id, name FROM locations WHERE tenant_id = $1 AND id IN (${inClause(locationIds.length, 2)})`, locationIds) : [];
   const requirements: AuditExportContent['requirements'] = [];
   for (const loc of reqLocations) {
     const trades = (await tdb.all<{ trade: string }>(

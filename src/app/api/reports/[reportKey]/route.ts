@@ -8,7 +8,7 @@
 
 import { NextResponse } from 'next/server';
 import { randomUUID } from 'crypto';
-import { getRawDb } from '@/lib/db/client';
+import { getDb, type Db } from '@/lib/db/client';
 import { requireTenantAuth, isResponse, forbidden, notFound, badRequest, ok } from '@/lib/api';
 import { resolveScope } from '@/lib/scope';
 import { logAudit } from '@/lib/audit';
@@ -47,13 +47,13 @@ export async function GET(
     to: url.searchParams.get('to'),
   };
 
-  const db = getRawDb();
-  const scope = resolveScope(db, auth.tenantId, auth.sub, auth.role);
-  const result = runReport(db, auth.tenantId, { locationIds: scope.locationIds }, meta.key, filters);
+  const db = getDb();
+  const scope = await resolveScope(db, auth.tenantId, auth.sub, auth.role);
+  const result = await runReport(db, auth.tenantId, { locationIds: scope.locationIds }, meta.key, filters);
 
   // ── JSON view ─────────────────────────────────────────────────────────────────
   if (format === null) {
-    logAudit(db, {
+    await logAudit(db, {
       tenantId: auth.tenantId, actorType: 'user', actorId: auth.sub,
       eventType: 'report.viewed', targetType: 'report', targetId: meta.key,
       payload: { filters, format: 'view' },
@@ -65,14 +65,14 @@ export async function GET(
   const table = projectReport(meta.key, result);
   const bytes: Buffer = format === 'csv'
     ? Buffer.from(toCsv(table.columns, table.rows), 'utf-8')
-    : Buffer.from(await renderReportPdf({ tenantName: tenantName(db, auth.tenantId), table, generatedAt: result.generatedAt, filters }));
+    : Buffer.from(await renderReportPdf({ tenantName: await tenantName(db, auth.tenantId), table, generatedAt: result.generatedAt, filters }));
 
   // Persist to BlobStore (envelope-encrypted, self-contained), retained per the doc schedule.
   const generationId = randomUUID();
   const storageKey = `tenants/${auth.tenantId}/reports/${meta.key}/${generationId}.${format}`;
   await getBlobStore().put(storageKey, packEncrypted(bytes));
 
-  logAudit(db, {
+  await logAudit(db, {
     tenantId: auth.tenantId, actorType: 'user', actorId: auth.sub,
     eventType: 'report.generated', targetType: 'report', targetId: meta.key,
     payload: { report_key: meta.key, filters, format, row_count: table.rows.length, storage_key: storageKey },
@@ -87,7 +87,7 @@ export async function GET(
   });
 }
 
-function tenantName(db: ReturnType<typeof getRawDb>, tenantId: string): string {
-  const row = db.prepare('SELECT name FROM tenants WHERE id = ?').get(tenantId) as { name: string } | undefined;
+async function tenantName(db: Db, tenantId: string): Promise<string> {
+  const row = await db.selectFrom('tenants').select('name').where('id', '=', tenantId).executeTakeFirst();
   return row?.name ?? 'UnifyCOI';
 }

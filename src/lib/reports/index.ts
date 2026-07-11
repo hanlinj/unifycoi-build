@@ -4,7 +4,7 @@
 // data never appears in any report. Each report is a pure read builder; the registry maps a
 // slug → builder. The same builders back the on-demand views (Slice B) and PDF/CSV export (C).
 
-import type Database from 'better-sqlite3';
+import type { Db } from '@/lib/db/client';
 import { TenantDB } from '@/lib/db/tenant';
 
 export type ReportKey =
@@ -61,18 +61,18 @@ export interface ReportResult {
  * filter. Returns null only for an Admin with no region/location filter (org-wide). An empty
  * array means "nothing in scope" (e.g. a District filtering to a region they don't own).
  */
-export function effectiveLocationIds(
-  db: Database.Database,
+export async function effectiveLocationIds(
+  db: Db,
   tenantId: string,
   scope: ReportScope,
   filters: ReportFilters
-): string[] | null {
+): Promise<string[] | null> {
   const tdb = new TenantDB(db, tenantId);
   let ids = scope.locationIds; // null = all
 
   if (filters.region) {
-    const regionLocs = tdb
-      .all<{ id: string }>('SELECT id FROM locations WHERE tenant_id = ? AND region_id = ?', [filters.region])
+    const regionLocs = (await tdb
+      .all<{ id: string }>('SELECT id FROM locations WHERE tenant_id = $1 AND region_id = $2', [filters.region]))
       .map((r) => r.id);
     ids = ids === null ? regionLocs : ids.filter((id) => regionLocs.includes(id));
   }
@@ -85,22 +85,29 @@ export function effectiveLocationIds(
 }
 
 /** Concrete list of in-scope vendor ids (resolves the null=org case to all tenant vendors). */
-export function vendorIdsInScope(db: Database.Database, tenantId: string, effLocationIds: string[] | null): string[] {
+export async function vendorIdsInScope(db: Db, tenantId: string, effLocationIds: string[] | null): Promise<string[]> {
   const tdb = new TenantDB(db, tenantId);
   if (effLocationIds === null) {
-    return tdb.all<{ id: string }>('SELECT id FROM vendors WHERE tenant_id = ?').map((r) => r.id);
+    return (await tdb.all<{ id: string }>('SELECT id FROM vendors WHERE tenant_id = $1')).map((r) => r.id);
   }
   if (effLocationIds.length === 0) return [];
-  const ph = effLocationIds.map(() => '?').join(', ');
-  return tdb
+  const ph = inClause(effLocationIds.length, 2);
+  return (await tdb
     .all<{ vendor_id: string }>(
-      `SELECT DISTINCT vendor_id FROM vendor_locations WHERE tenant_id = ? AND location_id IN (${ph})`,
+      `SELECT DISTINCT vendor_id FROM vendor_locations WHERE tenant_id = $1 AND location_id IN (${ph})`,
       effLocationIds
-    )
+    ))
     .map((r) => r.vendor_id);
 }
 
-/** SQL `IN (?, ?, …)` placeholder list helper. */
-export function inClause(values: string[]): string {
-  return values.map(() => '?').join(', ');
+/**
+ * Postgres-parameterized IN(...) placeholder list, `$<startAt>, $<startAt+1>, ...`. Phase 13
+ * migration, Stage 9: this is the real fix — SQLite's `?`-only version forced Stage 8c's
+ * `exports/content.ts` and `exports/audit-export.ts` to each carry their own narrow local
+ * `inClausePg` shim rather than touch this not-yet-converted file early (see ADR-013-01 Stage
+ * 8c). Converting this file retires both shims — search.ts's own `inClause` import now gets
+ * the real, correct version too, in the same motion, no separate fix needed there.
+ */
+export function inClause(count: number, startAt: number = 1): string {
+  return Array.from({ length: count }, (_, i) => `$${startAt + i}`).join(', ');
 }

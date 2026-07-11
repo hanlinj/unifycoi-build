@@ -14,6 +14,7 @@ import { logAudit } from '@/lib/audit';
 import { captureSecurityAlert } from '@/lib/observability';
 import { getBlobStore } from '@/lib/blob';
 import { packEncrypted } from '@/lib/crypto/envelope-file';
+import { inClause } from '@/lib/reports';
 import { gatherAuditExportContent } from './content';
 import { renderAuditExportCsv } from './audit-csv';
 import { renderAuditExportPdf } from './audit-pdf';
@@ -145,16 +146,6 @@ export async function generateExportArtifact(db: Db, tenantId: string, exportId:
 
 // ── Scope → audit_events ────────────────────────────────────────────────────────────
 
-/**
- * Postgres-parameterized IN(...) placeholder list, starting at $<startAt>. `reports/index.ts`'s
- * `inClause()` is SQLite `?`-only (still Stage 9's file, un-converted) — a narrow local helper
- * here avoids pulling that whole not-yet-scoped file into this stage's conversion. Same helper
- * as content.ts's — small and local enough that a shared export isn't worth it yet.
- */
-function inClausePg(count: number, startAt: number): string {
-  return Array.from({ length: count }, (_, i) => `$${startAt + i}`).join(', ');
-}
-
 interface AuditRow { created_at: string; actor_type: string; actor_id: string | null; event_type: string; target_type: string | null; target_id: string | null; payload_json: Record<string, unknown> | null }
 
 export async function scopeAuditEvents(db: Db, tenantId: string, scope: ExportScope, scopeRef: string | null): Promise<AuditRow[]> {
@@ -176,14 +167,14 @@ export async function scopeAuditEvents(db: Db, tenantId: string, scope: ExportSc
   } else { // region
     const locIds = (await tdb.all<{ id: string }>('SELECT id FROM locations WHERE tenant_id = $1 AND region_id = $2', [scopeRef])).map((r) => r.id);
     const vendorIds = locIds.length
-      ? (await tdb.all<{ vendor_id: string }>(`SELECT DISTINCT vendor_id FROM vendor_locations WHERE tenant_id = $1 AND location_id IN (${inClausePg(locIds.length, 2)})`, locIds)).map((r) => r.vendor_id)
+      ? (await tdb.all<{ vendor_id: string }>(`SELECT DISTINCT vendor_id FROM vendor_locations WHERE tenant_id = $1 AND location_id IN (${inClause(locIds.length, 2)})`, locIds)).map((r) => r.vendor_id)
       : [];
     targets = [scopeRef!, ...locIds, ...vendorIds];
   }
 
   if (targets.length === 0) return [];
   return tdb.all<AuditRow>(
-    `SELECT ${cols} FROM audit_events WHERE tenant_id = $1 AND target_id IN (${inClausePg(targets.length, 2)}) ORDER BY created_at ASC`,
+    `SELECT ${cols} FROM audit_events WHERE tenant_id = $1 AND target_id IN (${inClause(targets.length, 2)}) ORDER BY created_at ASC`,
     targets
   );
 }
