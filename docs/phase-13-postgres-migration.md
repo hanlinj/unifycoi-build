@@ -1,21 +1,30 @@
-# Phase 13 — SQLite → Postgres + Kysely migration
+# Phase 13 — SQLite → Postgres + Kysely migration — ✅ COMPLETE (Stage 10, 2026-07-11)
 
-Staged, module-by-module, never a big-bang rewrite. The SQLite baseline test suite is the
-correctness contract — the running pass count against Postgres is the tracking signal across
-stages. Decision record: `docs/decisions.md` ADR-013-01 (rationale, fresh-baseline choice,
-Kysely choice, and the cross-stage invariants/landmines discovered along the way).
+Staged, module-by-module, never a big-bang rewrite. The SQLite baseline test suite was the
+correctness contract throughout — the running pass count against Postgres was the tracking
+signal across stages. Decision record: `docs/decisions.md` ADR-013-01 (rationale, fresh-baseline
+choice, Kysely choice, and the cross-stage invariants/landmines discovered along the way — this
+is the durable reference; this file is the stage-by-stage tracking log now closed out).
 
-**Running pass count: 598 / 1229** (as of Stage 9). Every failure not yet converted has been
-confirmed to be the same "old code calling the new async/Kysely API synchronously" shape — no
-suite has failed for a different, real-behavior reason.
+**Final pass count: 605 / 1227.** `better-sqlite3` is uninstalled — this is no longer "pass count
+against Postgres while SQLite code still exists," it's simply the suite's real state. The ~40
+old SQLite-era test files (`tests/phase*.test.ts`, `tests/api-*.test.ts`) were never in any
+stage's charter to convert or delete (an explicit, repeated call across Stages 6–9: old test
+files get superseded by a new `.pg.test.ts` file, never edited in place) and remain in the tree
+failing for the expected reason — see `tests/setup.ts`'s unhandled-rejection comment for why
+they stay rather than get cleaned up as part of this migration. A genuine exception surfaced and
+was fixed during Stage 10's removal verification — see that stage's row below.
 
-> **Baseline correction:** earlier reports in this doc's history cited "440 / 1010" as of Stage
-> 4. That 1010 figure was stale/wrong — re-verified directly against the Stage 4 commit
-> (`dd8393b`, stashing all Stage 5 work and running the full suite against it) gives **440 /
-> 1071**, not 1010. The extra ~61 tests were pre-existing Phase 12 test files that had already
-> landed on disk by the time of that report, not anything Phase 13 added or removed. Stage 5's
-> own delta is a clean, exact +25/+29 (test file additions only) on top of the corrected 1071
-> baseline — see ADR-013-01 for the reconciliation math.
+> **Baseline correction (historical, kept for the record):** early reports in this doc's history
+> cited "440 / 1010" as of Stage 4. That 1010 figure was stale/wrong — re-verified directly
+> against the Stage 4 commit (`dd8393b`, stashing all Stage 5 work and running the full suite
+> against it) gives **440 / 1071**, not 1010. The extra ~61 tests were pre-existing Phase 12 test
+> files already on disk at that report's time, not anything Phase 13 added or removed. Stage 5's
+> own delta was a clean, exact +25/+29 (test file additions only) on top of the corrected 1071
+> baseline — see ADR-013-01 for the reconciliation math. No other baseline figure in this
+> document's history needed correction — this was the only drift the reconciliation passes
+> (pre-8c and Stage 10) found in the numbers themselves, as opposed to the tracking-doc-drift
+> (undocumented files) and performance-deferral items tracked separately below.
 
 ## Stage status
 
@@ -35,7 +44,7 @@ suite has failed for a different, real-behavior reason.
 | 8c | audit exports: `exports/content.ts` + `exports/audit-export.ts` + `exports/worker.ts` + all three `app/api/exports/**` routes (deferred from Stage 7 — see ADR-013-01 and Shortcuts & gaps). Local `inClausePg` helper (not `reports/index.ts`'s SQLite one) for IN-clauses; caught and fixed a live invariant-2 landmine in `decryptedSensitiveFor`'s Sensitive-decrypt path | ✅ done | `2bfbd3d` |
 | 8d | the unclaimed `getRawDb` platform/billing surface (16 files, found by the pre-8c reconciliation sweep) — the `/platform` UI (layout, fleet page, provisioning page), `billing/setup/{confirm route,page}`, and 10 platform-tenant/webhook routes. All 16 triaged mechanical (0 deferred to Stage 9) before converting. Found 13 files also missing `await` on the now-async callee, and 3 non-`async` page/layout components promoted to `async` Server Components. New test harness (fresh-singleton + ephemeral DB via `jest.resetModules()`) makes all 16 genuinely test-reachable for the first time — see ADR-013-01 | ✅ done | `d7aae9b` |
 | 9 | reports/search — the last conversion stage, converted reports-then-search in one stage (separable call graphs, but `search.ts`'s only cross-subsystem dependency is `inClause` from `reports/index.ts`, so reports converts first to make it Postgres-aware once, no shim/handoff). `reports/index.ts` (+ the real `inClause` fix, retiring Stage 8c's two local shims), `reports/builders.ts` (the `MIN(json_extract(...))` → `->>`/`DISTINCT ON` rewrite, invariants 5–6; the `coiCoverageSummary` jsonb `JSON.parse()` fix, invariant 2, caught pre-flight), `search/search.ts` (the `rowid`→`seq` fix), both routes. `renewalForecast`'s N+1 collapsed cleanly; `vendorRoster`'s N+1 deferred (involved) — see Shortcuts & gaps. **Closing deliverable: the Stage-10-readiness grep is clean — `better-sqlite3` surface in `src/` is empty.** | ✅ done | `6dc8252` |
-| 10 | dev scripts (`dev-seed.ts`, `eval-test-dataset.ts`), cutover cleanup, remove `better-sqlite3` dependency, remove the 17 dead `src/migrations/*.sql` files. Confirmed safe by Stage 9's readiness grep — see ADR-013-01 | not started | — |
+| 10 | Removal, not conversion. `dev-seed.ts` converted to Postgres/Kysely (still useful — a dev tool, run and verified twice for real against the local dev DB, including the idempotent wipe-and-reseed path). `eval-test-dataset.ts` converted (ephemeral Postgres DB via `test-isolation.ts`, replacing its `:memory:` SQLite scaffolding — not obsolete, its Vision-accuracy-eval purpose is DB-backend-independent). Deleted the 17 dead `src/migrations/*.sql` files (superseded by `migrations-pg`; re-confirmed no currently-passing test references them — 32 old test files DO read them at runtime via `fs.readFileSync`, but all 32 were already failing for unrelated reasons, so deletion doesn't change the pass count). `better-sqlite3` + `@types/better-sqlite3` uninstalled — clean `npm install`, confirmed absent from `package.json`/`package-lock.json`/`node_modules`. Removed `env.ts`'s dead `sqlite.path` config (self-flagged "Stage 10 removes it" since Stage 1) and `SQLITE_PATH` from `.env`/`.env.example`. Kept `tests/setup.ts`'s unhandled-rejection shim — independently justified (protects against the ~40 old test files, not tied to migration completion). **Found and fixed during removal verification:** `tests/tenant-guard.test.ts` (pre-migration, never in any stage's scope) used a standalone real SQLite instance bypassing the whole migration — 3 of its "passing" assertions were false positives (asserted on a fire-and-forget `TenantDB.update()`/`del()` call before the write had actually run). Converted to `tenant-guard.pg.test.ts`, fixing the false positives with real `await`s. **Stage-10-readiness grep, executed: clean.** Full suite re-verified identical (605/1227) with the package present vs genuinely absent — proof, not assertion, that nothing else depends on it. See ADR-013-01 for the full verification writeup | ✅ done | `0dc3a3b` |
 
 Stage boundaries and reasoning: see the Phase 13 kickoff investigation report (chat, not
 duplicated here) for the full original module map and per-stage rationale.
@@ -82,13 +91,16 @@ duplicated here) for the full original module map and per-stage rationale.
   `queueNotification` and `chase.ts`'s `vendorExpiry`, were already converted in Stages 3 and 5
   respectively, so it was a cheap pickup, not a scope expansion).
 - ~~Tracking-doc drift, flagged for a pre-Stage-10 reconciliation pass, not fixed now.~~
-  **A reconciliation pass ran pre-8c (2026-07-11), not pre-10 — see ADR-013-01's "Pre-8c
-  reconciliation sweep" entry.** The three previously-surfaced files (`exports/content.ts`,
-  `bootstrap.ts`, `manual-reminder.ts`) are all now accounted for. The `Database.Database` sweep
-  came back clean (matches the tracking docs exactly). The `getRawDb` sweep did NOT come back
-  clean — see the new section immediately below. **This does not retire the obligation for a
-  final pass before Stage 10** — it found a bigger gap than expected, which is itself a reason to
-  re-run this sweep again once Stage 8c/9 land, not to consider reconciliation "done."
+  **Closed. A reconciliation pass ran pre-8c (2026-07-11) — see ADR-013-01's "Pre-8c
+  reconciliation sweep" entry — and Stage 10's own removal-verification grep served as the final
+  pass this item was holding out for.** The three previously-surfaced files (`exports/content.ts`,
+  `bootstrap.ts`, `manual-reminder.ts`) are all accounted for (converted or correctly assigned).
+  The `Database.Database` sweep came back clean both times. The `getRawDb` sweep found the
+  16-file unassigned surface pre-8c (closed in Stage 8d) and came back clean in Stage 10's
+  post-uninstall re-check (zero remaining `.ts`/`.tsx` references in `src/`). Stage 10 also found
+  one thing the earlier sweeps' `.ts`-file scope couldn't have caught: `tests/tenant-guard.test.ts`,
+  a pre-migration test file with a standalone SQLite fixture bypassing the whole migration —
+  closed by converting it (see this doc's Stage 10 row and ADR-013-01).
 - **`reports/builders.ts`'s `vendorRoster` N+1, deliberately deferred (Stage 9) — a post-migration
   performance item, not a correctness gap.** Four queries per vendor (vendor row, its locations,
   `coiCoverageSummary`'s latest-COI-document lookup, latest-extraction lookup), fanning out with
