@@ -6,7 +6,7 @@
 // from scratch.
 
 import { NextResponse } from 'next/server';
-import { getRawDb } from '@/lib/db/client';
+import { getDb } from '@/lib/db/client';
 import { requireTenantAuth, isResponse, ok, badRequest, forbidden } from '@/lib/api';
 import { validateTable, type ImportLocationRow } from '@/lib/import/location-rows';
 import { bulkCreateLocationsWithManagers } from '@/lib/services/bulk-onboarding';
@@ -30,7 +30,7 @@ export async function POST(request: Request): Promise<NextResponse> {
   if (!table.isClean) return badRequest('Some rows are invalid — fix them before submitting.');
   if (table.nonBlankRows.length === 0) return badRequest('Add at least one location.');
 
-  const db = getRawDb();
-  const result = bulkCreateLocationsWithManagers(db, auth.tenantId, table.nonBlankRows, auth.sub);
+  const db = getDb();
+  const result = await bulkCreateLocationsWithManagers(db, auth.tenantId, table.nonBlankRows, auth.sub);
   return ok(result);
 }

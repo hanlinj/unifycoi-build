@@ -36,11 +36,14 @@ export function getEngineDate(): Date {
   return _dateOverride ? new Date(_dateOverride) : new Date();
 }
 
-// Normalize date strings to YYYY-MM-DD whether they arrive as ISO or US slash format.
+// Normalize date strings to zero-padded YYYY-MM-DD, whether they arrive as ISO (padded or not —
+// Vision extraction has no format constraint on this field, so an unpadded "2026-9-5" is a real
+// possibility, not just a synthetic edge case) or US slash format.
 export function toIsoDateStr(raw: string): string | null {
-  if (/^\d{4}-\d{2}-\d{2}$/.test(raw)) return raw;
-  const m = /^(\d{1,2})\/(\d{1,2})\/(\d{4})$/.exec(raw);
-  if (m) return `${m[3]}-${m[1].padStart(2, '0')}-${m[2].padStart(2, '0')}`;
+  const dash = /^(\d{4})-(\d{1,2})-(\d{1,2})$/.exec(raw);
+  if (dash) return `${dash[1]}-${dash[2].padStart(2, '0')}-${dash[3].padStart(2, '0')}`;
+  const slash = /^(\d{1,2})\/(\d{1,2})\/(\d{4})$/.exec(raw);
+  if (slash) return `${slash[3]}-${slash[1].padStart(2, '0')}-${slash[2].padStart(2, '0')}`;
   return null;
 }
 

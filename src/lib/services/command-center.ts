@@ -9,7 +9,7 @@
 // Scope-clamped server-side via the caller's resolveScope() result. Expiry derives from the
 // chase schedule (chase.ts), per the approved Slice A design.
 
-import type Database from 'better-sqlite3';
+import type { Db } from '@/lib/db/client';
 import { TenantDB } from '@/lib/db/tenant';
 import { chaseExpiryByVendor } from '@/lib/notifications/chase';
 import { expiryBoundaryMs } from '@/lib/time/zone';
@@ -68,12 +68,12 @@ function humanizeReq(key: string): string {
   return text.replace(/\b\w/g, (c) => c.toUpperCase());
 }
 
-export function buildCommandCenter(
-  db: Database.Database,
+export async function buildCommandCenter(
+  db: Db,
   tenantId: string,
   scope: CCScope,
   nowMs: number = Date.now()
-): CommandCenterResult {
+): Promise<CommandCenterResult> {
   const empty: CommandCenterResult = { tier1: [], tier2: [], tier3: { onboarding: 0, pending: 0, onTrack: 0 }, facilitiesInScope: 0 };
 
   // District/store with no in-scope locations → nothing.
@@ -82,26 +82,31 @@ export function buildCommandCenter(
   const tdb = new TenantDB(db, tenantId);
   const scoped = scope.locationIds !== null;
   const locParams = scoped ? scope.locationIds! : [];
-  const locFilter = scoped ? ` AND vl.location_id IN (${locParams.map(() => '?').join(', ')})` : '';
+  // tenant_id is bound as $1 (TenantDB's contract); the IN-list starts at $2.
+  const locPlaceholders = locParams.map((_, i) => `$${i + 2}`).join(', ');
+  const locFilter = scoped ? ` AND vl.location_id IN (${locPlaceholders})` : '';
 
   // Facilities in scope (for the empty-state count) — always SCOPE-SCOPED and active-only.
   // Admin (scope.locationIds === null): org-wide active count.
   // District: count of active locations across their regions (resolveScope's location set).
   // Store Manager: count of their assigned active locations.
+  // COUNT(*) returns as a string (Postgres bigint precision safety) — cast before using as a number.
   const facilitiesInScope = scoped
-    ? tdb.get<{ n: number }>(
-        `SELECT COUNT(*) AS n FROM locations
-         WHERE tenant_id = ? AND status = 'active' AND id IN (${locParams.map(() => '?').join(', ')})`,
-        locParams
-      )!.n
-    : tdb.get<{ n: number }>(`SELECT COUNT(*) AS n FROM locations WHERE tenant_id = ? AND status = 'active'`)!.n;
+    ? Number(
+        (await tdb.get<{ n: string }>(
+          `SELECT COUNT(*) AS n FROM locations
+           WHERE tenant_id = $1 AND status = 'active' AND id IN (${locPlaceholders})`,
+          locParams
+        ))!.n
+      )
+    : Number((await tdb.get<{ n: string }>(`SELECT COUNT(*) AS n FROM locations WHERE tenant_id = $1 AND status = 'active'`))!.n);
 
   // 1. In-scope vendor-locations + vendor identity.
-  const vlocs = tdb.all<VLoc>(
+  const vlocs = await tdb.all<VLoc>(
     `SELECT vl.vendor_id, vl.location_id, vl.status, vl.flags_json, v.business_name, v.trade
      FROM vendor_locations vl
      JOIN vendors v ON v.id = vl.vendor_id AND v.tenant_id = vl.tenant_id
-     WHERE vl.tenant_id = ?${locFilter}`,
+     WHERE vl.tenant_id = $1${locFilter}`,
     locParams
   );
   if (vlocs.length === 0) return { ...empty, facilitiesInScope };
@@ -115,8 +120,8 @@ export function buildCommandCenter(
   }
 
   // 2. Latest verification run per vendor (recommendation + timestamp).
-  const runs = tdb.all<{ id: string; vendor_id: string; recommendation: string; created_at: string }>(
-    `SELECT id, vendor_id, recommendation, created_at FROM verification_runs WHERE tenant_id = ? ORDER BY created_at DESC`
+  const runs = await tdb.all<{ id: string; vendor_id: string; recommendation: string; created_at: string }>(
+    `SELECT id, vendor_id, recommendation, created_at FROM verification_runs WHERE tenant_id = $1 ORDER BY created_at DESC`
   );
   const latestRun = new Map<string, { id: string; recommendation: string; created_at: string }>();
   for (const r of runs) if (!latestRun.has(r.vendor_id)) latestRun.set(r.vendor_id, r);
@@ -125,9 +130,11 @@ export function buildCommandCenter(
   const latestRunIds = [...latestRun.values()].map((r) => r.id);
   const defByVendor = new Map<string, { count: number; topKey: string }>();
   if (latestRunIds.length > 0) {
-    const evals = tdb.all<{ vendor_id: string; requirement_key: string }>(
+    // tenant_id is $1; run_id IN-list starts at $2.
+    const runIdPlaceholders = latestRunIds.map((_, i) => `$${i + 2}`).join(', ');
+    const evals = await tdb.all<{ vendor_id: string; requirement_key: string }>(
       `SELECT vendor_id, requirement_key FROM requirement_evaluations
-       WHERE tenant_id = ? AND outcome = 'deficient' AND run_id IN (${latestRunIds.map(() => '?').join(', ')})
+       WHERE tenant_id = $1 AND outcome = 'deficient' AND run_id IN (${runIdPlaceholders})
        ORDER BY requirement_key`,
       latestRunIds
     );
@@ -139,14 +146,15 @@ export function buildCommandCenter(
   }
 
   // 4. Chase expiry per vendor.
-  const expiryMap = chaseExpiryByVendor(db, tenantId);
+  const expiryMap = await chaseExpiryByVendor(db, tenantId);
   // OPS-7: days-to-expiry buckets resolve the expiry boundary in the tenant's timezone, so
   // they agree with the day-0 flip (which uses the same expiryBoundaryMs). Null tz → UTC.
-  const tz = (db.prepare('SELECT timezone FROM tenants WHERE id = ?').get(tenantId) as { timezone: string | null } | undefined)?.timezone ?? null;
+  const tenantRow = await db.selectFrom('tenants').select('timezone').where('id', '=', tenantId).executeTakeFirst();
+  const tz = tenantRow?.timezone ?? null;
 
   // 5. Invites per vendor (correction aging + delivery failures).
-  const invites = tdb.all<{ vendor_id: string | null; purpose: string; delivery_state: string; created_at: string }>(
-    `SELECT vendor_id, purpose, delivery_state, created_at FROM invites WHERE tenant_id = ?`
+  const invites = await tdb.all<{ vendor_id: string | null; purpose: string; delivery_state: string; created_at: string }>(
+    `SELECT vendor_id, purpose, delivery_state, created_at FROM invites WHERE tenant_id = $1`
   );
   const inviteAgg = new Map<string, { bouncedAt: string | null; correctionSentAt: string | null }>();
   for (const inv of invites) {

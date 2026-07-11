@@ -1,5 +1,4 @@
 import { randomUUID } from 'crypto';
-import type Database from 'better-sqlite3';
 import type { Db } from '@/lib/db/client';
 import { TenantDB } from '@/lib/db/tenant';
 import { hashPassword } from '@/lib/auth/password';
@@ -7,14 +6,6 @@ import { logAudit } from '@/lib/audit';
 import { userManageableByScope, type Scope } from '@/lib/scope';
 import { issueInviteToken } from './password-reset';
 import { env } from '@/lib/env';
-
-// Phase 13 migration, Stage 4: userWithScope() and createUser() are converted (a hard
-// dependency of provisionTenant's first-Admin creation) — the REST of this file (listUsers,
-// getUserById, usersForManagement, updateUser, inviteUser, sendUserInvite) stays on the old
-// synchronous better-sqlite3 API until Stage 5 (locations/users) converts it properly. Those
-// functions all call userWithScope() synchronously without await, so they will not compile
-// until Stage 5 updates them too — expected, same as any other not-yet-converted downstream
-// code; just happens to sit in the same file as what this stage does need.
 
 export interface User {
   id: string;
@@ -150,41 +141,45 @@ export async function createUser(
   return (await userWithScope(db, tenantId, id))!;
 }
 
-export function listUsers(
-  db: Database.Database,
+export async function listUsers(
+  db: Db,
   tenantId: string,
   scope: Scope
-): UserWithScope[] {
+): Promise<UserWithScope[]> {
   const tdb = new TenantDB(db, tenantId);
   let users: User[];
 
   if (scope.locationIds === null) {
     // Admin: all users
-    users = tdb.all<User>(
-      'SELECT id, tenant_id, email, name, role, status, created_at FROM users WHERE tenant_id = ? ORDER BY name'
+    users = await tdb.all<User>(
+      'SELECT id, tenant_id, email, name, role, status, created_at FROM users WHERE tenant_id = $1 ORDER BY name'
     );
   } else {
     // District: users with location assignments in scope
     if (scope.locationIds.length === 0) return [];
-    const placeholders = scope.locationIds.map(() => '?').join(',');
-    users = tdb.all<User>(
+    // tenant_id is bound as $1 (TenantDB's contract); locationIds start at $2.
+    const placeholders = scope.locationIds.map((_, i) => `$${i + 2}`).join(',');
+    users = await tdb.all<User>(
       `SELECT DISTINCT u.id, u.tenant_id, u.email, u.name, u.role, u.status, u.created_at
        FROM users u
        JOIN user_locations ul ON ul.user_id = u.id AND ul.tenant_id = u.tenant_id
-       WHERE u.tenant_id = ? AND ul.location_id IN (${placeholders})
+       WHERE u.tenant_id = $1 AND ul.location_id IN (${placeholders})
        ORDER BY u.name`,
       scope.locationIds
     );
   }
 
-  return users.map((u) => userWithScope(db, tenantId, u.id)!);
+  // Stage 0's catalogued N+1-in-.map() finding, live: userWithScope() is now async, so this
+  // can't stay a plain synchronous .map() — Promise.all + an async mapper instead.
+  const withScopes = await Promise.all(users.map((u) => userWithScope(db, tenantId, u.id)));
+  return withScopes.filter((u): u is UserWithScope => u !== null);
 }
 
-export function getUserById(
-  db: Database.Database,
+export async function getUserById(
+  db: Db,
   tenantId: string,
   userId: string
-): UserWithScope | null {
+): Promise<UserWithScope | null> {
   return userWithScope(db, tenantId, userId);
 }
 
@@ -200,69 +195,73 @@ export interface ManagedUser extends UserWithScope {
  * omitted. (Reuses the Phase 8 containment rule — target's scope ⊆ caller's regions; Admins
  * unmanageable by Districts.)
  */
-export function usersForManagement(
-  db: Database.Database,
+export async function usersForManagement(
+  db: Db,
   tenantId: string,
   scope: Scope,
   callerRole: string
-): ManagedUser[] {
+): Promise<ManagedUser[]> {
   const tdb = new TenantDB(db, tenantId);
-  const all = tdb.all<{ id: string; role: string }>('SELECT id, role FROM users WHERE tenant_id = ? ORDER BY name');
+  const all = await tdb.all<{ id: string; role: string }>('SELECT id, role FROM users WHERE tenant_id = $1 ORDER BY name');
   const out: ManagedUser[] = [];
+  // Sequential for...of: each iteration's manageability check depends on scope/role, not
+  // independent work worth parallelizing, and keeps output ORDER stable (matches the `ORDER
+  // BY name` query above) — Promise.all over a filtering loop would need re-sorting anyway.
   for (const u of all) {
     if (callerRole === 'admin') {
-      out.push({ ...userWithScope(db, tenantId, u.id)!, manageable: true });
+      out.push({ ...(await userWithScope(db, tenantId, u.id))!, manageable: true });
     } else if (u.role === 'admin') {
-      out.push({ ...userWithScope(db, tenantId, u.id)!, manageable: false }); // shown, marked
-    } else if (userManageableByScope(db, tenantId, scope, u.id).inScope) {
-      out.push({ ...userWithScope(db, tenantId, u.id)!, manageable: true });
+      out.push({ ...(await userWithScope(db, tenantId, u.id))!, manageable: false }); // shown, marked
+    } else if ((await userManageableByScope(db, tenantId, scope, u.id)).inScope) {
+      out.push({ ...(await userWithScope(db, tenantId, u.id))!, manageable: true });
     }
     // else: out-of-scope non-admin → omitted (District sees only manageable + admins-marked)
   }
   return out;
 }
 
-export function updateUser(
-  db: Database.Database,
+export async function updateUser(
+  db: Db,
   tenantId: string,
   userId: string,
   input: UpdateUserInput,
   actorId: string
-): UserWithScope {
+): Promise<UserWithScope> {
   const tdb = new TenantDB(db, tenantId);
-  const existing = tdb.get<User>('SELECT id, role, status FROM users WHERE tenant_id = ? AND id = ?', [userId]);
+  const existing = await tdb.get<User>('SELECT id, role, status FROM users WHERE tenant_id = $1 AND id = $2', [userId]);
   if (!existing) throw Object.assign(new Error('User not found'), { status: 404 });
 
   // An org must always have at least one active Admin — block deactivating the last one
   // (otherwise the tenant locks itself out and recovery needs DB-level intervention).
   if (input.status !== undefined && input.status !== 'active' && existing.role === 'admin' && existing.status === 'active') {
-    const active = tdb.get<{ n: number }>("SELECT COUNT(*) AS n FROM users WHERE tenant_id = ? AND role = 'admin' AND status = 'active'");
-    if ((active?.n ?? 0) <= 1) {
+    // COUNT(*) returns as a string (Postgres bigint precision safety) — cast before comparing.
+    const active = await tdb.get<{ n: string }>("SELECT COUNT(*) AS n FROM users WHERE tenant_id = $1 AND role = 'admin' AND status = 'active'");
+    if (Number(active?.n ?? 0) <= 1) {
       throw Object.assign(new Error('Cannot deactivate the last active Admin — an organization must always have at least one Admin.'), { status: 409 });
     }
   }
 
   if (input.name !== undefined) {
-    tdb.update('users', { name: input.name.trim() }, { id: userId });
+    await tdb.update('users', { name: input.name.trim() }, { id: userId });
   }
   if (input.status !== undefined) {
-    tdb.update('users', { status: input.status }, { id: userId });
+    await tdb.update('users', { status: input.status }, { id: userId });
   }
 
   if (input.regionIds !== undefined) {
-    tdb.del('user_regions', { user_id: userId });
+    await tdb.del('user_regions', { user_id: userId });
     for (const rid of input.regionIds) {
-      tdb.insert('user_regions', { user_id: userId, region_id: rid }, { orIgnore: true });
+      await tdb.insert('user_regions', { user_id: userId, region_id: rid }, { orIgnore: true });
     }
   }
   if (input.locationIds !== undefined) {
-    tdb.del('user_locations', { user_id: userId });
+    await tdb.del('user_locations', { user_id: userId });
     for (const lid of input.locationIds) {
-      tdb.insert('user_locations', { user_id: userId, location_id: lid }, { orIgnore: true });
+      await tdb.insert('user_locations', { user_id: userId, location_id: lid }, { orIgnore: true });
     }
   }
 
-  logAudit(db, {
+  await logAudit(db, {
     tenantId,
     actorType: 'user',
     actorId,
@@ -272,22 +271,22 @@ export function updateUser(
     payload: { changes: Object.keys(input) },
   });
 
-  return userWithScope(db, tenantId, userId)!;
+  return (await userWithScope(db, tenantId, userId))!;
 }
 
-export function inviteUser(
-  db: Database.Database,
+export async function inviteUser(
+  db: Db,
   tenantId: string,
   userId: string,
   actorId: string
-): UserWithScope {
+): Promise<UserWithScope> {
   const tdb = new TenantDB(db, tenantId);
-  const existing = tdb.get<User>('SELECT id, status FROM users WHERE tenant_id = ? AND id = ?', [userId]);
+  const existing = await tdb.get<User>('SELECT id, status FROM users WHERE tenant_id = $1 AND id = $2', [userId]);
   if (!existing) throw Object.assign(new Error('User not found'), { status: 404 });
 
-  tdb.update('users', { status: 'invited' }, { id: userId });
+  await tdb.update('users', { status: 'invited' }, { id: userId });
 
-  logAudit(db, {
+  await logAudit(db, {
     tenantId,
     actorType: 'user',
     actorId,
@@ -296,7 +295,7 @@ export function inviteUser(
     targetId: userId,
   });
 
-  return userWithScope(db, tenantId, userId)!;
+  return (await userWithScope(db, tenantId, userId))!;
 }
 
 export interface SendInviteResult {
@@ -324,24 +323,24 @@ export interface SendInviteResult {
  * ANY one of them is actually used — so there is never more than one *usable* credential-set
  * outcome, just possibly more than one live link pointing at it. Not an oversight.
  */
-export function sendUserInvite(
-  db: Database.Database,
+export async function sendUserInvite(
+  db: Db,
   tenantId: string,
   userId: string,
   actorId: string,
   now: Date = new Date()
-): SendInviteResult {
+): Promise<SendInviteResult> {
   const tdb = new TenantDB(db, tenantId);
-  const existing = tdb.get<User>('SELECT id, status FROM users WHERE tenant_id = ? AND id = ?', [userId]);
+  const existing = await tdb.get<User>('SELECT id, status FROM users WHERE tenant_id = $1 AND id = $2', [userId]);
   if (!existing) throw Object.assign(new Error('User not found'), { status: 404 });
   if (existing.status !== 'invited') {
     throw Object.assign(new Error('Only a dormant (invited) user can be sent an invite link'), { status: 409 });
   }
 
-  const { rawToken, expiresAt } = issueInviteToken(db, { tenantId, userId }, now);
-  tdb.update('users', { invite_sent_at: now.toISOString() }, { id: userId });
+  const { rawToken, expiresAt } = await issueInviteToken(db, { tenantId, userId }, now);
+  await tdb.update('users', { invite_sent_at: now }, { id: userId });
 
-  logAudit(db, {
+  await logAudit(db, {
     tenantId,
     actorType: 'user',
     actorId,
@@ -351,7 +350,7 @@ export function sendUserInvite(
   });
 
   return {
-    user: userWithScope(db, tenantId, userId)!,
+    user: (await userWithScope(db, tenantId, userId))!,
     inviteUrl: `${env.app.baseUrl}/reset-password?token=${rawToken}`,
     expiresAt,
   };

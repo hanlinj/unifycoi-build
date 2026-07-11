@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server';
-import { getRawDb } from '@/lib/db/client';
+import { getDb } from '@/lib/db/client';
 import { bulkImportLocations } from '@/lib/services/locations';
 import { requireTenantAuth, isResponse, ok, badRequest, forbidden } from '@/lib/api';
 
@@ -31,9 +31,9 @@ export async function POST(request: Request): Promise<NextResponse> {
 
   if (!csvText.trim()) return badRequest('Empty file');
 
-  const db = getRawDb();
+  const db = getDb();
   try {
-    const result = bulkImportLocations(db, auth.tenantId, csvText, auth.sub);
+    const result = await bulkImportLocations(db, auth.tenantId, csvText, auth.sub);
     return ok(result);
   } catch (e: unknown) {
     const err = e as { message: string; status?: number };

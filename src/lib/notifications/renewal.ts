@@ -18,24 +18,42 @@ import { TenantDB } from '@/lib/db/tenant';
 import { queueNotification, notifyTenantAdmins } from './queue';
 import { logAudit } from '@/lib/audit';
 import { expiryBoundaryMs } from '@/lib/time/zone';
+import { toIsoDateStr } from '@/lib/extraction/extractor';
 import type { ProcessedCOIExtraction } from '@/lib/extraction/types';
 
 export const LADDER_DAYS = [60, 30, 14, 7, 1] as const;
 const IMMINENT_RUNGS = new Set([7, 1]); // rungs that also alert Admins internally
 const DAY_MS = 24 * 60 * 60 * 1000;
 
-/** Earliest valid (parseable, future-or-any) expiration date across a COI's policies. */
+/**
+ * Earliest valid (parseable, future-or-any) expiration date across a COI's policies. This is the
+ * SINGLE point where a raw Vision-extracted date string becomes the `expiration_date` written
+ * into every renewal-chase notification payload (scheduleRenewalReminders' three payload
+ * literals, and manual-reminder.ts's re-write of whatever chase.ts reads back) — so it's also
+ * the single durable place to normalize. Vision's tool schema puts no format constraint on this
+ * field, so a genuinely non-zero-padded value ("2026-9-5") is a real possibility, not a
+ * synthetic edge case. Left un-normalized, downstream date-ordering code (chase.ts's
+ * chronological comparisons) has no reliable way to distinguish "September 5" from an ambiguous
+ * partial string, and — more subtly — an unpadded, non-ISO string's meaning under `Date.parse()`
+ * (V8's legacy non-standard parser, which resolves in the *process's local* timezone) can
+ * disagree with the same string's meaning under Postgres's `::timestamptz` cast (which resolves
+ * in the *Postgres server's* timezone) whenever those two run under different zone configs —
+ * two different, silently-diverging interpretations of one string. Normalizing here means every
+ * value that reaches storage is either zero-padded ISO (unambiguous under both) or left as
+ * whatever the un-normalizable original was (unchanged fallback behavior, same as today).
+ */
 export function earliestExpiration(coi: ProcessedCOIExtraction): string | null {
   let earliest: number | null = null;
   let earliestStr: string | null = null;
   for (const p of coi.policies ?? []) {
     const raw = p.expiration_date?.value;
     if (!raw) continue;
-    const t = Date.parse(raw);
+    const normalized = toIsoDateStr(raw) ?? raw;
+    const t = Date.parse(normalized);
     if (Number.isNaN(t)) continue;
     if (earliest === null || t < earliest) {
       earliest = t;
-      earliestStr = raw;
+      earliestStr = normalized;
     }
   }
   return earliestStr;

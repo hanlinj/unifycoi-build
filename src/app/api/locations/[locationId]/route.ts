@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server';
-import { getRawDb } from '@/lib/db/client';
+import { getDb } from '@/lib/db/client';
 import { updateLocation } from '@/lib/services/locations';
 import { buildLocationRecord } from '@/lib/services/location-record';
 import { requireTenantAuth, isResponse, ok, badRequest, forbidden, notFound } from '@/lib/api';
@@ -18,18 +18,18 @@ export async function GET(
   if (isResponse(auth)) return auth;
   if (!auth.tenantId) return forbidden();
 
-  const db = getRawDb();
+  const db = getDb();
   const url = new URL(request.url);
   const status = url.searchParams.get('status');
   const trade = url.searchParams.get('trade');
 
   // Within-tenant scope clamp (inherits the Slice C pattern). A non-Admin must have this
   // location in scope; otherwise uniform 404 + a logged scope violation. Admin sees any.
-  const scope = resolveScope(db, auth.tenantId, auth.sub, auth.role);
+  const scope = await resolveScope(db, auth.tenantId, auth.sub, auth.role);
   if (scope.locationIds !== null && !scopeIncludesLocation(scope, params.locationId)) {
-    const exists = db.prepare('SELECT 1 FROM locations WHERE tenant_id = ? AND id = ?').get(auth.tenantId, params.locationId);
+    const exists = await db.selectFrom('locations').select('id').where('tenant_id', '=', auth.tenantId).where('id', '=', params.locationId).executeTakeFirst();
     if (exists) {
-      logAudit(db, {
+      await logAudit(db, {
         tenantId: auth.tenantId, actorType: 'user', actorId: auth.sub,
         eventType: 'security.scope_violation', targetType: 'location', targetId: params.locationId,
         payload: { role: auth.role, scope_location_ids: scope.locationIds, attempted: 'GET /api/locations/:id' },
@@ -38,11 +38,11 @@ export async function GET(
     return notFound('Location not found');
   }
 
-  const record = buildLocationRecord(db, auth.tenantId, params.locationId, { status, trade });
+  const record = await buildLocationRecord(db, auth.tenantId, params.locationId, { status, trade });
   if (!record) return notFound('Location not found');
 
   // Record the in-scope view (standard-access grain) — powers Search recent-viewed.
-  logAudit(db, {
+  await logAudit(db, {
     tenantId: auth.tenantId, actorType: 'user', actorId: auth.sub,
     eventType: 'location.viewed', targetType: 'location', targetId: params.locationId,
     payload: { role: auth.role },
@@ -66,9 +66,9 @@ export async function PATCH(
   let body: unknown;
   try { body = await request.json(); } catch { return badRequest('JSON body required'); }
 
-  const db = getRawDb();
+  const db = getDb();
   try {
-    const location = updateLocation(db, auth.tenantId, params.locationId, body as Record<string, unknown> as never, auth.sub);
+    const location = await updateLocation(db, auth.tenantId, params.locationId, body as Record<string, unknown> as never, auth.sub);
     return ok(location);
   } catch (e: unknown) {
     const err = e as { message: string; status?: number };

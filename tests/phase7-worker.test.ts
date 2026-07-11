@@ -71,6 +71,12 @@ describe('earliestExpiration', () => {
   test('returns null when no policy has a date', () => {
     expect(earliestExpiration(coiWith([null, null]))).toBeNull();
   });
+  test('normalizes an unpadded raw date to zero-padded ISO before returning it (Stage 5 gap-closing fix — the single write choke point for chase.ts payloads)', () => {
+    expect(earliestExpiration(coiWith(['2026-9-5']))).toBe('2026-09-05');
+  });
+  test('un-normalizable dates (e.g. prose) still fall back to the raw string unchanged, same as before the normalization fix', () => {
+    expect(earliestExpiration(coiWith(['September 5, 2026']))).toBe('September 5, 2026');
+  });
 });
 
 // ── Eager scheduling ─────────────────────────────────────────────────────────────

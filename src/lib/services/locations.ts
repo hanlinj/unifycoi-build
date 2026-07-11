@@ -1,16 +1,10 @@
 import { randomUUID } from 'crypto';
-import type Database from 'better-sqlite3';
 import type { Db } from '@/lib/db/client';
 import { TenantDB } from '@/lib/db/tenant';
+import { withTransaction } from '@/lib/db/transaction';
 import { logAudit } from '@/lib/audit';
 import { parseCSV } from '@/lib/csv';
 import type { Scope } from '@/lib/scope';
-
-// Phase 13 migration, Stage 4: recordBillingSnapshot()/createLocation()/getLocationById() are
-// converted (hard dependencies of provisionTenant's location creation) — the REST of this file
-// (listLocations, updateLocation, bulkImportLocations, etc.) stays on the old synchronous
-// better-sqlite3 API until Stage 5 converts it properly; they call getLocationById()
-// synchronously without await and will not compile until then — expected.
 
 export interface Location {
   id: string;
@@ -82,14 +76,15 @@ async function recordBillingSnapshot(db: Db, tenantId: string): Promise<void> {
   });
 }
 
-function findOrCreateRegion(tdb: TenantDB, regionName: string): string {
-  const existing = tdb.get<{ id: string }>(
-    'SELECT id FROM regions WHERE tenant_id = ? AND name = ? COLLATE NOCASE',
+async function findOrCreateRegion(tdb: TenantDB, regionName: string): Promise<string> {
+  // COLLATE NOCASE -> lower() (Stage 0's catalogued rework spot)
+  const existing = await tdb.get<{ id: string }>(
+    'SELECT id FROM regions WHERE tenant_id = $1 AND lower(name) = lower($2)',
     [regionName]
   );
   if (existing) return existing.id;
   const id = randomUUID();
-  tdb.insert('regions', { id, name: regionName.trim() });
+  await tdb.insert('regions', { id, name: regionName.trim() });
   return id;
 }
 
@@ -127,11 +122,11 @@ export async function createLocation(
   return (await getLocationById(db, tenantId, id))!;
 }
 
-export function listLocations(
-  db: Database.Database,
+export async function listLocations(
+  db: Db,
   tenantId: string,
   scope: Scope
-): LocationWithRegion[] {
+): Promise<LocationWithRegion[]> {
   const tdb = new TenantDB(db, tenantId);
 
   if (scope.locationIds === null) {
@@ -139,18 +134,19 @@ export function listLocations(
       `SELECT l.id, l.tenant_id, l.region_id, l.name, l.address, l.status, l.created_at,
               r.name as region_name
        FROM locations l LEFT JOIN regions r ON r.id = l.region_id
-       WHERE l.tenant_id = ? ORDER BY l.name`
+       WHERE l.tenant_id = $1 ORDER BY l.name`
     );
   }
 
   if (scope.locationIds.length === 0) return [];
 
-  const placeholders = scope.locationIds.map(() => '?').join(',');
+  // tenant_id is bound as $1 (TenantDB's contract); locationIds start at $2.
+  const placeholders = scope.locationIds.map((_, i) => `$${i + 2}`).join(',');
   return tdb.all<LocationWithRegion>(
     `SELECT l.id, l.tenant_id, l.region_id, l.name, l.address, l.status, l.created_at,
             r.name as region_name
      FROM locations l LEFT JOIN regions r ON r.id = l.region_id
-     WHERE l.tenant_id = ? AND l.id IN (${placeholders})
+     WHERE l.tenant_id = $1 AND l.id IN (${placeholders})
      ORDER BY l.name`,
     scope.locationIds
   );
@@ -172,41 +168,41 @@ export async function getLocationById(
   return row ?? null;
 }
 
-export function updateLocation(
-  db: Database.Database,
+export async function updateLocation(
+  db: Db,
   tenantId: string,
   locationId: string,
   input: UpdateLocationInput,
   actorId: string
-): LocationWithRegion {
+): Promise<LocationWithRegion> {
   const tdb = new TenantDB(db, tenantId);
-  const existing = tdb.get<Location>('SELECT id, status FROM locations WHERE tenant_id = ? AND id = ?', [locationId]);
+  const existing = await tdb.get<Location>('SELECT id, status FROM locations WHERE tenant_id = $1 AND id = $2', [locationId]);
   if (!existing) throw Object.assign(new Error('Location not found'), { status: 404 });
 
   if (input.name !== undefined) {
-    tdb.update('locations', { name: input.name.trim() }, { id: locationId });
+    await tdb.update('locations', { name: input.name.trim() }, { id: locationId });
   }
   if (input.address !== undefined) {
-    tdb.update('locations', { address: input.address }, { id: locationId });
+    await tdb.update('locations', { address: input.address }, { id: locationId });
   }
   if ('regionId' in input) {
-    tdb.update('locations', { region_id: input.regionId ?? null }, { id: locationId });
+    await tdb.update('locations', { region_id: input.regionId ?? null }, { id: locationId });
   }
   if (input.status !== undefined && input.status !== existing.status) {
-    tdb.update('locations', { status: input.status }, { id: locationId });
-    recordBillingSnapshot(db, tenantId);
+    await tdb.update('locations', { status: input.status }, { id: locationId });
+    await recordBillingSnapshot(db, tenantId);
 
     const eventType = input.status === 'archived' ? 'location.archived' : 'location.unarchived';
-    logAudit(db, { tenantId, actorType: 'user', actorId, eventType, targetType: 'location', targetId: locationId });
+    await logAudit(db, { tenantId, actorType: 'user', actorId, eventType, targetType: 'location', targetId: locationId });
   } else {
-    logAudit(db, {
+    await logAudit(db, {
       tenantId, actorType: 'user', actorId,
       eventType: 'location.updated', targetType: 'location', targetId: locationId,
       payload: { changes: Object.keys(input) },
     });
   }
 
-  return getLocationById(db, tenantId, locationId)!;
+  return (await getLocationById(db, tenantId, locationId))!;
 }
 
 // ─── Bulk import ──────────────────────────────────────────────────────────────
@@ -329,12 +325,12 @@ export function parseImportCSV(csvText: string): {
   return { rows, headerErrors: [] };
 }
 
-export function bulkImportLocations(
-  db: Database.Database,
+export async function bulkImportLocations(
+  db: Db,
   tenantId: string,
   csvText: string,
   actorId: string
-): ImportResult {
+): Promise<ImportResult> {
   const { rows, headerErrors } = parseImportCSV(csvText);
   if (headerErrors.length > 0) {
     throw Object.assign(new Error(headerErrors.join('; ')), { status: 400 });
@@ -345,8 +341,7 @@ export function bulkImportLocations(
 
   // Collect existing store names for dedup check
   const existingNames = new Set(
-    (tdb.all<{ name: string }>('SELECT name FROM locations WHERE tenant_id = ?') as { name: string }[])
-      .map((r) => r.name.toLowerCase())
+    (await tdb.all<{ name: string }>('SELECT name FROM locations WHERE tenant_id = $1')).map((r) => r.name.toLowerCase())
   );
 
   // Track imported names in this batch for intra-batch dedup
@@ -355,6 +350,9 @@ export function bulkImportLocations(
   const parsed = parseCSV(csvText);
   const headerMap = mapHeaders(parsed.headers);
 
+  // Sequential for...of, not Promise.all: each row's dedup check reads existingNames/batchNames
+  // mutated by the PREVIOUS row's own insert — running rows concurrently would let two rows
+  // with the same store name both pass the dedup check before either commits.
   for (const row of parsed.rows) {
     const { row: validatedRow, reasons } = validateImportRow(row, headerMap);
     const { storeName, address, city, state, zip, region, managerFirstName, managerLastName, managerEmail } = validatedRow;
@@ -373,19 +371,21 @@ export function bulkImportLocations(
       continue;
     }
 
-    // Import this row inside a transaction
-    db.transaction(() => {
+    // Import this row inside a transaction (withTransaction — never open one directly, see
+    // src/lib/db/transaction.ts).
+    await withTransaction(db, async (trx) => {
+      const txTdb = new TenantDB(trx, tenantId);
       batchNames.add(nameKey!);
 
       let regionId: string | null = null;
-      if (region) regionId = findOrCreateRegion(tdb, region);
+      if (region) regionId = await findOrCreateRegion(txTdb, region);
 
       const normalizedState = normalizeState(state!);
       const fullAddress = `${address}, ${city}, ${normalizedState} ${zip}`.trim();
       const locationId = randomUUID();
-      const now = new Date().toISOString();
+      const now = new Date();
 
-      tdb.insert('locations', {
+      await txTdb.insert('locations', {
         id: locationId,
         region_id: regionId,
         name: storeName,
@@ -397,8 +397,9 @@ export function bulkImportLocations(
       result.created++;
 
       if (managerEmail) {
-        const existing = tdb.get<{ id: string }>(
-          'SELECT id FROM users WHERE tenant_id = ? AND email = ? COLLATE NOCASE',
+        // COLLATE NOCASE -> lower() (Stage 0's catalogued rework spot)
+        const existing = await txTdb.get<{ id: string }>(
+          'SELECT id FROM users WHERE tenant_id = $1 AND lower(email) = lower($2)',
           [managerEmail]
         );
         let managerId: string;
@@ -409,7 +410,7 @@ export function bulkImportLocations(
         } else {
           managerId = randomUUID();
           const managerName = [managerFirstName, managerLastName].filter(Boolean).join(' ') || managerEmail;
-          tdb.insert('users', {
+          await txTdb.insert('users', {
             id: managerId,
             email: managerEmail.toLowerCase().trim(),
             name: managerName,
@@ -421,14 +422,14 @@ export function bulkImportLocations(
           result.managersCreated++;
         }
 
-        tdb.insert('user_locations', { user_id: managerId, location_id: locationId }, { orIgnore: true });
+        await txTdb.insert('user_locations', { user_id: managerId, location_id: locationId }, { orIgnore: true });
       }
-    })();
+    });
   }
 
   if (result.created > 0) {
-    recordBillingSnapshot(db, tenantId);
-    logAudit(db, {
+    await recordBillingSnapshot(db, tenantId);
+    await logAudit(db, {
       tenantId, actorType: 'user', actorId,
       eventType: 'locations.bulk_imported',
       payload: { created: result.created, managers_created: result.managersCreated, failed: result.failed },

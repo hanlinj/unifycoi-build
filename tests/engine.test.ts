@@ -227,6 +227,15 @@ describe('toIsoDateStr', () => {
   test('single-digit month/day padded', () => {
     expect(toIsoDateStr('1/5/2026')).toBe('2026-01-05');
   });
+  test('unpadded ISO-dash date (single-digit month and/or day) gets zero-padded', () => {
+    // Phase 13 Stage 5 pre-commit gap-closing: Vision's tool schema puts no format constraint
+    // on expiration_date, so this is a real possible extraction output, not just a synthetic
+    // edge case — and an un-normalized unpadded date creates a latent seam between how
+    // Date.parse() and Postgres's ::timestamptz cast each interpret it (see chase.ts).
+    expect(toIsoDateStr('2026-9-5')).toBe('2026-09-05');
+    expect(toIsoDateStr('2026-9-15')).toBe('2026-09-15');
+    expect(toIsoDateStr('2026-12-5')).toBe('2026-12-05');
+  });
   test('invalid string returns null', () => {
     expect(toIsoDateStr('April 9 2026')).toBeNull();
     expect(toIsoDateStr('')).toBeNull();

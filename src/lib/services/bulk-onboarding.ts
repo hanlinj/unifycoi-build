@@ -10,8 +10,9 @@
 // identical dedupe-by-email + dormant-manager + billing-snapshot behavior, so it lives once.
 
 import { randomUUID } from 'crypto';
-import type Database from 'better-sqlite3';
+import type { Db } from '@/lib/db/client';
 import { TenantDB } from '@/lib/db/tenant';
+import { withTransaction } from '@/lib/db/transaction';
 import { logAudit } from '@/lib/audit';
 import { createLocation } from './locations';
 import type { ImportLocationRow } from '@/lib/import/location-rows';
@@ -28,18 +29,18 @@ export interface BulkOnboardingResult {
  * notification queued — Send/Resend invite happens later from the Users panel, Feature 2) per
  * unique manager email. The same email on multiple rows consolidates to one manager linked to
  * every one of those locations — never a duplicate user. An existing tenant user with that email
- * (any role) is reused as-is, not recreated. Wrapped in its own transaction; better-sqlite3
- * nests transactions as SAVEPOINTs, so this is safe to call from inside provisionTenant's outer
- * transaction too.
+ * (any role) is reused as-is, not recreated. Wrapped in withTransaction() (never opened
+ * directly, see src/lib/db/transaction.ts) — safe to call from inside provisionTenant's outer
+ * transaction too, since withTransaction takes a SAVEPOINT when already nested.
  */
-export function bulkCreateLocationsWithManagers(
-  db: Database.Database,
+export async function bulkCreateLocationsWithManagers(
+  db: Db,
   tenantId: string,
   rows: ImportLocationRow[],
   actorId: string
-): BulkOnboardingResult {
-  const tdb = new TenantDB(db, tenantId);
-  const tx = db.transaction((): BulkOnboardingResult => {
+): Promise<BulkOnboardingResult> {
+  return withTransaction(db, async (trx): Promise<BulkOnboardingResult> => {
+    const tdb = new TenantDB(trx, tenantId);
     const locationIds: string[] = [];
     const managerUserIdByEmail = new Map<string, string>();
     const managerUserIds: string[] = [];
@@ -47,7 +48,7 @@ export function bulkCreateLocationsWithManagers(
     let managersReused = 0;
 
     for (const row of rows) {
-      const location = createLocation(db, tenantId, { name: row.storeName.trim(), address: row.address.trim() || undefined }, actorId);
+      const location = await createLocation(trx, tenantId, { name: row.storeName.trim(), address: row.address.trim() || undefined }, actorId);
       locationIds.push(location.id);
 
       const email = row.managerEmail.trim().toLowerCase();
@@ -55,21 +56,22 @@ export function bulkCreateLocationsWithManagers(
 
       let managerId = managerUserIdByEmail.get(email);
       if (!managerId) {
-        const existing = tdb.get<{ id: string }>('SELECT id FROM users WHERE tenant_id = ? AND email = ? COLLATE NOCASE', [email]);
+        // COLLATE NOCASE -> lower() (Stage 0's catalogued rework spot)
+        const existing = await tdb.get<{ id: string }>('SELECT id FROM users WHERE tenant_id = $1 AND lower(email) = lower($2)', [email]);
         if (existing) {
           managerId = existing.id;
           managersReused++;
         } else {
           managerId = randomUUID();
           const name = [row.managerFirstName.trim(), row.managerLastName.trim()].filter(Boolean).join(' ') || email;
-          tdb.insert('users', {
+          await tdb.insert('users', {
             id: managerId,
             email,
             name,
             role: 'store_manager',
             password_hash: null,
             status: 'invited',
-            created_at: new Date().toISOString(),
+            created_at: new Date(),
           });
           managersCreated++;
         }
@@ -77,11 +79,11 @@ export function bulkCreateLocationsWithManagers(
         managerUserIds.push(managerId);
       }
 
-      tdb.insert('user_locations', { user_id: managerId, location_id: location.id }, { orIgnore: true });
+      await tdb.insert('user_locations', { user_id: managerId, location_id: location.id }, { orIgnore: true });
     }
 
     if (locationIds.length > 0) {
-      logAudit(db, {
+      await logAudit(trx, {
         tenantId,
         actorType: 'user',
         actorId,
@@ -92,6 +94,4 @@ export function bulkCreateLocationsWithManagers(
 
     return { locationIds, managerUserIds, managersCreated, managersReused };
   });
-
-  return tx();
 }

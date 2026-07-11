@@ -15,7 +15,7 @@
 import Link from 'next/link';
 import { notFound } from 'next/navigation';
 import { ArrowLeft, ExternalLink } from 'lucide-react';
-import { getRawDb } from '@/lib/db/client';
+import { getDb } from '@/lib/db/client';
 import { getTenantById } from '@/lib/services/tenants';
 import { listLocations } from '@/lib/services/locations';
 import { listUsers } from '@/lib/services/users';
@@ -59,15 +59,15 @@ function Row({ label, children }: { label: string; children: React.ReactNode }) 
 }
 
 export default async function TenantDetailPage({ params }: { params: { tenantId: string } }) {
-  const db = getRawDb();
-  const tenant = getTenantById(db, params.tenantId);
+  const db = getDb();
+  const tenant = await getTenantById(db, params.tenantId);
   if (!tenant) notFound();
 
   const lc = LIFECYCLE[tenant.lifecycle_state] ?? { tone: 'neutral' as BadgeTone, label: tenant.lifecycle_state };
   const scope = { locationIds: null, regionIds: null };
-  const locations = listLocations(db, tenant.id, scope);
-  const users = listUsers(db, tenant.id, scope);
-  const template = tenant.applied_template_id ? getTemplate(db, tenant.applied_template_id) : null;
+  const locations = await listLocations(db, tenant.id, scope);
+  const users = await listUsers(db, tenant.id, scope);
+  const template = tenant.applied_template_id ? await getTemplate(db, tenant.applied_template_id) : null;
 
   const isRealStripe = !!env.billing.stripeSecretKey;
   const invoices = tenant.stripe_customer_id

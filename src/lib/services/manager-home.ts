@@ -4,7 +4,7 @@
 // vendor's next COI expiration (from the chase schedule) and a <30-day urgency flag. Trade
 // facet filter + name search (simple matcher). Scope-clamped server-side.
 
-import type Database from 'better-sqlite3';
+import type { Db } from '@/lib/db/client';
 import { TenantDB } from '@/lib/db/tenant';
 import { chaseExpiryByVendor } from '@/lib/notifications/chase';
 import { simpleVendorNameMatcher, type VendorNameMatcher } from '@/lib/search/vendor-name';
@@ -36,14 +36,14 @@ export interface ManagerHomeScope {
 
 interface Row { vendor_id: string; business_name: string; trade: string; location_id: string; location_name: string }
 
-export function buildManagerHome(
-  db: Database.Database,
+export async function buildManagerHome(
+  db: Db,
   tenantId: string,
   scope: ManagerHomeScope,
   filters: { trade?: string | null; q?: string | null } = {},
   nowMs: number = Date.now(),
   matcher: VendorNameMatcher = simpleVendorNameMatcher
-): ManagerHomeResult {
+): Promise<ManagerHomeResult> {
   const empty: ManagerHomeResult = {
     groups: [], trades: [], totalApproved: 0, facilitiesInScope: 0,
     activeFilters: { trade: filters.trade ?? null, q: filters.q ?? null },
@@ -53,27 +53,32 @@ export function buildManagerHome(
   const tdb = new TenantDB(db, tenantId);
   const scoped = scope.locationIds !== null;
   const locParams = scoped ? scope.locationIds! : [];
-  const locFilter = scoped ? ` AND vl.location_id IN (${locParams.map(() => '?').join(', ')})` : '';
+  // tenant_id is bound as $1 (TenantDB's contract); the IN-list starts at $2.
+  const locPlaceholders = locParams.map((_, i) => `$${i + 2}`).join(', ');
+  const locFilter = scoped ? ` AND vl.location_id IN (${locPlaceholders})` : '';
 
+  // COUNT(*) returns as a string (Postgres bigint precision safety) — cast before using as a number.
   const facilitiesInScope = scoped
-    ? tdb.get<{ n: number }>(
-        `SELECT COUNT(*) AS n FROM locations WHERE tenant_id = ? AND status = 'active' AND id IN (${locParams.map(() => '?').join(', ')})`,
-        locParams
-      )!.n
-    : tdb.get<{ n: number }>(`SELECT COUNT(*) AS n FROM locations WHERE tenant_id = ? AND status = 'active'`)!.n;
+    ? Number(
+        (await tdb.get<{ n: string }>(
+          `SELECT COUNT(*) AS n FROM locations WHERE tenant_id = $1 AND status = 'active' AND id IN (${locPlaceholders})`,
+          locParams
+        ))!.n
+      )
+    : Number((await tdb.get<{ n: string }>(`SELECT COUNT(*) AS n FROM locations WHERE tenant_id = $1 AND status = 'active'`))!.n);
 
   // Approved vendor-locations at ACTIVE locations only (archived locations aren't hireable).
-  const rows = tdb.all<Row>(
+  const rows = await tdb.all<Row>(
     `SELECT vl.vendor_id, v.business_name, v.trade, vl.location_id, l.name AS location_name
      FROM vendor_locations vl
      JOIN vendors v   ON v.id = vl.vendor_id   AND v.tenant_id = vl.tenant_id
      JOIN locations l ON l.id = vl.location_id AND l.tenant_id = vl.tenant_id
-     WHERE vl.tenant_id = ? AND vl.status = 'approved' AND l.status = 'active'${locFilter}`,
+     WHERE vl.tenant_id = $1 AND vl.status = 'approved' AND l.status = 'active'${locFilter}`,
     locParams
   );
   if (rows.length === 0) return { ...empty, facilitiesInScope };
 
-  const expiryMap = chaseExpiryByVendor(db, tenantId);
+  const expiryMap = await chaseExpiryByVendor(db, tenantId);
 
   // Aggregate to one row per vendor.
   const byVendor = new Map<string, ApprovedVendorRow>();

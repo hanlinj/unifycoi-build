@@ -6,7 +6,7 @@
 // have this location in scope); within a single in-scope location there is no further row
 // clamp — every vendor at that location is in the caller's scope.
 
-import type Database from 'better-sqlite3';
+import type { Db } from '@/lib/db/client';
 import { TenantDB } from '@/lib/db/tenant';
 import { getLocationById, type LocationWithRegion } from '@/lib/services/locations';
 import { chaseExpiryByVendor } from '@/lib/notifications/chase';
@@ -31,27 +31,27 @@ export interface LocationRecordResult {
   activeFilters: { status: string | null; trade: string | null };
 }
 
-export function buildLocationRecord(
-  db: Database.Database,
+export async function buildLocationRecord(
+  db: Db,
   tenantId: string,
   locationId: string,
   filters: { status?: string | null; trade?: string | null } = {},
   nowMs: number = Date.now()
-): LocationRecordResult | null {
-  const loc = getLocationById(db, tenantId, locationId) as LocationWithRegion | null;
+): Promise<LocationRecordResult | null> {
+  const loc = (await getLocationById(db, tenantId, locationId)) as LocationWithRegion | null;
   if (!loc) return null;
 
   const tdb = new TenantDB(db, tenantId);
-  const rows = tdb.all<{ vendor_id: string; business_name: string; trade: string; status: string; approved_at: string | null }>(
+  const rows = await tdb.all<{ vendor_id: string; business_name: string; trade: string; status: string; approved_at: string | null }>(
     `SELECT vl.vendor_id, v.business_name, v.trade, vl.status, vl.approved_at
      FROM vendor_locations vl
      JOIN vendors v ON v.id = vl.vendor_id AND v.tenant_id = vl.tenant_id
-     WHERE vl.tenant_id = ? AND vl.location_id = ?
+     WHERE vl.tenant_id = $1 AND vl.location_id = $2
      ORDER BY v.business_name`,
     [locationId]
   );
 
-  const expiryMap = chaseExpiryByVendor(db, tenantId);
+  const expiryMap = await chaseExpiryByVendor(db, tenantId);
 
   const all: LocationVendorRow[] = rows.map((r) => {
     const expiresAt = expiryMap.get(r.vendor_id) ?? null;

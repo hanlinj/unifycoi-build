@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server';
-import { getRawDb } from '@/lib/db/client';
+import { getDb } from '@/lib/db/client';
 import { createLocation, listLocations } from '@/lib/services/locations';
 import { resolveScope } from '@/lib/scope';
 import { requireTenantAuth, isResponse, ok, created, badRequest, forbidden } from '@/lib/api';
@@ -12,9 +12,9 @@ export async function GET(request: Request): Promise<NextResponse> {
   if (isResponse(auth)) return auth;
   if (!auth.tenantId) return forbidden();
 
-  const db = getRawDb();
-  const scope = resolveScope(db, auth.tenantId, auth.sub, auth.role);
-  return ok(listLocations(db, auth.tenantId, scope));
+  const db = getDb();
+  const scope = await resolveScope(db, auth.tenantId, auth.sub, auth.role);
+  return ok(await listLocations(db, auth.tenantId, scope));
 }
 
 export async function POST(request: Request): Promise<NextResponse> {
@@ -33,9 +33,9 @@ export async function POST(request: Request): Promise<NextResponse> {
     return badRequest('name is required');
   }
 
-  const db = getRawDb();
+  const db = getDb();
   try {
-    const location = createLocation(db, auth.tenantId, {
+    const location = await createLocation(db, auth.tenantId, {
       name,
       address: typeof address === 'string' ? address : undefined,
       regionId: typeof regionId === 'string' ? regionId : undefined,

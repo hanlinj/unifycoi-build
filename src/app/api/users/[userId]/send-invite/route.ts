@@ -3,7 +3,7 @@
 // bulk import. Same scope-clamp shell as the existing POST /api/users/:id/invite route.
 
 import { NextResponse } from 'next/server';
-import { getRawDb } from '@/lib/db/client';
+import { getDb } from '@/lib/db/client';
 import { sendUserInvite } from '@/lib/services/users';
 import { requireTenantAuth, isResponse, ok, forbidden, notFound } from '@/lib/api';
 import { resolveScope, userManageableByScope } from '@/lib/scope';
@@ -22,15 +22,15 @@ export async function POST(
   if (auth.role === 'store_manager') return forbidden();
   if (!auth.tenantId) return forbidden();
 
-  const db = getRawDb();
+  const db = getDb();
 
   // Within-tenant scope clamp (Slice C security pass) — same rule as PATCH/invite.
   if (auth.role !== 'admin') {
-    const scope = resolveScope(db, auth.tenantId, auth.sub, auth.role);
-    const check = userManageableByScope(db, auth.tenantId, scope, params.userId);
+    const scope = await resolveScope(db, auth.tenantId, auth.sub, auth.role);
+    const check = await userManageableByScope(db, auth.tenantId, scope, params.userId);
     if (!check.inScope) {
       if (check.exists) {
-        logAudit(db, {
+        await logAudit(db, {
           tenantId: auth.tenantId, actorType: 'user', actorId: auth.sub,
           eventType: 'security.scope_violation', targetType: 'user', targetId: params.userId,
           payload: { role: auth.role, scope_region_ids: scope.regionIds, attempted: 'POST /api/users/:id/send-invite' },
@@ -41,7 +41,7 @@ export async function POST(
   }
 
   try {
-    const result = sendUserInvite(db, auth.tenantId, params.userId, auth.sub);
+    const result = await sendUserInvite(db, auth.tenantId, params.userId, auth.sub);
     return ok(result);
   } catch (e: unknown) {
     const err = e as { message: string; status?: number };
