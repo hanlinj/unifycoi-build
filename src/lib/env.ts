@@ -19,15 +19,12 @@ function validatedStorageDriver(value: string): 's3' | 'filesystem' {
 }
 
 export const env = {
-  sqlite: {
-    path: required('SQLITE_PATH'),
-  },
-  // Phase 13 migration, Stage 1: the data layer's real home going forward. `sqlite` above
-  // stays required/read until every downstream module has converted (Stage 10 removes it).
-  // NOT `required()` — only db-core's own code (client.ts, test-isolation.ts) reads this so
-  // far, and most of the 1010-test suite doesn't touch Postgres yet; eagerly requiring it
-  // here would crash every test at env.ts's module-load time, not just the ones that need
-  // it. client.ts's getDb() throws its own clear error if this is empty when actually called.
+  // Phase 13 migration, Stage 10: `sqlite.path` (required('SQLITE_PATH')) removed — better-
+  // sqlite3 is uninstalled, and `env.sqlite` had zero readers left in src/ (confirmed by grep
+  // before removal). NOT `required()` for the line below either — only db-core's own code
+  // (client.ts, test-isolation.ts) reads this, and eagerly requiring it here would crash every
+  // test at env.ts's module-load time, not just the ones that touch Postgres. client.ts's
+  // getDb() throws its own clear error if this is empty when actually called.
   postgres: {
     databaseUrl: process.env['DATABASE_URL'] ?? '',
     // Test-isolation harness only (src/lib/db/test-isolation.ts) — not used by the app itself.

@@ -8,19 +8,19 @@
  * that light up every Command Center tier. Idempotent: if the tenant already exists, every row
  * for it (and the platform user) is wiped and reseeded clean.
  *
- * Writes to the SAME database the dev server uses (SQLITE_PATH from .env). Runs any pending
+ * Writes to the SAME database the dev server uses (DATABASE_URL from .env). Runs any pending
  * migrations first, so it works on a fresh DB too.
  *
  * REFUSES to run when NODE_ENV=production.
  */
 
 import 'dotenv/config';
-import fs from 'fs';
-import path from 'path';
 import { randomUUID } from 'crypto';
-import { getRawDb } from '@/lib/db/client';
-import { hashPassword } from '@/lib/auth/password';
-import { hashInviteToken, generateInviteToken } from '@/lib/auth/invite-token';
+import { execSync } from 'child_process';
+import { getDb, closeDb, type Db } from '../src/lib/db/client';
+import { withTransaction } from '../src/lib/db/transaction';
+import { hashPassword } from '../src/lib/auth/password';
+import { generateInviteToken } from '../src/lib/auth/invite-token';
 
 // ── Production guard (fail fast, loud) ──────────────────────────────────────────────────
 if (process.env.NODE_ENV === 'production') {
@@ -32,247 +32,247 @@ const TENANT_NAME = 'Cascade Storage Partners';
 const PW = 'Pass123!';
 const BASE = process.env.APP_BASE_URL ?? 'http://localhost:3000';
 const now = Date.now();
-const iso = (ms: number = now) => new Date(ms).toISOString();
-const inDays = (d: number) => iso(now + d * 86_400_000);
-const dateInDays = (d: number) => inDays(d).slice(0, 10); // YYYY-MM-DD (COI expiry)
+const nowDate = () => new Date(now);
+const inDays = (d: number) => new Date(now + d * 86_400_000);
+const dateInDays = (d: number) => inDays(d).toISOString().slice(0, 10); // YYYY-MM-DD (COI expiry)
 
-const db = getRawDb();
-db.pragma('foreign_keys = ON');
-
-// ── Run pending migrations (applied-set logic mirrors migrate.ts; safe on fresh or migrated) ──
-function migrate(): void {
-  const dir = path.join(process.cwd(), 'src', 'migrations');
-  db.exec(`CREATE TABLE IF NOT EXISTS _migrations (name TEXT PRIMARY KEY, applied_at TEXT NOT NULL)`);
-  const applied = new Set((db.prepare('SELECT name FROM _migrations').all() as { name: string }[]).map((r) => r.name));
-  for (const f of fs.readdirSync(dir).filter((x) => x.endsWith('.sql')).sort()) {
-    if (applied.has(f)) continue;
-    const sql = fs.readFileSync(path.join(dir, f), 'utf-8');
-    db.transaction(() => {
-      db.exec(sql);
-      db.prepare('INSERT INTO _migrations (name, applied_at) VALUES (?, ?)').run(f, iso());
-    })();
-    console.log(`  applied migration ${f}`);
-  }
-}
-
-// ── Idempotent wipe ─────────────────────────────────────────────────────────────────────
-function wipeExisting(): void {
-  // .all (not .get): clean up any duplicates too. Every table below carries tenant_id; the
-  // tenants row itself is keyed by id (no tenant_id column) so it's deleted separately.
-  const matches = db.prepare('SELECT id FROM tenants WHERE name = ?').all(TENANT_NAME) as { id: string }[];
-  if (matches.length === 0) return;
-  const tenantScoped = [
-    'requirement_evaluations', 'verification_runs', 'notifications', 'engine_advisories',
-    'extractions', 'documents', 'invites', 'vendor_locations', 'vendors',
+// ── Idempotent wipe — children before parents (Postgres FKs are RESTRICT, not CASCADE) ──
+async function wipeExisting(db: Db, tenantIds: string[]): Promise<void> {
+  if (tenantIds.length === 0) return;
+  const CHILD_TO_PARENT_ORDER = [
+    'engine_advisories', 'requirement_evaluations', 'verification_runs', 'extractions',
+    'notifications', 'audit_exports', 'invites', 'documents', 'vendor_locations', 'vendors',
     'requirement_rules', 'requirement_settings', 'user_locations', 'user_regions',
-    'audit_events', 'billing_snapshots', 'audit_exports', 'users', 'locations', 'regions',
-  ];
-  db.pragma('foreign_keys = OFF'); // dev-only bulk wipe; order-independent
-  const wipe = db.transaction(() => {
-    for (const { id } of matches) {
-      for (const t of tenantScoped) db.prepare(`DELETE FROM ${t} WHERE tenant_id = ?`).run(id);
-      db.prepare('DELETE FROM tenants WHERE id = ?').run(id);
-    }
-    db.prepare('DELETE FROM platform_users WHERE email = ?').run('platform@cascade.test');
-  });
-  wipe();
-  db.pragma('foreign_keys = ON');
-  console.log(`  wiped existing "${TENANT_NAME}" (${matches.length} tenant row(s))`);
+    'audit_events', 'billing_snapshots', 'users', 'locations', 'regions',
+  ] as const;
+  for (const table of CHILD_TO_PARENT_ORDER) {
+    await db.deleteFrom(table).where('tenant_id', 'in', tenantIds).execute();
+  }
+  await db.deleteFrom('tenants').where('id', 'in', tenantIds).execute();
+  await db.deleteFrom('platform_users').where('email', '=', 'platform@cascade.test').execute();
+  console.log(`  wiped existing "${TENANT_NAME}" (${tenantIds.length} tenant row(s))`);
 }
 
 // ── Insert helpers ────────────────────────────────────────────────────────────────────
 let TENANT = '';
-function platformUser(email: string, name: string): void {
-  db.prepare('INSERT INTO platform_users (id, email, name, role, password_hash, created_at) VALUES (?,?,?,?,?,?)')
-    .run(randomUUID(), email, name, 'owner', hashPassword(PW), iso());
-}
-function tenantUser(email: string, name: string, role: string): string {
-  const id = randomUUID();
-  db.prepare('INSERT INTO users (id, tenant_id, email, name, role, password_hash, status, created_at) VALUES (?,?,?,?,?,?,?,?)')
-    .run(id, TENANT, email, name, role, hashPassword(PW), 'active', iso());
-  return id;
-}
-function region(name: string): string {
-  const id = randomUUID();
-  db.prepare('INSERT INTO regions (id, tenant_id, name) VALUES (?,?,?)').run(id, TENANT, name);
-  return id;
-}
-function location(name: string, regionId: string, address: string): string {
-  const id = randomUUID();
-  db.prepare('INSERT INTO locations (id, tenant_id, region_id, name, address, status, created_at) VALUES (?,?,?,?,?,?,?)')
-    .run(id, TENANT, regionId, name, address, 'active', iso());
-  return id;
-}
-const assignRegion = (u: string, r: string) => db.prepare('INSERT INTO user_regions (user_id, region_id, tenant_id) VALUES (?,?,?)').run(u, r, TENANT);
-const assignLocation = (u: string, l: string) => db.prepare('INSERT INTO user_locations (user_id, location_id, tenant_id) VALUES (?,?,?)').run(u, l, TENANT);
 
-function reqSettings(): void {
-  db.prepare('INSERT OR REPLACE INTO requirement_settings (tenant_id, precedence_policy, floor_json) VALUES (?,?,?)')
-    .run(TENANT, 'strictest', JSON.stringify({ 'doc_required.coi': 'true', 'doc_required.w9': 'true', 'coverage.general_liability.each_occurrence': '1000000' }));
+async function platformUser(db: Db, email: string, name: string): Promise<void> {
+  await db.insertInto('platform_users').values({
+    id: randomUUID(), email, name, role: 'owner', password_hash: hashPassword(PW), created_at: nowDate(),
+  }).execute();
 }
-function rule(scope: string, scopeRef: string | null, key: string, value: string, by: string, reason: string): void {
-  db.prepare('INSERT INTO requirement_rules (id, tenant_id, scope_type, scope_ref, requirement_key, required_value, created_by, reason, created_at) VALUES (?,?,?,?,?,?,?,?,?)')
-    .run(randomUUID(), TENANT, scope, scopeRef, key, value, by, reason, iso());
+async function tenantUser(db: Db, email: string, name: string, role: string): Promise<string> {
+  const id = randomUUID();
+  await db.insertInto('users').values({
+    id, tenant_id: TENANT, email, name, role, password_hash: hashPassword(PW), status: 'active', created_at: nowDate(),
+  }).execute();
+  return id;
+}
+async function region(db: Db, name: string): Promise<string> {
+  const id = randomUUID();
+  await db.insertInto('regions').values({ id, tenant_id: TENANT, name }).execute();
+  return id;
+}
+async function location(db: Db, name: string, regionId: string, address: string): Promise<string> {
+  const id = randomUUID();
+  await db.insertInto('locations').values({
+    id, tenant_id: TENANT, region_id: regionId, name, address, status: 'active', created_at: nowDate(),
+  }).execute();
+  return id;
+}
+const assignRegion = (db: Db, u: string, r: string) => db.insertInto('user_regions').values({ user_id: u, region_id: r, tenant_id: TENANT }).execute();
+const assignLocation = (db: Db, u: string, l: string) => db.insertInto('user_locations').values({ user_id: u, location_id: l, tenant_id: TENANT }).execute();
+
+async function reqSettings(db: Db): Promise<void> {
+  await db.insertInto('requirement_settings').values({
+    tenant_id: TENANT, precedence_policy: 'strictest',
+    floor_json: JSON.stringify({ 'doc_required.coi': 'true', 'doc_required.w9': 'true', 'coverage.general_liability.each_occurrence': '1000000' }),
+  }).execute();
+}
+async function rule(db: Db, scope: string, scopeRef: string | null, key: string, value: string, by: string, reason: string): Promise<void> {
+  await db.insertInto('requirement_rules').values({
+    id: randomUUID(), tenant_id: TENANT, scope_type: scope, scope_ref: scopeRef,
+    requirement_key: key, required_value: value, created_by: by, reason, created_at: nowDate(),
+  }).execute();
 }
 
-function vendor(name: string, trade: string, email: string): string {
+async function vendor(db: Db, name: string, trade: string, email: string): Promise<string> {
   const id = randomUUID();
-  db.prepare('INSERT INTO vendors (id, tenant_id, business_name, contact_name, contact_email, contact_phone, trade, created_at) VALUES (?,?,?,?,?,?,?,?)')
-    .run(id, TENANT, name, 'Pat Vendor', email, '208-555-0100', trade, iso());
+  await db.insertInto('vendors').values({
+    id, tenant_id: TENANT, business_name: name, contact_name: 'Pat Vendor', contact_email: email,
+    contact_phone: '208-555-0100', trade, created_at: nowDate(),
+  }).execute();
   return id;
 }
-function vloc(vendorId: string, locationId: string, status: string): void {
-  db.prepare('INSERT INTO vendor_locations (id, tenant_id, vendor_id, location_id, status, flags_json, approved_by, approved_at, created_at) VALUES (?,?,?,?,?,?,?,?,?)')
-    .run(randomUUID(), TENANT, vendorId, locationId, status, null, null, status === 'approved' ? iso() : null, iso());
+async function vloc(db: Db, vendorId: string, locationId: string, status: string): Promise<void> {
+  await db.insertInto('vendor_locations').values({
+    id: randomUUID(), tenant_id: TENANT, vendor_id: vendorId, location_id: locationId, status,
+    flags_json: null, approved_by: null, approved_at: status === 'approved' ? nowDate() : null, created_at: nowDate(),
+  }).execute();
 }
-function run(vendorId: string, recommendation: string, trigger = 'onboarding'): string {
+async function run(db: Db, vendorId: string, recommendation: string, trigger = 'onboarding'): Promise<string> {
   const id = randomUUID();
-  db.prepare('INSERT INTO verification_runs (id, tenant_id, vendor_id, trigger, engine_version, recommendation, created_at) VALUES (?,?,?,?,?,?,?)')
-    .run(id, TENANT, vendorId, trigger, '1', recommendation, iso(now - 2 * 86_400_000));
+  await db.insertInto('verification_runs').values({
+    id, tenant_id: TENANT, vendor_id: vendorId, trigger, engine_version: '1', recommendation,
+    created_at: new Date(now - 2 * 86_400_000),
+  }).execute();
   return id;
 }
-function evalRow(runId: string, vendorId: string, locationId: string, key: string, required: string, outcome: string, comparison: string, band: string, note: string): void {
-  db.prepare('INSERT INTO requirement_evaluations (id, tenant_id, run_id, vendor_id, location_id, requirement_key, required_value, extracted_value_ref, comparison_result, confidence_band, outcome, note) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)')
-    .run(randomUUID(), TENANT, runId, vendorId, locationId, key, required, null, comparison, band, outcome, note);
+async function evalRow(db: Db, runId: string, vendorId: string, locationId: string, key: string, required: string, outcome: string, comparison: string, band: string, note: string): Promise<void> {
+  await db.insertInto('requirement_evaluations').values({
+    id: randomUUID(), tenant_id: TENANT, run_id: runId, vendor_id: vendorId, location_id: locationId,
+    requirement_key: key, required_value: required, extracted_value_ref: null,
+    comparison_result: comparison, confidence_band: band, outcome, note,
+  }).execute();
 }
-function doc(vendorId: string, docType: string): void {
-  db.prepare('INSERT INTO documents (id, tenant_id, vendor_id, doc_type, storage_key, encryption_json, original_filename, superseded_by, state, uploaded_at) VALUES (?,?,?,?,?,?,?,?,?,?)')
-    .run(randomUUID(), TENANT, vendorId, docType, `tenants/${TENANT}/vendors/${vendorId}/${randomUUID()}`, '{}', `${docType}.pdf`, null, 'active', iso());
+async function doc(db: Db, vendorId: string, docType: string): Promise<void> {
+  await db.insertInto('documents').values({
+    id: randomUUID(), tenant_id: TENANT, vendor_id: vendorId, doc_type: docType,
+    storage_key: `tenants/${TENANT}/vendors/${vendorId}/${randomUUID()}`, encryption_json: '{}',
+    original_filename: `${docType}.pdf`, superseded_by: null, state: 'active', uploaded_at: nowDate(),
+  }).execute();
 }
 // Chase row = a queued renewal_reminder whose payload carries the COI expiry. scheduled_for is
 // set to the (future) expiry so the running notification worker won't send it (it only sends
 // due rows), keeping it queued for the Command Center expiry derivation.
-function chase(vendorId: string, email: string, expiryDate: string): void {
-  db.prepare('INSERT INTO notifications (id, tenant_id, recipient_type, recipient_ref, channel, kind, status, scheduled_for, sent_at, payload_json, created_at, claimed_at, document_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)')
-    .run(randomUUID(), TENANT, 'vendor', email, 'email', 'exception', 'queued', `${expiryDate}T08:00:00.000Z`, null,
-      JSON.stringify({ type: 'renewal_reminder', vendor_id: vendorId, expiration_date: expiryDate, days_before: 7 }), iso(), null, null);
+async function chase(db: Db, vendorId: string, email: string, expiryDate: string): Promise<void> {
+  await db.insertInto('notifications').values({
+    id: randomUUID(), tenant_id: TENANT, recipient_type: 'vendor', recipient_ref: email,
+    channel: 'email', kind: 'exception', status: 'queued', scheduled_for: new Date(`${expiryDate}T08:00:00.000Z`),
+    sent_at: null, payload_json: JSON.stringify({ type: 'renewal_reminder', vendor_id: vendorId, expiration_date: expiryDate, days_before: 7 }),
+    created_at: nowDate(), claimed_at: null, document_id: null,
+  }).execute();
 }
-function invite(vendorId: string, inviterId: string, deliveryState: string): string {
+async function invite(db: Db, vendorId: string, inviterId: string, deliveryState: string): Promise<string> {
   const { rawToken, tokenHash } = generateInviteToken();
-  db.prepare('INSERT INTO invites (id, tenant_id, vendor_id, inviter_user_id, token, token_expires_at, purpose, delivery_state, created_at) VALUES (?,?,?,?,?,?,?,?,?)')
-    .run(randomUUID(), TENANT, vendorId, inviterId, tokenHash, inDays(14), 'onboarding', deliveryState, iso());
+  await db.insertInto('invites').values({
+    id: randomUUID(), tenant_id: TENANT, vendor_id: vendorId, inviter_user_id: inviterId,
+    token: tokenHash, token_expires_at: inDays(14), purpose: 'onboarding', delivery_state: deliveryState, created_at: nowDate(),
+  }).execute();
   return rawToken;
 }
 
 // ── Seed ────────────────────────────────────────────────────────────────────────────────
-function seed(): void {
+async function seed(db: Db): Promise<{ summary: string[]; pendingToken: string }> {
   TENANT = randomUUID();
-  db.prepare('INSERT INTO tenants (id, name, lifecycle_state, monthly_rate_cents, timezone, created_at) VALUES (?,?,?,?,?,?)')
-    .run(TENANT, TENANT_NAME, 'active', 9000, 'America/Los_Angeles', iso());
+  await db.insertInto('tenants').values({
+    id: TENANT, name: TENANT_NAME, lifecycle_state: 'active', monthly_rate_cents: 9000,
+    timezone: 'America/Los_Angeles', created_at: nowDate(),
+  }).execute();
 
-  platformUser('platform@cascade.test', 'Pat Platform');
-  const admin = tenantUser('admin@cascade.test', 'Avery Admin', 'admin');
-  const district = tenantUser('district@cascade.test', 'Dana District', 'district_manager');
-  const store = tenantUser('store@cascade.test', 'Sam Store', 'store_manager');
+  await platformUser(db, 'platform@cascade.test', 'Pat Platform');
+  const admin = await tenantUser(db, 'admin@cascade.test', 'Avery Admin', 'admin');
+  const district = await tenantUser(db, 'district@cascade.test', 'Dana District', 'district_manager');
+  const store = await tenantUser(db, 'store@cascade.test', 'Sam Store', 'store_manager');
 
-  const northIdaho = region('North Idaho');
-  const spokane = region('Spokane Metro');
-  const cda = location("Cascade Storage — Coeur d'Alene", northIdaho, '1450 W Seltice Way, Coeur d\'Alene, ID 83814');
-  const postFalls = location('Cascade Storage — Post Falls', northIdaho, '305 N Spokane St, Post Falls, ID 83854');
-  const spokaneValley = location('Cascade Storage — Spokane Valley', spokane, '12100 E Sprague Ave, Spokane Valley, WA 99206');
-  const libertyLake = location('Cascade Storage — Liberty Lake', spokane, '23801 E Appleway Ave, Liberty Lake, WA 99019');
+  const northIdaho = await region(db, 'North Idaho');
+  const spokane = await region(db, 'Spokane Metro');
+  const cda = await location(db, "Cascade Storage — Coeur d'Alene", northIdaho, '1450 W Seltice Way, Coeur d\'Alene, ID 83814');
+  const postFalls = await location(db, 'Cascade Storage — Post Falls', northIdaho, '305 N Spokane St, Post Falls, ID 83854');
+  const spokaneValley = await location(db, 'Cascade Storage — Spokane Valley', spokane, '12100 E Sprague Ave, Spokane Valley, WA 99206');
+  const libertyLake = await location(db, 'Cascade Storage — Liberty Lake', spokane, '23801 E Appleway Ave, Liberty Lake, WA 99019');
 
-  assignRegion(district, northIdaho);          // District scoped to North Idaho
-  assignLocation(store, cda);                   // Store Manager scoped to Coeur d'Alene
+  await assignRegion(db, district, northIdaho);          // District scoped to North Idaho
+  await assignLocation(db, store, cda);                   // Store Manager scoped to Coeur d'Alene
 
   // Requirement matrix — org base + one trade override + one location override (flagship CDA).
-  reqSettings();
-  rule('org', null, 'coverage.general_liability.each_occurrence', '1000000', admin, 'Org baseline GL');
-  rule('org', null, 'coverage.general_liability.general_aggregate', '2000000', admin, 'Org baseline GL aggregate');
-  rule('org', null, 'coverage.automobile_liability.combined_single_limit', '1000000', admin, 'Org baseline auto');
-  rule('org', null, 'coverage_required.workers_comp', 'true', admin, 'WC required org-wide');
-  rule('org', null, 'coverage.umbrella.each_occurrence', '2000000', admin, 'Org baseline umbrella');
-  rule('org', null, 'endorsement.additional_insured', 'true', admin, 'Additional insured required');
-  rule('org', null, 'doc_required.coi', 'true', admin, 'COI mandatory');
-  rule('org', null, 'doc_required.w9', 'true', admin, 'W-9 mandatory');
-  rule('trade', 'electrical', 'coverage.general_liability.each_occurrence', '2000000', admin, 'Electrical is higher-risk — raise GL');
-  rule('location', cda, 'coverage.general_liability.each_occurrence', '3000000', admin, 'Flagship Coeur d\'Alene — elevated GL');
-  rule('location', cda, 'coverage.umbrella.each_occurrence', '5000000', admin, 'Flagship Coeur d\'Alene — elevated umbrella');
+  await reqSettings(db);
+  await rule(db, 'org', null, 'coverage.general_liability.each_occurrence', '1000000', admin, 'Org baseline GL');
+  await rule(db, 'org', null, 'coverage.general_liability.general_aggregate', '2000000', admin, 'Org baseline GL aggregate');
+  await rule(db, 'org', null, 'coverage.automobile_liability.combined_single_limit', '1000000', admin, 'Org baseline auto');
+  await rule(db, 'org', null, 'coverage_required.workers_comp', 'true', admin, 'WC required org-wide');
+  await rule(db, 'org', null, 'coverage.umbrella.each_occurrence', '2000000', admin, 'Org baseline umbrella');
+  await rule(db, 'org', null, 'endorsement.additional_insured', 'true', admin, 'Additional insured required');
+  await rule(db, 'org', null, 'doc_required.coi', 'true', admin, 'COI mandatory');
+  await rule(db, 'org', null, 'doc_required.w9', 'true', admin, 'W-9 mandatory');
+  await rule(db, 'trade', 'electrical', 'coverage.general_liability.each_occurrence', '2000000', admin, 'Electrical is higher-risk — raise GL');
+  await rule(db, 'location', cda, 'coverage.general_liability.each_occurrence', '3000000', admin, 'Flagship Coeur d\'Alene — elevated GL');
+  await rule(db, 'location', cda, 'coverage.umbrella.each_occurrence', '5000000', admin, 'Flagship Coeur d\'Alene — elevated umbrella');
 
   const allLocs = [cda, postFalls, spokaneValley, libertyLake];
   const summary: string[] = [];
 
   // 1 — clean approved everywhere (Tier 3 · on track)
   {
-    const v = vendor('Summit Mechanical Services', 'hvac', 'dispatch@summitmech.test');
-    for (const l of allLocs) vloc(v, l, 'approved');
-    run(v, 'approve'); doc(v, 'coi'); doc(v, 'w9');
-    chase(v, 'dispatch@summitmech.test', dateInDays(280)); // far out → on track
+    const v = await vendor(db, 'Summit Mechanical Services', 'hvac', 'dispatch@summitmech.test');
+    for (const l of allLocs) await vloc(db, v, l, 'approved');
+    await run(db, v, 'approve'); await doc(db, v, 'coi'); await doc(db, v, 'w9');
+    await chase(db, v, 'dispatch@summitmech.test', dateInDays(280)); // far out → on track
     summary.push('Summit Mechanical Services (hvac) — approved ×4, clean → Tier 3 · On track');
   }
   // 2 — under_review, uncertain (Tier 1 · uncertain) — Clearwater WC-exemption canonical case
   {
-    const v = vendor('Clearwater Plumbing & Drain', 'plumbing', 'office@clearwaterplumbing.test');
-    vloc(v, cda, 'under_review'); vloc(v, postFalls, 'under_review');
-    const r = run(v, 'uncertain'); doc(v, 'coi'); doc(v, 'w9');
-    evalRow(r, v, cda, 'workers_comp_exemption_claimed', 'true', 'uncertain', 'indeterminate', 'low',
+    const v = await vendor(db, 'Clearwater Plumbing & Drain', 'plumbing', 'office@clearwaterplumbing.test');
+    await vloc(db, v, cda, 'under_review'); await vloc(db, v, postFalls, 'under_review');
+    const r = await run(db, v, 'uncertain'); await doc(db, v, 'coi'); await doc(db, v, 'w9');
+    await evalRow(db, r, v, cda, 'workers_comp_exemption_claimed', 'true', 'uncertain', 'indeterminate', 'low',
       'COI shows no workers comp; vendor may be a sole proprietor claiming exemption — needs a human call.');
     summary.push('Clearwater Plumbing & Drain (plumbing) — under_review, uncertain → Tier 1 · Uncertain');
   }
   // 3 — under_review, deficiencies (Tier 1 · deficiencies, 2 failed)
   {
-    const v = vendor('Apex Electric Co.', 'electrical', 'billing@apexelectric.test');
-    vloc(v, spokaneValley, 'under_review'); vloc(v, libertyLake, 'under_review');
-    const r = run(v, 'deficiencies'); doc(v, 'coi'); doc(v, 'w9');
-    evalRow(r, v, spokaneValley, 'coverage.general_liability.each_occurrence', '2000000', 'deficient', 'fails', 'high',
+    const v = await vendor(db, 'Apex Electric Co.', 'electrical', 'billing@apexelectric.test');
+    await vloc(db, v, spokaneValley, 'under_review'); await vloc(db, v, libertyLake, 'under_review');
+    const r = await run(db, v, 'deficiencies'); await doc(db, v, 'coi'); await doc(db, v, 'w9');
+    await evalRow(db, r, v, spokaneValley, 'coverage.general_liability.each_occurrence', '2000000', 'deficient', 'fails', 'high',
       'Electrical trade requires $2M GL each-occurrence; COI shows $1M.');
-    evalRow(r, v, spokaneValley, 'endorsement.additional_insured', 'true', 'deficient', 'missing', 'high',
+    await evalRow(db, r, v, spokaneValley, 'endorsement.additional_insured', 'true', 'deficient', 'missing', 'high',
       'No additional-insured endorsement found on the COI.');
     summary.push('Apex Electric Co. (electrical) — under_review, 2 deficiencies → Tier 1 · Deficiencies');
   }
   // 4 — approved, COI imminent (≤7d) (Tier 1 · imminent lapse)
   {
-    const v = vendor('Liberty Lake Landscaping', 'landscaping', 'crew@lllandscaping.test');
-    vloc(v, spokaneValley, 'approved'); vloc(v, libertyLake, 'approved');
-    run(v, 'approve'); doc(v, 'coi'); doc(v, 'w9');
-    chase(v, 'crew@lllandscaping.test', dateInDays(6));
+    const v = await vendor(db, 'Liberty Lake Landscaping', 'landscaping', 'crew@lllandscaping.test');
+    await vloc(db, v, spokaneValley, 'approved'); await vloc(db, v, libertyLake, 'approved');
+    await run(db, v, 'approve'); await doc(db, v, 'coi'); await doc(db, v, 'w9');
+    await chase(db, v, 'crew@lllandscaping.test', dateInDays(6));
     summary.push('Liberty Lake Landscaping (landscaping) — approved, COI expires ~6d → Tier 1 · Imminent lapse');
   }
   // 5 — approved, COI expiring soon (8–60d) (Tier 2 · expiring soon)
   {
-    const v = vendor('Five-Star Cleaning Crew', 'cleaning', 'ops@fivestarclean.test');
-    for (const l of allLocs) vloc(v, l, 'approved');
-    run(v, 'approve'); doc(v, 'coi'); doc(v, 'w9');
-    chase(v, 'ops@fivestarclean.test', dateInDays(21));
+    const v = await vendor(db, 'Five-Star Cleaning Crew', 'cleaning', 'ops@fivestarclean.test');
+    for (const l of allLocs) await vloc(db, v, l, 'approved');
+    await run(db, v, 'approve'); await doc(db, v, 'coi'); await doc(db, v, 'w9');
+    await chase(db, v, 'ops@fivestarclean.test', dateInDays(21));
     summary.push('Five-Star Cleaning Crew (cleaning) — approved, COI expires ~21d → Tier 2 · Expiring soon');
   }
   // 6 — open invite, delivered, not opened (Tier 3 · pending) — click-through vendor flow
   let pendingToken = '';
   {
-    const v = vendor('Ridgeline Tree & Pest', 'pest_control', 'hello@ridgelinepest.test');
-    vloc(v, cda, 'invited_pending');
-    pendingToken = invite(v, admin, 'sent');
+    const v = await vendor(db, 'Ridgeline Tree & Pest', 'pest_control', 'hello@ridgelinepest.test');
+    await vloc(db, v, cda, 'invited_pending');
+    pendingToken = await invite(db, v, admin, 'sent');
     summary.push('Ridgeline Tree & Pest (pest_control) — open invite (not opened) → Tier 3 · Pending  [vendor link below]');
   }
   // 7 — bounced invite (Tier 2 · invite failed / Resend)
   {
-    const v = vendor('Gate Guard Systems', 'gate_door', 'bademail@gateguard.test');
-    vloc(v, postFalls, 'invited_pending');
-    invite(v, district, 'bounced');
+    const v = await vendor(db, 'Gate Guard Systems', 'gate_door', 'bademail@gateguard.test');
+    await vloc(db, v, postFalls, 'invited_pending');
+    await invite(db, v, district, 'bounced');
     summary.push('Gate Guard Systems (gate_door) — invite bounced → Tier 2 · Invite failed (Resend)');
   }
   // 8 — expired coverage (Tier 1 · expired)
   {
-    const v = vendor('Northwest Paving', 'paving_asphalt', 'jobs@nwpaving.test');
-    vloc(v, postFalls, 'expired'); doc(v, 'coi'); doc(v, 'w9');
+    const v = await vendor(db, 'Northwest Paving', 'paving_asphalt', 'jobs@nwpaving.test');
+    await vloc(db, v, postFalls, 'expired'); await doc(db, v, 'coi'); await doc(db, v, 'w9');
     summary.push('Northwest Paving (paving_asphalt) — coverage expired → Tier 1 · Expired');
   }
   // 9 — non-compliant after a rule change (Tier 1 · non-compliant)
   {
-    const v = vendor('Iron Gate Security', 'security', 'admin@irongatesec.test');
-    vloc(v, spokaneValley, 'non_compliant'); doc(v, 'coi'); doc(v, 'w9');
-    const r = run(v, 'deficiencies', 'rule_change');
-    evalRow(r, v, spokaneValley, 'coverage.general_liability.each_occurrence', '1000000', 'deficient', 'fails', 'high',
+    const v = await vendor(db, 'Iron Gate Security', 'security', 'admin@irongatesec.test');
+    await vloc(db, v, spokaneValley, 'non_compliant'); await doc(db, v, 'coi'); await doc(db, v, 'w9');
+    const r = await run(db, v, 'deficiencies', 'rule_change');
+    await evalRow(db, r, v, spokaneValley, 'coverage.general_liability.each_occurrence', '1000000', 'deficient', 'fails', 'high',
       'GL each-occurrence below the newly tightened org requirement.');
     summary.push('Iron Gate Security (security) — non-compliant (rule change) → Tier 1 · Non-compliant');
   }
 
-  printSummary(summary, pendingToken);
+  return { summary, pendingToken };
 }
 
-function printSummary(vendorLines: string[], pendingToken: string): void {
+function printSummary(tenantId: string, vendorLines: string[], pendingToken: string): void {
   const line = '─'.repeat(78);
-  console.log(`\n${line}\n✅ Seeded "${TENANT_NAME}"  (tenant ${TENANT})\n${line}`);
+  console.log(`\n${line}\n✅ Seeded "${TENANT_NAME}"  (tenant ${tenantId})\n${line}`);
   console.log(`\nSign in at ${BASE}/login   (all passwords: ${PW})`);
   console.log('  • platform@cascade.test   — Platform owner → /platform placeholder');
   console.log('  • admin@cascade.test      — Admin (org-wide) → /command-center');
@@ -290,6 +290,24 @@ function printSummary(vendorLines: string[], pendingToken: string): void {
   console.log(`${line}\n`);
 }
 
-migrate();
-wipeExisting();
-db.transaction(seed)();
+async function main(): Promise<void> {
+  // Run any pending migrations first (same runner as `npm run migrate`), so this works on a
+  // fresh DB too — mirrors migrate.ts's own applied-set logic rather than duplicating it here.
+  execSync('npx tsx src/lib/db/migrate.ts', { stdio: 'inherit', cwd: process.cwd() });
+
+  const db = getDb();
+  try {
+    const existing = await db.selectFrom('tenants').select('id').where('name', '=', TENANT_NAME).execute();
+    await wipeExisting(db, existing.map((r) => r.id));
+
+    const { summary, pendingToken } = await withTransaction(db, (trx) => seed(trx));
+    printSummary(TENANT, summary, pendingToken);
+  } finally {
+    await closeDb();
+  }
+}
+
+main().catch((err) => {
+  console.error('Fatal:', err);
+  process.exitCode = 1;
+});

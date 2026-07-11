@@ -1,4 +1,3 @@
-import Database from 'better-sqlite3';
 import { randomUUID } from 'crypto';
 import { hashPassword } from '@/lib/auth/password';
 import { hashInviteToken } from '@/lib/auth/invite-token';
@@ -18,11 +17,18 @@ import { createEphemeralTestDatabase, dropEphemeralTestDatabase } from '@/lib/db
 //   afterEach(async () => { await teardownTestDb(db); });
 //   afterAll(async () => { await teardownTestDatabase(); });
 //
-// The seed*()/assign*() helpers below are UNCHANGED (still synchronous, still typed against
-// better-sqlite3's Database.Database) — they belong to modules that haven't converted yet.
-// Any test file calling both setupTestDb() (now async, returns a Kysely Db) and a seed helper
-// (still expects a sync Database.Database) will not compile — expected, per Stage 1's scope:
-// only db-core itself converts this stage.
+// The seed*()/assign*() helpers below are UNCHANGED (still synchronous) — they belong to the
+// ~40 old, un-converted test files that were never in any stage's scope to fix (see
+// tests/setup.ts's unhandled-rejection comment). Stage 10: better-sqlite3 is uninstalled, so
+// `SqliteDatabase` below is a minimal structural stand-in for the one shape these helpers
+// actually call (`.prepare(sql).run(...params)`) — this file no longer needs the real
+// package's types to compile, only what these vestigial helpers still use.
+type SqliteDatabase = {
+  // Deliberately loose (`any`, not `unknown`): better-sqlite3's real Statement.run() overloads
+  // are stricter than a generic (...params: unknown[]) signature under contravariance, and
+  // this type only needs to compile against vestigial call sites, not provide real safety.
+  prepare: (sql: string) => { run: (...params: any[]) => any };
+};
 
 let _ephemeral: Promise<{ name: string; db: Db }> | null = null;
 
@@ -53,7 +59,7 @@ export async function teardownTestDatabase(): Promise<void> {
 }
 
 export function seedPlatformUser(
-  db: Database.Database,
+  db: SqliteDatabase,
   overrides: Partial<{ id: string; email: string; name: string; role: string; password: string }> = {}
 ): { id: string; email: string; name: string; role: string; password: string } {
   const user = {
@@ -70,7 +76,7 @@ export function seedPlatformUser(
 }
 
 export function seedTenant(
-  db: Database.Database,
+  db: SqliteDatabase,
   overrides: Partial<{ id: string; name: string; lifecycle_state: string }> = {}
 ): { id: string; name: string; lifecycle_state: string } {
   const tenant = {
@@ -85,7 +91,7 @@ export function seedTenant(
 }
 
 export function seedTenantUser(
-  db: Database.Database,
+  db: SqliteDatabase,
   tenantId: string,
   overrides: Partial<{ id: string; email: string; name: string; role: string; password: string; status: string }> = {}
 ): { id: string; email: string; name: string; role: string; tenantId: string } {
@@ -105,7 +111,7 @@ export function seedTenantUser(
 }
 
 export function seedRegion(
-  db: Database.Database,
+  db: SqliteDatabase,
   tenantId: string,
   name = 'North Region'
 ): { id: string; name: string } {
@@ -115,7 +121,7 @@ export function seedRegion(
 }
 
 export function seedLocation(
-  db: Database.Database,
+  db: SqliteDatabase,
   tenantId: string,
   overrides: Partial<{ id: string; name: string; regionId: string; status: string }> = {}
 ): { id: string; name: string; tenantId: string } {
@@ -132,16 +138,16 @@ export function seedLocation(
   return loc;
 }
 
-export function assignUserToRegion(db: Database.Database, userId: string, regionId: string, tenantId: string): void {
+export function assignUserToRegion(db: SqliteDatabase, userId: string, regionId: string, tenantId: string): void {
   db.prepare('INSERT OR IGNORE INTO user_regions (user_id, region_id, tenant_id) VALUES (?, ?, ?)').run(userId, regionId, tenantId);
 }
 
-export function assignUserToLocation(db: Database.Database, userId: string, locationId: string, tenantId: string): void {
+export function assignUserToLocation(db: SqliteDatabase, userId: string, locationId: string, tenantId: string): void {
   db.prepare('INSERT OR IGNORE INTO user_locations (user_id, location_id, tenant_id) VALUES (?, ?, ?)').run(userId, locationId, tenantId);
 }
 
 export function seedRequirementSettings(
-  db: Database.Database,
+  db: SqliteDatabase,
   tenantId: string,
   overrides: Partial<{ precedence_policy: string; floor_json: string | null }> = {}
 ): void {
@@ -156,7 +162,7 @@ export function seedRequirementSettings(
 }
 
 export function seedRequirementRule(
-  db: Database.Database,
+  db: SqliteDatabase,
   tenantId: string,
   actorId: string,
   overrides: Partial<{
@@ -188,7 +194,7 @@ export function seedRequirementRule(
 }
 
 export function seedVendor(
-  db: Database.Database,
+  db: SqliteDatabase,
   tenantId: string,
   overrides: Partial<{ id: string; business_name: string; trade: string; contact_email: string }> = {}
 ): { id: string; business_name: string; trade: string; tenantId: string } {
@@ -206,7 +212,7 @@ export function seedVendor(
 }
 
 export function seedVendorLocation(
-  db: Database.Database,
+  db: SqliteDatabase,
   tenantId: string,
   vendorId: string,
   locationId: string,
@@ -225,7 +231,7 @@ export function seedVendorLocation(
 }
 
 export function seedInvite(
-  db: Database.Database,
+  db: SqliteDatabase,
   tenantId: string,
   overrides: Partial<{
     id: string; vendorId: string; inviterUserId: string; rawToken: string;
@@ -255,7 +261,7 @@ export function seedInvite(
 }
 
 export function seedDocument(
-  db: Database.Database,
+  db: SqliteDatabase,
   tenantId: string,
   vendorId: string,
   overrides: Partial<{
@@ -277,7 +283,7 @@ export function seedDocument(
 }
 
 export function seedExtraction(
-  db: Database.Database,
+  db: SqliteDatabase,
   tenantId: string,
   documentId: string,
   payload: ProcessedExtraction,
@@ -296,7 +302,7 @@ export function seedExtraction(
 }
 
 export function seedTemplate(
-  db: Database.Database,
+  db: SqliteDatabase,
   overrides: Partial<{ id: string; name: string; payload_json: string }> = {}
 ): { id: string; name: string } {
   const tpl = {

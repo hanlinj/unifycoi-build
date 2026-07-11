@@ -11,6 +11,12 @@
  * Usage:
  *   dotenv -- tsx scripts/eval-test-dataset.ts
  *
+ * Requires a local Postgres server (same PG_HOST/PG_PORT/PG_USER/PG_PASSWORD +
+ * PG_TEST_TEMPLATE_DATABASE as the test suite — see .env). Phase 13 migration: this used to
+ * spin up a throwaway better-sqlite3 :memory: database; there's no zero-setup in-memory
+ * equivalent under Postgres, so it now clones the same schema-only template the test suite
+ * uses (src/lib/db/test-isolation.ts) into a fresh ephemeral database, and drops it when done.
+ *
  * The script freezes the engine clock to the reference_date from ground-truth.yaml
  * so expiration-sensitive vendors (four_seasons, apex) evaluate correctly.
  */
@@ -18,12 +24,11 @@
 import 'dotenv/config';
 import fs from 'fs';
 import path from 'path';
-import Database from 'better-sqlite3';
 import yaml from 'js-yaml';
 import { randomUUID } from 'crypto';
+import { createEphemeralTestDatabase, dropEphemeralTestDatabase } from '../src/lib/db/test-isolation';
+import type { Db } from '../src/lib/db/client';
 
-// ── Setup env before importing anything that reads process.env ─────────────────
-process.env['SQLITE_PATH'] = ':memory:';
 process.env['STORAGE_DRIVER'] = 'filesystem';
 process.env['STORAGE_PATH'] = '/tmp/unifycoi-eval-blobs';
 
@@ -115,52 +120,39 @@ const ORG_REQUIREMENTS: Record<string, string> = {
   'entity_type': 'llc_or_corp',
 };
 
-function setupDb(): Database.Database {
-  const db = new Database(':memory:');
-  db.pragma('journal_mode = WAL');
-  db.pragma('foreign_keys = ON');
+const EVAL_TENANT_ID = 'eval-tenant-001';
+const EVAL_LOCATION_ID = 'eval-location-001';
+const EVAL_ADMIN_ID = 'eval-admin-001';
 
-  // Apply all migrations
-  const migrationsDir = path.join(__dirname, '..', 'src', 'migrations');
-  db.exec(`CREATE TABLE IF NOT EXISTS _migrations (name TEXT PRIMARY KEY, applied_at TEXT NOT NULL)`);
-  const files = fs.readdirSync(migrationsDir).filter((f) => f.endsWith('.sql')).sort();
-  for (const file of files) {
-    const sql = fs.readFileSync(path.join(migrationsDir, file), 'utf-8');
-    db.exec(sql);
-  }
+async function setupDb(): Promise<{ name: string; db: Db }> {
+  const { name, db } = await createEphemeralTestDatabase();
 
-  // Create test tenant, location, admin user
-  const tenantId = 'eval-tenant-001';
-  const locationId = 'eval-location-001';
-  const adminId = 'eval-admin-001';
+  const now = new Date();
+  await db.insertInto('tenants').values({
+    id: EVAL_TENANT_ID, name: 'Eval Tenant', lifecycle_state: 'active', monthly_rate_cents: 9000, created_at: now,
+  }).execute();
 
-  db.prepare(
-    'INSERT INTO tenants (id, name, lifecycle_state, monthly_rate_cents, created_at) VALUES (?, ?, ?, ?, ?)'
-  ).run(tenantId, 'Eval Tenant', 'active', 9000, new Date().toISOString());
+  await db.insertInto('users').values({
+    id: EVAL_ADMIN_ID, tenant_id: EVAL_TENANT_ID, email: 'admin@eval.test', name: 'Eval Admin',
+    role: 'admin', password_hash: 'x', status: 'active', created_at: now,
+  }).execute();
 
-  db.prepare(
-    'INSERT INTO users (id, tenant_id, email, name, role, password_hash, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
-  ).run(adminId, tenantId, 'admin@eval.test', 'Eval Admin', 'admin', 'x', 'active', new Date().toISOString());
+  await db.insertInto('locations').values({
+    id: EVAL_LOCATION_ID, tenant_id: EVAL_TENANT_ID, name: 'Eval Store', address: '1234 Storage Blvd', status: 'active', created_at: now,
+  }).execute();
 
-  db.prepare(
-    'INSERT INTO locations (id, tenant_id, name, address, status, created_at) VALUES (?, ?, ?, ?, ?, ?)'
-  ).run(locationId, tenantId, 'Eval Store', '1234 Storage Blvd', 'active', new Date().toISOString());
+  await db.insertInto('requirement_settings').values({
+    tenant_id: EVAL_TENANT_ID, precedence_policy: 'strictest',
+  }).execute();
 
-  // Seed requirement_settings
-  db.prepare(
-    `INSERT OR REPLACE INTO requirement_settings (tenant_id, precedence_policy) VALUES (?, ?)`
-  ).run(tenantId, 'strictest');
-
-  // Seed org-level requirement rules
   for (const [key, value] of Object.entries(ORG_REQUIREMENTS)) {
-    db.prepare(
-      `INSERT INTO requirement_rules
-         (id, tenant_id, scope_type, scope_ref, requirement_key, required_value, created_by, reason, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
-    ).run(randomUUID(), tenantId, 'org', null, key, value, adminId, 'eval seed', new Date().toISOString());
+    await db.insertInto('requirement_rules').values({
+      id: randomUUID(), tenant_id: EVAL_TENANT_ID, scope_type: 'org', scope_ref: null,
+      requirement_key: key, required_value: value, created_by: EVAL_ADMIN_ID, reason: 'eval seed', created_at: now,
+    }).execute();
   }
 
-  return db;
+  return { name, db };
 }
 
 function detectDocType(filename: string): DocType | null {
@@ -194,7 +186,7 @@ function expectedOutcomeMatches(expected: string, actual: EvaluationResult): boo
 async function evalVendor(
   vendorKey: string,
   gt: VendorGroundTruth,
-  db: Database.Database,
+  db: Db,
   referenceDate: Date
 ): Promise<VendorResult> {
   const result: VendorResult = {
@@ -263,10 +255,10 @@ async function evalVendor(
   }
 
   // Load requirements from DB for the eval location
-  const matrix = resolveRequirements(db, {
-    tenantId: 'eval-tenant-001',
+  const matrix = await resolveRequirements(db, {
+    tenantId: EVAL_TENANT_ID,
     vendorTrade: 'other',
-    locationId: 'eval-location-001',
+    locationId: EVAL_LOCATION_ID,
     precedence: 'strictest',
   });
 
@@ -343,123 +335,127 @@ async function main() {
   setEngineDateOverride(referenceDate);
   console.log(`\nClock frozen to: ${referenceDate.toISOString().slice(0, 10)}`);
 
-  const db = setupDb();
+  const { name: dbName, db } = await setupDb();
 
-  const results: VendorResult[] = [];
-  const vendors = groundTruth.vendors;
+  try {
+    const results: VendorResult[] = [];
+    const vendors = groundTruth.vendors;
 
-  for (const [vendorKey, gt] of Object.entries(vendors)) {
-    console.log(`\n── ${gt.display_name} ──`);
-    const result = await evalVendor(vendorKey, gt, db, referenceDate);
-    results.push(result);
+    for (const [vendorKey, gt] of Object.entries(vendors)) {
+      console.log(`\n── ${gt.display_name} ──`);
+      const result = await evalVendor(vendorKey, gt, db, referenceDate);
+      results.push(result);
 
-    const icon = result.skipped ? '⏭' : result.correct && result.evalMismatches.length === 0 && result.advisoryMismatches.length === 0 ? '✓' : '✗';
-    console.log(`  ${icon} Overall: expected=${result.expectedOverall} actual=${result.actualOverall}`);
-    if (result.usage) {
-      const u = result.usage;
-      // Primary (sonnet) cost vs escalation (opus) cost; escalated docs use opus for the extra pass only
-      const primaryCost = u.input_tokens * PRICE.sonnet.in + u.output_tokens * PRICE.sonnet.out;
-      console.log(`     API calls=${u.calls} in=${u.input_tokens.toLocaleString()} out=${u.output_tokens.toLocaleString()} ~$${primaryCost.toFixed(4)}${u.escalated ? ' [ESCALATED]' : ''}`);
+      const icon = result.skipped ? '⏭' : result.correct && result.evalMismatches.length === 0 && result.advisoryMismatches.length === 0 ? '✓' : '✗';
+      console.log(`  ${icon} Overall: expected=${result.expectedOverall} actual=${result.actualOverall}`);
+      if (result.usage) {
+        const u = result.usage;
+        // Primary (sonnet) cost vs escalation (opus) cost; escalated docs use opus for the extra pass only
+        const primaryCost = u.input_tokens * PRICE.sonnet.in + u.output_tokens * PRICE.sonnet.out;
+        console.log(`     API calls=${u.calls} in=${u.input_tokens.toLocaleString()} out=${u.output_tokens.toLocaleString()} ~$${primaryCost.toFixed(4)}${u.escalated ? ' [ESCALATED]' : ''}`);
+      }
+      if (result.evalMismatches.length > 0) {
+        console.log('  Evaluation mismatches:');
+        result.evalMismatches.forEach((m) => console.log(`    - ${m}`));
+      }
+      if (result.advisoryMismatches.length > 0) {
+        console.log('  Advisory mismatches:');
+        result.advisoryMismatches.forEach((m) => console.log(`    - ${m}`));
+      }
+      if (result.error) console.log(`  ERROR: ${result.error}`);
     }
-    if (result.evalMismatches.length > 0) {
-      console.log('  Evaluation mismatches:');
-      result.evalMismatches.forEach((m) => console.log(`    - ${m}`));
+
+    // ── Confusion matrix ─────────────────────────────────────────────────────────
+    const nonSkipped = results.filter((r) => !r.skipped && !r.error);
+    const allOveralls = ['approve', 'deficient', 'uncertain', 'bounced_expired'];
+    const matrix: Record<string, Record<string, number>> = {};
+    for (const exp of allOveralls) {
+      matrix[exp] = {};
+      for (const act of allOveralls) matrix[exp][act] = 0;
     }
-    if (result.advisoryMismatches.length > 0) {
-      console.log('  Advisory mismatches:');
-      result.advisoryMismatches.forEach((m) => console.log(`    - ${m}`));
+    for (const r of nonSkipped) {
+      const exp = r.expectedOverall;
+      const act = r.actualOverall;
+      if (!matrix[exp]) matrix[exp] = {};
+      matrix[exp][act] = (matrix[exp][act] ?? 0) + 1;
     }
-    if (result.error) console.log(`  ERROR: ${result.error}`);
-  }
 
-  // ── Confusion matrix ─────────────────────────────────────────────────────────
-  const nonSkipped = results.filter((r) => !r.skipped && !r.error);
-  const allOveralls = ['approve', 'deficient', 'uncertain', 'bounced_expired'];
-  const matrix: Record<string, Record<string, number>> = {};
-  for (const exp of allOveralls) {
-    matrix[exp] = {};
-    for (const act of allOveralls) matrix[exp][act] = 0;
-  }
-  for (const r of nonSkipped) {
-    const exp = r.expectedOverall;
-    const act = r.actualOverall;
-    if (!matrix[exp]) matrix[exp] = {};
-    matrix[exp][act] = (matrix[exp][act] ?? 0) + 1;
-  }
-
-  console.log('\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-  console.log('  Confusion Matrix (expected → actual)');
-  console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-  const header = [''].concat(allOveralls).map((s) => s.padEnd(18)).join(' ');
-  console.log('  ' + header);
-  for (const exp of allOveralls) {
-    const row = [exp].concat(allOveralls.map((act) => String(matrix[exp]?.[act] ?? 0))).map((s) => s.padEnd(18)).join(' ');
-    console.log('  ' + row);
-  }
-
-  // ── Accuracy summary ──────────────────────────────────────────────────────────
-  const totalEvaluated = nonSkipped.length;
-  const overallCorrect = nonSkipped.filter((r) => r.correct).length;
-  const evalCorrect = nonSkipped.filter((r) => r.evalMismatches.length === 0).length;
-  const advCorrect = nonSkipped.filter((r) => r.advisoryMismatches.length === 0).length;
-  const fullyCorrect = nonSkipped.filter(
-    (r) => r.correct && r.evalMismatches.length === 0 && r.advisoryMismatches.length === 0
-  ).length;
-
-  console.log('\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-  console.log('  Accuracy Summary');
-  console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-  console.log(`  Vendors evaluated:     ${totalEvaluated} / ${results.length} (${results.filter((r) => r.skipped).length} skipped)`);
-  console.log(`  Overall correct:       ${overallCorrect} / ${totalEvaluated} (${pct(overallCorrect, totalEvaluated)})`);
-  console.log(`  Eval key accuracy:     ${evalCorrect} / ${totalEvaluated} (${pct(evalCorrect, totalEvaluated)})`);
-  console.log(`  Advisory accuracy:     ${advCorrect} / ${totalEvaluated} (${pct(advCorrect, totalEvaluated)})`);
-  console.log(`  Fully correct:         ${fullyCorrect} / ${totalEvaluated} (${pct(fullyCorrect, totalEvaluated)})`);
-
-  // ── Per-document Vision spend breakdown ───────────────────────────────────────
-  const spendRows = nonSkipped.filter((r) => r.usage);
-  if (spendRows.length > 0) {
     console.log('\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-    console.log('  Vision API Spend (primary model pricing; escalated=Opus 4.8 extra pass)');
+    console.log('  Confusion Matrix (expected → actual)');
     console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-    console.log('  Vendor'.padEnd(42) + 'Calls'.padEnd(8) + 'In tok'.padEnd(10) + 'Out tok'.padEnd(10) + 'Cost (USD)');
-    console.log('  ' + '─'.repeat(78));
-    let totalIn = 0, totalOut = 0, totalCost = 0, totalCalls = 0;
-    for (const r of spendRows) {
-      const u = r.usage!;
-      const cost = u.input_tokens * PRICE.sonnet.in + u.output_tokens * PRICE.sonnet.out;
-      const esc = u.escalated ? '*' : ' ';
-      console.log(`  ${(r.displayName.slice(0, 39) + esc).padEnd(42)}${String(u.calls).padEnd(8)}${u.input_tokens.toLocaleString().padEnd(10)}${u.output_tokens.toLocaleString().padEnd(10)}$${cost.toFixed(4)}`);
-      totalIn += u.input_tokens;
-      totalOut += u.output_tokens;
-      totalCost += cost;
-      totalCalls += u.calls;
+    const header = [''].concat(allOveralls).map((s) => s.padEnd(18)).join(' ');
+    console.log('  ' + header);
+    for (const exp of allOveralls) {
+      const row = [exp].concat(allOveralls.map((act) => String(matrix[exp]?.[act] ?? 0))).map((s) => s.padEnd(18)).join(' ');
+      console.log('  ' + row);
     }
-    console.log('  ' + '─'.repeat(78));
-    console.log(`  ${'TOTAL'.padEnd(42)}${String(totalCalls).padEnd(8)}${totalIn.toLocaleString().padEnd(10)}${totalOut.toLocaleString().padEnd(10)}$${totalCost.toFixed(4)}`);
-    console.log('  (* = escalated: one extra Opus 4.8 corroboration pass on low-confidence critical fields)');
-  }
 
-  // ── Mismatch report ───────────────────────────────────────────────────────────
-  const mismatches = nonSkipped.filter(
-    (r) => !r.correct || r.evalMismatches.length > 0 || r.advisoryMismatches.length > 0
-  );
-  if (mismatches.length > 0) {
+    // ── Accuracy summary ──────────────────────────────────────────────────────────
+    const totalEvaluated = nonSkipped.length;
+    const overallCorrect = nonSkipped.filter((r) => r.correct).length;
+    const evalCorrect = nonSkipped.filter((r) => r.evalMismatches.length === 0).length;
+    const advCorrect = nonSkipped.filter((r) => r.advisoryMismatches.length === 0).length;
+    const fullyCorrect = nonSkipped.filter(
+      (r) => r.correct && r.evalMismatches.length === 0 && r.advisoryMismatches.length === 0
+    ).length;
+
     console.log('\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-    console.log('  Mismatches');
+    console.log('  Accuracy Summary');
     console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-    for (const r of mismatches) {
-      console.log(`\n  ${r.displayName}:`);
-      r.evalMismatches.forEach((m) => console.log(`    [eval]     ${m}`));
-      r.advisoryMismatches.forEach((m) => console.log(`    [advisory] ${m}`));
+    console.log(`  Vendors evaluated:     ${totalEvaluated} / ${results.length} (${results.filter((r) => r.skipped).length} skipped)`);
+    console.log(`  Overall correct:       ${overallCorrect} / ${totalEvaluated} (${pct(overallCorrect, totalEvaluated)})`);
+    console.log(`  Eval key accuracy:     ${evalCorrect} / ${totalEvaluated} (${pct(evalCorrect, totalEvaluated)})`);
+    console.log(`  Advisory accuracy:     ${advCorrect} / ${totalEvaluated} (${pct(advCorrect, totalEvaluated)})`);
+    console.log(`  Fully correct:         ${fullyCorrect} / ${totalEvaluated} (${pct(fullyCorrect, totalEvaluated)})`);
+
+    // ── Per-document Vision spend breakdown ───────────────────────────────────────
+    const spendRows = nonSkipped.filter((r) => r.usage);
+    if (spendRows.length > 0) {
+      console.log('\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+      console.log('  Vision API Spend (primary model pricing; escalated=Opus 4.8 extra pass)');
+      console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+      console.log('  Vendor'.padEnd(42) + 'Calls'.padEnd(8) + 'In tok'.padEnd(10) + 'Out tok'.padEnd(10) + 'Cost (USD)');
+      console.log('  ' + '─'.repeat(78));
+      let totalIn = 0, totalOut = 0, totalCost = 0, totalCalls = 0;
+      for (const r of spendRows) {
+        const u = r.usage!;
+        const cost = u.input_tokens * PRICE.sonnet.in + u.output_tokens * PRICE.sonnet.out;
+        const esc = u.escalated ? '*' : ' ';
+        console.log(`  ${(r.displayName.slice(0, 39) + esc).padEnd(42)}${String(u.calls).padEnd(8)}${u.input_tokens.toLocaleString().padEnd(10)}${u.output_tokens.toLocaleString().padEnd(10)}$${cost.toFixed(4)}`);
+        totalIn += u.input_tokens;
+        totalOut += u.output_tokens;
+        totalCost += cost;
+        totalCalls += u.calls;
+      }
+      console.log('  ' + '─'.repeat(78));
+      console.log(`  ${'TOTAL'.padEnd(42)}${String(totalCalls).padEnd(8)}${totalIn.toLocaleString().padEnd(10)}${totalOut.toLocaleString().padEnd(10)}$${totalCost.toFixed(4)}`);
+      console.log('  (* = escalated: one extra Opus 4.8 corroboration pass on low-confidence critical fields)');
     }
+
+    // ── Mismatch report ───────────────────────────────────────────────────────────
+    const mismatches = nonSkipped.filter(
+      (r) => !r.correct || r.evalMismatches.length > 0 || r.advisoryMismatches.length > 0
+    );
+    if (mismatches.length > 0) {
+      console.log('\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+      console.log('  Mismatches');
+      console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+      for (const r of mismatches) {
+        console.log(`\n  ${r.displayName}:`);
+        r.evalMismatches.forEach((m) => console.log(`    [eval]     ${m}`));
+        r.advisoryMismatches.forEach((m) => console.log(`    [advisory] ${m}`));
+      }
+    }
+
+    console.log('\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
+
+    // Reset clock override
+    setEngineDateOverride(null);
+
+    process.exitCode = fullyCorrect === totalEvaluated ? 0 : 1;
+  } finally {
+    await dropEphemeralTestDatabase(dbName, db);
   }
-
-  console.log('\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
-
-  // Reset clock override
-  setEngineDateOverride(null);
-
-  process.exit(fullyCorrect === totalEvaluated ? 0 : 1);
 }
 
 function pct(n: number, d: number): string {
@@ -468,5 +464,5 @@ function pct(n: number, d: number): string {
 
 main().catch((err) => {
   console.error('Fatal:', err);
-  process.exit(1);
+  process.exitCode = 1;
 });
