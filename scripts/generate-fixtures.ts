@@ -726,7 +726,6 @@ async function generateW9(v: VendorData): Promise<Uint8Array> {
     // print digits
     const digits = v.w9_tin.replace(/-/g, '');
     let dx = ML;
-    const ssn1 = parseInt(parts[0]?.length ?? '3', 10);
     for (let i = 0; i < digits.length; i++) {
       if (i === 3 || i === 5) dx += 12;  // skip separators
       label(c, digits[i], dx + 5, y + 6, 9, bold);
@@ -743,7 +742,7 @@ async function generateW9(v: VendorData): Promise<Uint8Array> {
     const digits = v.w9_tin.replace(/-/g, '');
     let dx = ML;
     for (let i = 0; i < digits.length; i++) {
-      if (i === parseInt(parts[0]?.length ?? '2', 10)) dx += 12;
+      if (i === (parts[0]?.length ?? 2)) dx += 12;
       label(c, digits[i], dx + 5, y + 6, 9, bold);
       dx += 16;
     }
