@@ -161,9 +161,28 @@ export class ResendMailer implements Mailer {
 }
 
 /**
- * Default process Mailer. Resend when RESEND_API_KEY is configured (prod / staging);
- * otherwise the logged NoOp (dev / test / CI). The transport is chosen once at import.
+ * Default process Mailer. Resend when RESEND_API_KEY is configured; otherwise the logged NoOp
+ * — but ONLY outside production (dev/test/CI). NoOp reports {ok: true} without sending anything,
+ * so silently selecting it in production would make every send look successful while nothing
+ * goes out. A misconfigured production deploy must fail loudly at boot instead — the moment
+ * this module is imported (instrumentation.ts's register(), at server startup) — rather than
+ * quietly reporting false sends on the first real send attempt. The transport is chosen once at
+ * import.
+ *
+ * `next build` also sets NODE_ENV=production while it statically imports route modules to
+ * collect page data (no server ever actually starts, no request is ever served) — without the
+ * NEXT_PHASE carve-out below, that would make the build itself fail whenever RESEND_API_KEY
+ * isn't present in the build environment, which is a separate concern from whether it's present
+ * at real runtime. `next build` sets NEXT_PHASE='phase-production-build' for exactly this kind
+ * of check; `next start` (real boot) does not.
  */
 export const defaultMailer: Mailer = env.email.resendApiKey
   ? new ResendMailer({ apiKey: env.email.resendApiKey })
-  : new NoOpMailer();
+  : (() => {
+      const isRealProductionBoot =
+        process.env['NODE_ENV'] === 'production' && process.env['NEXT_PHASE'] !== 'phase-production-build';
+      if (isRealProductionBoot) {
+        throw new Error('RESEND_API_KEY is required in production');
+      }
+      return new NoOpMailer();
+    })();
