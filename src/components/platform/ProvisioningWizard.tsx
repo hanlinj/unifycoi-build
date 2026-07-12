@@ -51,6 +51,12 @@ interface BillingAttachResponse {
   error?: string;
 }
 
+interface SendBillingLinkEmailResponse {
+  sent: boolean;
+  recipientEmail: string;
+  error?: string;
+}
+
 /** "$90" / "90.5" → 9000 / 9050 cents. Returns null for blank/invalid input. */
 function dollarsToCents(raw: string): number | null {
   const trimmed = raw.trim();
@@ -112,6 +118,8 @@ export function ProvisioningWizard({ templates }: { templates: WizardTemplate[] 
   const [result, setResult] = React.useState<ProvisionResponse | null>(null);
   const [retrying, setRetrying] = React.useState(false);
   const [copied, setCopied] = React.useState(false);
+  const [sendingEmail, setSendingEmail] = React.useState(false);
+  const [emailResult, setEmailResult] = React.useState<SendBillingLinkEmailResponse | null>(null);
 
   const tzList = React.useMemo(timezoneOptions, []);
 
@@ -246,6 +254,27 @@ export function ProvisioningWizard({ templates }: { templates: WizardTemplate[] 
     }
   }
 
+  async function handleSendBillingLinkEmail() {
+    if (!result) return;
+    setSendingEmail(true);
+    setEmailResult(null);
+    try {
+      const res = await fetch(`/api/platform/tenants/${result.tenant.id}/send-billing-link-email`, { method: 'POST' });
+      const body = await res.json().catch(() => ({}));
+      if (res.ok) {
+        setEmailResult((body as { data: SendBillingLinkEmailResponse }).data);
+      } else {
+        // The server-known recipient wasn't reached (validation/conflict error, no `data`) —
+        // fall back to the email the operator entered on the Admin step, still known here.
+        setEmailResult({ sent: false, recipientEmail: adminEmail, error: (body as { error?: string }).error ?? `Send failed (${res.status})` });
+      }
+    } catch {
+      setEmailResult({ sent: false, recipientEmail: adminEmail, error: 'Network error — the email was not sent.' });
+    } finally {
+      setSendingEmail(false);
+    }
+  }
+
   // ── Result screen (post-provision) ────────────────────────────────────────────
 
   if (result) {
@@ -271,6 +300,9 @@ export function ProvisioningWizard({ templates }: { templates: WizardTemplate[] 
               <div className="flex gap-2">
                 <Input readOnly value={result.billing.billingSetupUrl} onFocus={(e) => e.currentTarget.select()} />
                 <Button type="button" onClick={handleCopyBillingLink}>{copied ? 'Copied' : 'Copy'}</Button>
+                <Button type="button" onClick={handleSendBillingLinkEmail} disabled={sendingEmail}>
+                  {sendingEmail ? 'Sending…' : 'Send via email'}
+                </Button>
               </div>
             </FormField>
           )}
@@ -294,12 +326,24 @@ export function ProvisioningWizard({ templates }: { templates: WizardTemplate[] 
             )}
           </div>
 
+          {emailResult && (
+            <div className="mt-3">
+              {emailResult.sent ? (
+                <Alert tone="success">Payment link sent to {emailResult.recipientEmail}.</Alert>
+              ) : (
+                <Alert tone="danger">
+                  Payment link could not be sent to {emailResult.recipientEmail}. Error: {emailResult.error}
+                </Alert>
+              )}
+            </div>
+          )}
+
           <div className="mt-6 flex justify-end gap-2.5">
             <a href={`/platform/tenants/${result.tenant.id}`}>
               <Button variant="outline">View tenant</Button>
             </a>
-            <a href="/platform/provisioning">
-              <Button variant="primary">Provision another</Button>
+            <a href="/platform">
+              <Button variant="primary">Done</Button>
             </a>
           </div>
         </Panel>

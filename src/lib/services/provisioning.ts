@@ -50,6 +50,8 @@ import { createLocation } from './locations';
 import { getTemplate, applyTemplate } from '@/lib/requirements/templates';
 import { issueInviteToken, issueBillingSetupToken } from './password-reset';
 import type { BillingProvider } from '@/lib/billing/provider';
+import type { Mailer } from '@/lib/notifications/mailer';
+import { resolveFrom } from '@/lib/notifications/mailer';
 
 export interface ProvisionInput {
   name: string;
@@ -343,6 +345,72 @@ export async function resendBillingSetupLink(
   });
 
   return { inviteUrl: `${env.app.baseUrl}/billing/setup?token=${rawToken}`, expiresAt };
+}
+
+export interface SendBillingLinkEmailResult {
+  sent: boolean;
+  recipientEmail: string;
+  error?: string;
+}
+
+/**
+ * Email the billing-setup link to the tenant's first Admin — the completion-step "Send via
+ * email" action (operator-triggered only; never auto-sent, so the channel/timing stay in the
+ * operator's control — copy-link remains the alternative for Teams/Messenger/text). Mints a
+ * fresh token via issueBillingSetupToken (same primitive attachBilling/resendBillingSetupLink
+ * use — revisitable, not single-use, so this doesn't invalidate the link already shown on
+ * screen). Sends synchronously via the given Mailer (not the async notification queue) so the
+ * caller can report the TRUE delivery outcome, not just "queued".
+ */
+export async function sendBillingSetupLinkEmail(
+  db: Db,
+  tenantId: string,
+  mailer: Mailer,
+  platformUserId: string
+): Promise<SendBillingLinkEmailResult> {
+  const tenant = await getTenantById(db, tenantId);
+  if (!tenant) throw Object.assign(new Error('Tenant not found'), { status: 404 });
+  if (!tenant.stripe_customer_id) {
+    throw Object.assign(new Error('Billing has not been attached for this tenant yet — nothing to send'), { status: 409 });
+  }
+  const admin = await db
+    .selectFrom('users')
+    .select(['id', 'email'])
+    .where('tenant_id', '=', tenantId)
+    .where('role', '=', 'admin')
+    .orderBy('created_at')
+    .limit(1)
+    .executeTakeFirst();
+  if (!admin) throw Object.assign(new Error('Tenant has no admin user to bill'), { status: 409 });
+
+  const { rawToken } = await issueBillingSetupToken(db, { tenantId, userId: admin.id });
+  const billingSetupUrl = `${env.app.baseUrl}/billing/setup?token=${rawToken}`;
+  const from = resolveFrom('internal', null);
+
+  const result = await mailer.send({
+    to: admin.email,
+    fromName: from.fromName,
+    fromEmail: from.fromEmail,
+    subject: `Set up billing for ${tenant.name}`,
+    body:
+      `Please set up billing for ${tenant.name} using the secure link below:\n\n${billingSetupUrl}\n\n` +
+      `Card entry happens entirely on Stripe's own secure form — nothing here ever sees your card number.`,
+  });
+
+  if (!result.ok) {
+    return { sent: false, recipientEmail: admin.email, error: result.error ?? 'send failed' };
+  }
+
+  await logAudit(db, {
+    tenantId,
+    actorType: 'platform',
+    actorId: platformUserId,
+    eventType: 'billing.setup_link_emailed',
+    targetType: 'tenant',
+    targetId: tenantId,
+    payload: { recipient: admin.email },
+  });
+  return { sent: true, recipientEmail: admin.email };
 }
 
 export interface RateUpdateResult {
