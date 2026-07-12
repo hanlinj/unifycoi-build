@@ -216,9 +216,13 @@ export function startDigestWorker(
   intervalSeconds: number = 60 * 60
 ): DigestWorkerHandle {
   const timer = setInterval(() => {
-    void runDigestCycle(mailer, db).catch((err) => {
-      console.error('[digest-worker] cycle failed:', err);
-    });
+    void runDigestCycle(mailer, db)
+      .then((result) => {
+        console.log('[digest-worker] cycle ok, tenants', result.tenantsFired);
+      })
+      .catch((err) => {
+        console.error('[digest-worker] cycle failed:', err);
+      });
   }, intervalSeconds * 1000);
   if (typeof timer.unref === 'function') timer.unref();
   return { stop: () => clearInterval(timer) };

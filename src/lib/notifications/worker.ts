@@ -295,9 +295,13 @@ export function startNotificationWorker(
   intervalSeconds: number = env.notifications.workerPollSeconds
 ): WorkerHandle {
   const timer = setInterval(() => {
-    void processDueNotifications(mailer, db).catch((err) => {
-      console.error('[notification-worker] tick failed:', err);
-    });
+    void processDueNotifications(mailer, db)
+      .then((result) => {
+        console.log('[notification-worker] tick ok, processed', result.sent + result.failed);
+      })
+      .catch((err) => {
+        console.error('[notification-worker] tick failed:', err);
+      });
   }, intervalSeconds * 1000);
   // Don't keep the event loop alive solely for this timer.
   if (typeof timer.unref === 'function') timer.unref();

@@ -17,6 +17,7 @@ import { startDigestWorker } from '@/lib/notifications/digest';
 import { startRetentionWorker } from '@/lib/retention/worker';
 import { startAuditExportWorker } from '@/lib/exports/worker';
 import { startBillingSyncWorker } from '@/lib/billing/worker';
+import { env } from '@/lib/env';
 
 export interface WorkerHandles {
   notification: { stop: () => void };
@@ -36,13 +37,32 @@ export interface WorkerHandles {
  * first time since this file's bug was introduced.
  */
 export function startAllWorkers(mailer: Mailer, db: Db, billing: BillingProvider): WorkerHandles {
-  return {
+  const handles = {
     notification: startNotificationWorker(mailer, db),
     digest: startDigestWorker(mailer, db),
     retention: startRetentionWorker(db),
     auditExport: startAuditExportWorker(db),
     billingSync: startBillingSyncWorker(db, billing),
   };
+
+  // Positive boot confirmation (not just silence-on-success): mirrors each start*Worker's own
+  // default interval, since bootstrap doesn't override any of them. Digest (hourly) and
+  // retention (daily) defaults live in their own files (digest.ts / retention/worker.ts) —
+  // keep this in sync if those change.
+  const notificationIntervalSeconds = env.notifications.workerPollSeconds;
+  const digestIntervalSeconds = 60 * 60;
+  const retentionIntervalSeconds = 24 * 60 * 60;
+  const auditExportIntervalSeconds = env.notifications.workerPollSeconds;
+  const billingSyncIntervalSeconds = env.billing.syncWorkerPollSeconds;
+  console.log(
+    `[workers] started: notification (interval ${notificationIntervalSeconds * 1000}ms), ` +
+      `digest (interval ${digestIntervalSeconds * 1000}ms), ` +
+      `retention (interval ${retentionIntervalSeconds * 1000}ms), ` +
+      `auditExport (interval ${auditExportIntervalSeconds * 1000}ms), ` +
+      `billingSync (interval ${billingSyncIntervalSeconds * 1000}ms)`
+  );
+
+  return handles;
 }
 
 /** Stop all workers (symmetry helper; mainly for tests/graceful shutdown). */
