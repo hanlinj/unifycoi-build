@@ -312,10 +312,6 @@ export default async function VendorRecordPage({ params }: { params: { vendorId:
         </div>
       </section>
 
-      {/* Zone 2: Review workbench (evaluations + uncertainty UX + decision panel) — Admin only.
-          Rendered at the bottom alongside the decision drawer via <Workbench>; the uncertainty
-          accept / treat-as-deficient handoff lives there (MISSION #4). */}
-
       {/* Zone 3: Per-location compliance */}
       <section style={{ marginBottom: 32 }}>
         <h2 style={{ fontSize: 16, fontWeight: 600, margin: '0 0 12px' }}>Locations</h2>
@@ -357,6 +353,25 @@ export default async function VendorRecordPage({ params }: { params: { vendorId:
           </tbody>
         </table>
       </section>
+
+      {/* In-progress state — the vendor has submitted (under_review) but the background
+          verification job (src/lib/verification/worker.ts) hasn't produced a run yet. No new
+          FSM state: this reuses the existing under_review status + the absence of a
+          verification_runs row as the signal. Gates the workbench content that follows (Unify
+          Review → grid → decision panel), so the admin never opens a half-finished or empty
+          workbench mid-job — Documents on File still renders regardless, since the uploaded
+          files themselves are already real, whether or not the background run has finished. */}
+      {isAdmin && !verificationRun && locations.some((l) => l.status === 'under_review') && (
+        <section style={{ marginBottom: 32, padding: '16px 20px', borderRadius: 8, border: '1px solid #d0d7de', background: '#f6f8fa' }}>
+          <p style={{ margin: 0, fontSize: 14, color: '#57606a', display: 'flex', alignItems: 'center', gap: 8 }}>
+            <span style={{ width: 8, height: 8, borderRadius: '50%', background: '#9a6700', display: 'inline-block', flexShrink: 0 }} />
+            Verification in progress — documents are being reviewed by the AI engine. Refresh in a moment to see results.
+          </p>
+        </section>
+      )}
+
+      {/* Workbench, top to bottom in the order an Admin actually works it (Gate 2, Stage 4):
+          Unify Review summary → compliance grid (per facility) → documents → decision panel. */}
 
       {/* Unify Review summary (Gate 2, Stage 2) — Admin only. Generated FROM the grid's own
           gap/pass counts (src/lib/verification/summary.ts), never a fresh AI call, so it can
@@ -460,23 +475,11 @@ export default async function VendorRecordPage({ params }: { params: { vendorId:
         )}
       </section>
 
-      {/* In-progress state — the vendor has submitted (under_review) but the background
-          verification job (src/lib/verification/worker.ts) hasn't produced a run yet. No new
-          FSM state: this reuses the existing under_review status + the absence of a
-          verification_runs row as the signal, so the admin never opens a half-finished or
-          empty workbench mid-job. */}
-      {isAdmin && !verificationRun && locations.some((l) => l.status === 'under_review') && (
-        <section style={{ marginBottom: 32, padding: '16px 20px', borderRadius: 8, border: '1px solid #d0d7de', background: '#f6f8fa' }}>
-          <p style={{ margin: 0, fontSize: 14, color: '#57606a', display: 'flex', alignItems: 'center', gap: 8 }}>
-            <span style={{ width: 8, height: 8, borderRadius: '50%', background: '#9a6700', display: 'inline-block', flexShrink: 0 }} />
-            Verification in progress — documents are being reviewed by the AI engine. Refresh in a moment to see results.
-          </p>
-        </section>
-      )}
-
-      {/* Zone 2 workbench + decision drawer — Admin only.
-          Evaluations table (with per-row uncertainty actions) and the decision panel share
-          client state so "Treat as deficient" pre-populates the correction scope. */}
+      {/* Decision panel (Gate 2, Stage 4 — last in reading order). Evaluations table (with
+          per-row uncertainty actions) and the decision panel share client state so "Treat as
+          deficient" pre-populates the correction scope. Component itself untouched — Approve /
+          Reject / Request Correction still call the same applyDecision()-backed API exactly as
+          before; only this block's position on the page moved. */}
       {isAdmin && verificationRun && (
         <Workbench
           vendorId={vendor.id}
