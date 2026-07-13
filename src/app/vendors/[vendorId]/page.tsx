@@ -8,6 +8,7 @@ import { redirect } from 'next/navigation';
 import { requestBaseUrl } from '@/lib/http/base-url';
 import { Card, CardHeader, CardTitle, CardBody, Badge, Table, THead, TBody, TR, TH, TD, type BadgeTone } from '@/components/ui';
 import { buildUnifyReviewSummary } from '@/lib/verification/summary';
+import { DocumentsAccordion } from './DocumentsAccordion';
 import { Workbench } from './Workbench';
 
 export const dynamic = 'force-dynamic';
@@ -429,17 +430,21 @@ export default async function VendorRecordPage({ params }: { params: { vendorId:
         </section>
       )}
 
-      {/* Zone 4: Documents on file */}
+      {/* Zone 4: Documents on file. Admin gets the interactive accordion (Gate 2, Stage 3) —
+          click a row to expand the real PDF, view/reveal audit events fire per action. Manager
+          keeps the plain read-only table (no viewer, no reveal — Sensitive stays server-masked
+          per invariant #8, and original_filename is never even sent to a non-admin). */}
       <section style={{ marginBottom: 32 }}>
         <h2 style={{ fontSize: 16, fontWeight: 600, margin: '0 0 12px' }}>Documents on File</h2>
-        {documents.length === 0 ? (
+        {isAdmin ? (
+          <DocumentsAccordion vendorId={vendor.id} documents={documents} />
+        ) : documents.length === 0 ? (
           <p style={{ color: '#57606a', fontSize: 14 }}>No documents uploaded yet.</p>
         ) : (
           <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
             <thead>
               <tr style={{ background: '#f6f8fa' }}>
                 <th style={th}>Type</th>
-                {isAdmin && <th style={th}>Filename</th>}
                 <th style={th}>Uploaded</th>
               </tr>
             </thead>
@@ -447,7 +452,6 @@ export default async function VendorRecordPage({ params }: { params: { vendorId:
               {documents.map((doc) => (
                 <tr key={doc.id} style={{ borderBottom: '1px solid #f0f0f0' }}>
                   <td style={td}><code style={{ fontSize: 12 }}>{doc.doc_type.toUpperCase()}</code></td>
-                  {isAdmin && <td style={td}>{(doc as { original_filename?: string | null }).original_filename ?? '—'}</td>}
                   <td style={td}>{new Date(doc.uploaded_at).toLocaleDateString()}</td>
                 </tr>
               ))}
