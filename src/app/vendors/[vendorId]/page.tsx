@@ -6,7 +6,7 @@
 import { cookies, headers } from 'next/headers';
 import { redirect } from 'next/navigation';
 import { requestBaseUrl } from '@/lib/http/base-url';
-import { Card, CardHeader, CardTitle, CardBody, Badge, type BadgeTone } from '@/components/ui';
+import { Card, CardHeader, CardTitle, CardBody, Badge, Table, THead, TBody, TR, TH, TD, type BadgeTone } from '@/components/ui';
 import { Workbench } from './Workbench';
 
 export const dynamic = 'force-dynamic';
@@ -68,6 +68,27 @@ interface ActivityEvent {
   payload: Record<string, unknown> | null;
 }
 
+interface GridRow {
+  requirementKey: string;
+  requiredValue: string | null;
+  extractedValue: string | null;
+  comparisonResult: 'meets' | 'fails' | 'indeterminate' | 'missing' | 'not_evaluated';
+  status: 'green' | 'red';
+  note: string | null;
+}
+
+interface LocationGrid {
+  locationId: string;
+  locationName: string;
+  rows: GridRow[];
+}
+
+interface ComplianceGrid {
+  locations: LocationGrid[];
+  countMeets: number;
+  countBelowOrMissing: number;
+}
+
 interface VendorData {
   vendor: {
     id: string;
@@ -79,6 +100,7 @@ interface VendorData {
   };
   locations: VendorLocation[];
   verificationRun?: VerificationRun | null;
+  grid?: ComplianceGrid | null;
   documents: DocumentRow[];
   activity?: ActivityEvent[];
   role: string;
@@ -200,6 +222,19 @@ function formatTimestamp(iso: string): string {
   });
 }
 
+// ── Compliance grid (Gate 2, Stage 1) helpers ────────────────────────────────
+
+function gridStatusLabel(row: GridRow): string {
+  switch (row.comparisonResult) {
+    case 'meets': return 'Meets';
+    case 'fails': return 'Fails';
+    case 'missing': return 'Missing';
+    case 'indeterminate': return 'Indeterminate';
+    case 'not_evaluated': return 'Not evaluated';
+    default: return row.comparisonResult;
+  }
+}
+
 // ── Page ──────────────────────────────────────────────────────────────────────
 
 export default async function VendorRecordPage({ params }: { params: { vendorId: string } }) {
@@ -227,7 +262,7 @@ export default async function VendorRecordPage({ params }: { params: { vendorId:
   }
 
   const json = await res.json() as { data: VendorData };
-  const { vendor, locations, verificationRun, documents, activity, role } = json.data;
+  const { vendor, locations, verificationRun, grid, documents, activity, role } = json.data;
   const isAdmin = role === 'admin';
   const locationNameById: Record<string, string> = Object.fromEntries(
     locations.map((l) => [l.location_id, l.location_name])
@@ -320,6 +355,60 @@ export default async function VendorRecordPage({ params }: { params: { vendorId:
           </tbody>
         </table>
       </section>
+
+      {/* Compliance Grid (Gate 2, Stage 1) — Admin only. Read-time recompute over the stored
+          extraction bundle + resolved requirements matrix (src/lib/verification/grid.ts): shows
+          every requirement, including passes, which requirement_evaluations never persists.
+          Gated on a completed run existing (grid is null before that — the in-progress banner
+          above already covers that gap). Grouped per facility, per Stage 1's spec. */}
+      {isAdmin && grid && (
+        <section className="font-sans" style={{ marginBottom: 32 }}>
+          <Card>
+            <CardHeader>
+              <CardTitle>Compliance Grid</CardTitle>
+              <div className="flex items-center gap-2">
+                <Badge tone="success">{grid.countMeets} meets</Badge>
+                <Badge tone="danger">{grid.countBelowOrMissing} below or missing</Badge>
+              </div>
+            </CardHeader>
+            <CardBody className="p-0">
+              {grid.locations.map((loc) => (
+                <div key={loc.locationId} className="border-b border-border last:border-b-0">
+                  <div className="bg-surface-2 px-5 py-2.5 text-[13px] font-bold text-fg">{loc.locationName}</div>
+                  {loc.rows.length === 0 ? (
+                    <p className="px-5 py-4 text-sm text-fg-muted">No requirements resolved for this location.</p>
+                  ) : (
+                    <Table>
+                      <THead>
+                        <TR>
+                          <TH>Requirement</TH>
+                          <TH>Required</TH>
+                          <TH>On Certificate</TH>
+                          <TH>Status</TH>
+                        </TR>
+                      </THead>
+                      <TBody>
+                        {loc.rows.map((row, i) => (
+                          <TR key={`${row.requirementKey}-${i}`}>
+                            <TD><code className="text-xs">{row.requirementKey}</code></TD>
+                            <TD>{row.requiredValue ?? '—'}</TD>
+                            <TD>{row.extractedValue ?? '—'}</TD>
+                            <TD>
+                              <Badge tone={row.status === 'green' ? 'success' : 'danger'}>
+                                {gridStatusLabel(row)}
+                              </Badge>
+                            </TD>
+                          </TR>
+                        ))}
+                      </TBody>
+                    </Table>
+                  )}
+                </div>
+              ))}
+            </CardBody>
+          </Card>
+        </section>
+      )}
 
       {/* Zone 4: Documents on file */}
       <section style={{ marginBottom: 32 }}>

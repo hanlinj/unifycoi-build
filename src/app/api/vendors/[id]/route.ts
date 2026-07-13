@@ -10,6 +10,7 @@ import { TenantDB } from '@/lib/db/tenant';
 import { requireTenantAuth, isResponse, forbidden, notFound } from '@/lib/api';
 import { resolveScope, scopeIncludesLocation } from '@/lib/scope';
 import { logAudit } from '@/lib/audit';
+import { computeComplianceGrid, type ComplianceGrid } from '@/lib/verification/grid';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -231,6 +232,22 @@ export async function GET(
     };
   }
 
+  // Compliance grid (Gate 2, Stage 1) — a READ-TIME recompute over the stored extraction
+  // bundle + resolved requirements matrix, using the same pure rules-engine function the
+  // worker/rules-only-reeval path already runs. No Vision call, no writes: requirement_evaluations
+  // stays the point-in-time exceptions record, untouched. Gated on a completed run existing —
+  // same "under_review + no run yet ⇒ in progress" signal the page already uses, so the grid
+  // never renders against a submission that hasn't finished background verification.
+  const grid: ComplianceGrid | null = latestRun
+    ? await computeComplianceGrid(
+        db,
+        tenantId,
+        vendorId,
+        vendor.trade,
+        locations.map((l) => ({ location_id: l.location_id, location_name: l.location_name }))
+      )
+    : null;
+
   // Activity (Zone 5) — the vendor's audit trail, newest first. Read-only; reuses the same
   // audit_events shape scopeAuditEvents() (src/lib/exports/audit-export.ts) queries for exports,
   // scoped here to this vendor's target_id under this route's existing tenant/role clamp.
@@ -272,6 +289,7 @@ export async function GET(
         approved_at: vl.approved_at,
       })),
       verificationRun,
+      grid,
       documents: documents.map((d) => ({
         id: d.id,
         doc_type: d.doc_type,
