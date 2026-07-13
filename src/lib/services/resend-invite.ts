@@ -48,6 +48,13 @@ export async function resendInvite(
   });
   logDevInviteUrl(rawToken, `resent onboarding invite · ${vendor.business_name ?? 'vendor'}`);
 
+  // The vendors table only stores a combined contact_name (no first/last split) — the initial
+  // invite (createVendorInvite) gets contact_first_name straight from the onboarding form's
+  // distinct first/last fields; a resend has no form, only this stored full name, so it's
+  // derived here: first whitespace-separated token, falling back to the business name if
+  // contact_name is null/blank (same fallback renderEmail() uses when it has no name at all).
+  const contactFirstName = vendor.contact_name?.trim().split(/\s+/)[0] || vendor.business_name;
+
   await queueNotification(db, tenantId, {
     recipientType: 'vendor',
     recipientRef: vendor.contact_email,
@@ -56,6 +63,7 @@ export async function resendInvite(
       type: 'vendor_invite',
       business_name: vendor.business_name,
       contact_name: vendor.contact_name,
+      contact_first_name: contactFirstName,
       invite_path: `/v/${rawToken}`,
       expires_at: expiresAt.toISOString(),
       resent: true,

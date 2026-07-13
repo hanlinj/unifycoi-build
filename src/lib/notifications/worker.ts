@@ -116,7 +116,10 @@ export async function processDueNotifications(
       continue;
     }
 
-    const { subject, body } = renderEmail(row);
+    // resolved.fromName is already the operator's display name for a vendor recipient
+    // (resolveFrom('vendor', ...) inside resolveRecipient) — surfaced into the body so vendor
+    // copy can reference the same name that's already branding the From header.
+    const { subject, body } = renderEmail(row, resolved.fromName);
     const result = await mailer.send({
       to: resolved.email,
       fromName: resolved.fromName,
@@ -231,8 +234,38 @@ function messageType(row: DueRow): string {
   return String(row.payload_json['type'] ?? 'notification');
 }
 
-/** Render subject/body from the payload. Plain language; no internal status to vendors. */
-function renderEmail(row: DueRow): { subject: string; body: string } {
+// Every link emailed on the queue path must be absolute (env.app.baseUrl + the relative path
+// already in payload_json) — mirrors what the direct-send flows (provisioning.ts,
+// stripe-webhook.ts) already do at their own point of construction. `path` is always one of
+// the relative paths this codebase mints (invite_path: `/v/${token}`, reset_path:
+// `/reset-password?token=${token}`), never itself absolute.
+function absoluteLink(path: unknown): string {
+  return `${env.app.baseUrl}${String(path ?? '')}`;
+}
+
+/** ISO timestamp -> human-readable date ("July 27, 2026"). Falls back to the raw value if it
+ *  doesn't parse, rather than emitting "Invalid Date". */
+function formatExpiry(value: unknown): string {
+  const d = new Date(String(value ?? ''));
+  if (Number.isNaN(d.getTime())) return String(value ?? '');
+  return d.toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' });
+}
+
+/** requirement_key[] -> a readable comma list ("General Liability Limit, Additional Insured"). */
+function formatDeficientRequirements(keys: unknown): string {
+  if (!Array.isArray(keys)) return '';
+  return keys
+    .map((k) => String(k).replace(/[._]/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase()))
+    .join(', ');
+}
+
+/**
+ * Render subject/body from the payload. Plain language; no internal status to vendors.
+ * `operatorName` is the same already-resolved operator display name that brands the From
+ * header (resolveFrom('vendor', ...) inside resolveRecipient) — passed in because
+ * payload_json never carries the tenant's own name, only the vendor's.
+ */
+function renderEmail(row: DueRow, operatorName: string): { subject: string; body: string } {
   const p = row.payload_json;
   const type = String(p['type'] ?? 'notification');
   const vname = String(p['vendor_name'] ?? p['vendor_id'] ?? 'the vendor');
@@ -250,15 +283,52 @@ function renderEmail(row: DueRow): { subject: string; body: string } {
         subject: `Please upload a current certificate`,
         body: `The document you uploaded lists an expired policy and couldn't be accepted. Please upload a current certificate.`,
       };
-    case 'vendor_invite':
-      return { subject: `You've been invited to submit documents`, body: `Please use your secure link to get started.` };
+    case 'vendor_invite': {
+      // contact_first_name is always present here: the initial invite (createVendorInvite)
+      // gets it straight from the onboarding form; a resend derives it from contact_name with
+      // a business_name fallback (src/lib/services/resend-invite.ts) — never blank/undefined.
+      const firstName = String(p['contact_first_name'] ?? '');
+      const businessName = String(p['business_name'] ?? '');
+      const inviteUrl = absoluteLink(p['invite_path']);
+      const expires = formatExpiry(p['expires_at']);
+      const customNotes = typeof p['custom_notes'] === 'string' ? p['custom_notes'].trim() : '';
+      return {
+        subject: `${operatorName} — finish your vendor setup`,
+        body:
+          `Hi ${firstName},\n\n` +
+          `Following up on your conversation with ${operatorName} — here's the secure link to finish setting up ${businessName} as an approved vendor:\n\n` +
+          `${inviteUrl}\n\n` +
+          `It's quick, but it helps to have three things handy before you start: your certificate of insurance, a completed W-9, and your preferred payment info. You can upload everything in one sitting.\n\n` +
+          `This link is unique to your business and expires ${expires}. Any questions, just reply.` +
+          (customNotes ? `\n\n${customNotes}` : ''),
+      };
+    }
     case 'password_reset':
       return {
         subject: `Reset your password`,
-        body: `We received a request to reset your password. Use this link to choose a new one (it expires in 1 hour): ${p['reset_path']}\n\nIf you didn't request this, you can ignore this email.`,
+        body: `We received a request to reset your password. Use this link to choose a new one (it expires in 1 hour): ${absoluteLink(p['reset_path'])}\n\nIf you didn't request this, you can ignore this email.`,
       };
-    case 'correction_requested':
-      return { subject: `A quick correction is needed`, body: `Please use your secure link to update your submission.` };
+    case 'correction_requested': {
+      // decision.ts (off-limits — decision logic) never selects a contact name for this path,
+      // only business_name (stored here under vendor_name) — so the greeting uses the business
+      // name in place of a person's name, unlike vendor_invite which does have one.
+      const businessName = String(p['vendor_name'] ?? 'there');
+      const inviteUrl = absoluteLink(p['invite_path']);
+      const expires = formatExpiry(p['expires_at']);
+      const reason = typeof p['reason'] === 'string' ? p['reason'].trim() : '';
+      const deficientList = formatDeficientRequirements(p['deficient_requirements']);
+      const correctionLine = reason || deficientList;
+      return {
+        subject: `One correction needed on your vendor submission`,
+        body:
+          `Hi ${businessName},\n\n` +
+          `Thanks for your submission. ${operatorName} reviewed it for ${businessName} and needs one correction before it can be approved:\n\n` +
+          (correctionLine ? `${correctionLine}\n\n` : '') +
+          `Update your submission here:\n\n` +
+          `${inviteUrl}\n\n` +
+          `This secure link expires ${expires}.`,
+      };
+    }
     case 'vendor_submitted':
       return { subject: `Vendor ready for review: ${vname}`, body: `${vname} submitted documents and is awaiting your review.` };
     case 'vendor_declined':
