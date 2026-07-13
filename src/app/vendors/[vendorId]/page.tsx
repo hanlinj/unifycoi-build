@@ -7,6 +7,7 @@ import { cookies, headers } from 'next/headers';
 import { redirect } from 'next/navigation';
 import { requestBaseUrl } from '@/lib/http/base-url';
 import { Card, CardHeader, CardTitle, CardBody, Badge, Table, THead, TBody, TR, TH, TD, type BadgeTone } from '@/components/ui';
+import { buildUnifyReviewSummary } from '@/lib/verification/summary';
 import { Workbench } from './Workbench';
 
 export const dynamic = 'force-dynamic';
@@ -355,6 +356,24 @@ export default async function VendorRecordPage({ params }: { params: { vendorId:
           </tbody>
         </table>
       </section>
+
+      {/* Unify Review summary (Gate 2, Stage 2) — Admin only. Generated FROM the grid's own
+          gap/pass counts (src/lib/verification/summary.ts), never a fresh AI call, so it can
+          never contradict the grid rendered directly below it. Recommends; does not decide. */}
+      {isAdmin && grid && verificationRun && (
+        <section className="font-sans" style={{ marginBottom: 20 }}>
+          <Card>
+            <CardHeader>
+              <CardTitle>Unify Review</CardTitle>
+            </CardHeader>
+            <CardBody>
+              <p className="text-sm text-fg">
+                {buildUnifyReviewSummary(grid, verificationRun.recommendation, vendor.business_name)}
+              </p>
+            </CardBody>
+          </Card>
+        </section>
+      )}
 
       {/* Compliance Grid (Gate 2, Stage 1) — Admin only. Read-time recompute over the stored
           extraction bundle + resolved requirements matrix (src/lib/verification/grid.ts): shows
