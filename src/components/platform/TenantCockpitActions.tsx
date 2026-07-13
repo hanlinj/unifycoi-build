@@ -1,12 +1,23 @@
 'use client';
 
-// Tenant cockpit resend controls (Slice 6). Both call existing token issuers
-// (resendFirstAdminInvite / resendBillingSetupLink) — this component is just the UI: fire the
-// request, show the returned link inline with a copy button. Same shape as the wizard's
-// billing-setup-link display and the Users panel's Send/Resend invite.
+// Tenant cockpit resend controls (Slice 6). Both call the real send endpoints
+// (sendAdminInviteEmail / sendBillingSetupLinkEmail via their routes) — actually emails the
+// link AND shows it inline with a copy button (the operator's alternate channel for
+// Teams/text), the same "sent AND copyable" pattern as the provisioning wizard's completion
+// step. The two endpoints return the link under different keys (inviteUrl vs
+// billingSetupUrl) — this component reads whichever is present.
 
 import React from 'react';
 import { Button, Input, Alert, FormField } from '@/components/ui';
+
+interface SendLinkResult {
+  sent: boolean;
+  recipientEmail: string;
+  expiresAt: string;
+  inviteUrl?: string;
+  billingSetupUrl?: string;
+  error?: string;
+}
 
 function ResendLinkButton({
   label,
@@ -16,32 +27,37 @@ function ResendLinkButton({
   endpoint: string;
 }) {
   const [busy, setBusy] = React.useState(false);
-  const [error, setError] = React.useState<string | null>(null);
-  const [result, setResult] = React.useState<{ inviteUrl: string; expiresAt: string } | null>(null);
+  // Request-level failure (bad tenant state, network) — distinct from `result.error`, which is
+  // a successful mint whose SEND then failed (still has a link to show/copy).
+  const [requestError, setRequestError] = React.useState<string | null>(null);
+  const [result, setResult] = React.useState<SendLinkResult | null>(null);
   const [copied, setCopied] = React.useState(false);
 
   async function send() {
     setBusy(true);
-    setError(null);
+    setRequestError(null);
+    setResult(null);
     try {
       const res = await fetch(endpoint, { method: 'POST' });
       const body = await res.json().catch(() => ({}));
       if (!res.ok) {
-        setError((body as { error?: string }).error ?? `Error ${res.status}`);
+        setRequestError((body as { error?: string }).error ?? `Error ${res.status}`);
         return;
       }
-      setResult((body as { data: { inviteUrl: string; expiresAt: string } }).data);
+      setResult((body as { data: SendLinkResult }).data);
     } catch {
-      setError('Network error — nothing was sent.');
+      setRequestError('Network error — nothing was sent.');
     } finally {
       setBusy(false);
     }
   }
 
+  const link = result?.inviteUrl ?? result?.billingSetupUrl;
+
   async function copy() {
-    if (!result) return;
+    if (!link) return;
     try {
-      await navigator.clipboard.writeText(result.inviteUrl);
+      await navigator.clipboard.writeText(link);
       setCopied(true);
       setTimeout(() => setCopied(false), 2000);
     } catch {
@@ -51,17 +67,29 @@ function ResendLinkButton({
 
   return (
     <div className="flex flex-col gap-2.5">
-      <Button type="button" variant="outline" size="sm" onClick={send} disabled={busy}>
+      {/* variant="primary": the default outline variant's border renders invisible (a Button.tsx
+          CSS-ordering issue — border-transparent wins the cascade over border-border-strong
+          regardless of class order) which reads as plain text, not a button. */}
+      <Button type="button" variant="primary" size="sm" onClick={send} disabled={busy}>
         {busy ? 'Sending…' : label}
       </Button>
-      {error && <Alert tone="danger">{error}</Alert>}
+      {requestError && <Alert tone="danger">{requestError}</Alert>}
       {result && (
-        <FormField label="Link">
-          <div className="flex gap-2">
-            <Input readOnly value={result.inviteUrl} onFocus={(e) => e.currentTarget.select()} />
-            <Button type="button" onClick={copy}>{copied ? 'Copied' : 'Copy'}</Button>
-          </div>
-        </FormField>
+        <>
+          {result.sent ? (
+            <Alert tone="success">Sent to {result.recipientEmail}.</Alert>
+          ) : (
+            <Alert tone="danger">Could not send to {result.recipientEmail}. Error: {result.error}</Alert>
+          )}
+          {link && (
+            <FormField label="Link">
+              <div className="flex gap-2">
+                <Input readOnly value={link} onFocus={(e) => e.currentTarget.select()} />
+                <Button type="button" onClick={copy}>{copied ? 'Copied' : 'Copy'}</Button>
+              </div>
+            </FormField>
+          )}
+        </>
       )}
     </div>
   );

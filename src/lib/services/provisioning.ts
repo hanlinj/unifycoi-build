@@ -83,6 +83,8 @@ export interface ProvisionResult {
 
 export interface ActivationResult {
   adminUserId: string;
+  /** So the caller (stripe-webhook.ts) can email the invite without a second lookup. */
+  adminEmail: string;
   invite: { rawToken: string; inviteUrl: string; expiresAt: string };
 }
 
@@ -227,7 +229,7 @@ export async function activateTenantOnFirstPayment(
 
   const admin = await db
     .selectFrom('users')
-    .select('id')
+    .select(['id', 'email'])
     .where('tenant_id', '=', tenantId)
     .where('role', '=', 'admin')
     .orderBy('created_at')
@@ -241,6 +243,11 @@ export async function activateTenantOnFirstPayment(
   await updateTenant(db, tenantId, { lifecycleState: 'active' }, 'stripe-webhook');
 
   const { rawToken, expiresAt } = await issueInviteToken(db, { tenantId, userId: admin.id }, now);
+  // Records that the credential was MINTED, not that it was delivered — deliberately kept as
+  // its original meaning (a valid invite now exists) rather than repurposed to mean "sent",
+  // since minting happens here but the actual send is a separate, best-effort step the caller
+  // (stripe-webhook.ts) performs afterward and can fail independently. See
+  // admin.invite_emailed for the delivery-confirmation signal.
   await logAudit(db, {
     tenantId,
     actorType: 'system',
@@ -252,7 +259,11 @@ export async function activateTenantOnFirstPayment(
 
   // Same path requestPasswordReset already builds — one token table, one landing path,
   // whichever flow minted the token (see src/app/reset-password/page.tsx, Slice 4a).
-  return { adminUserId: admin.id, invite: { rawToken, inviteUrl: `${env.app.baseUrl}/reset-password?token=${rawToken}`, expiresAt } };
+  return {
+    adminUserId: admin.id,
+    adminEmail: admin.email,
+    invite: { rawToken, inviteUrl: `${env.app.baseUrl}/reset-password?token=${rawToken}`, expiresAt },
+  };
 }
 
 export interface ResendResult {
@@ -306,6 +317,86 @@ export async function resendFirstAdminInvite(
   return { inviteUrl: `${env.app.baseUrl}/reset-password?token=${rawToken}`, expiresAt };
 }
 
+export interface SendAdminInviteEmailResult {
+  sent: boolean;
+  recipientEmail: string;
+  inviteUrl: string;
+  expiresAt: string;
+  error?: string;
+}
+
+/**
+ * Resend AND actually email the first Admin's credential-set invite — the tenant cockpit's
+ * "Resend admin invite" button. Same guard/mint/stamp/audit shape as resendFirstAdminInvite
+ * (only a dormant/invited admin can be resent a link — kept as a separate, self-contained
+ * function rather than composing over it, same "each caller does its own lookup" style
+ * sendBillingSetupLinkEmail/attachBilling/resendBillingSetupLink already use), plus the actual
+ * send via the given Mailer using sendBillingSetupLinkEmail's proven shape — never throws on a
+ * send failure; the link is returned either way so the cockpit can still show it as a copyable
+ * fallback (same "sent AND copyable" pattern as the provisioning wizard's completion step).
+ */
+export async function sendAdminInviteEmail(
+  db: Db,
+  tenantId: string,
+  mailer: Mailer,
+  platformUserId: string,
+  now: Date = new Date()
+): Promise<SendAdminInviteEmailResult> {
+  const tenant = await getTenantById(db, tenantId);
+  if (!tenant) throw Object.assign(new Error('Tenant not found'), { status: 404 });
+  const admin = await db
+    .selectFrom('users')
+    .select(['id', 'email', 'status'])
+    .where('tenant_id', '=', tenantId)
+    .where('role', '=', 'admin')
+    .orderBy('created_at')
+    .limit(1)
+    .executeTakeFirst();
+  if (!admin) throw Object.assign(new Error('Tenant has no admin user to invite'), { status: 409 });
+  if (admin.status !== 'invited') {
+    throw Object.assign(new Error('The first Admin has already accepted their invite — nothing to resend'), { status: 409 });
+  }
+
+  const { rawToken, expiresAt } = await issueInviteToken(db, { tenantId, userId: admin.id }, now);
+  const inviteUrl = `${env.app.baseUrl}/reset-password?token=${rawToken}`;
+  await db.updateTable('users').set({ invite_sent_at: now }).where('id', '=', admin.id).where('tenant_id', '=', tenantId).execute();
+
+  await logAudit(db, {
+    tenantId,
+    actorType: 'platform',
+    actorId: platformUserId,
+    eventType: 'admin.invite_resent',
+    targetType: 'user',
+    targetId: admin.id,
+  });
+
+  const from = resolveFrom('internal', null);
+  const result = await mailer.send({
+    to: admin.email,
+    fromName: from.fromName,
+    fromEmail: from.fromEmail,
+    subject: `You're invited to ${tenant.name} on UnifyCOI`,
+    body:
+      `Set your password to finish setting up your account:\n\n${inviteUrl}\n\n` +
+      `This link expires ${expiresAt}.`,
+  });
+
+  if (!result.ok) {
+    return { sent: false, recipientEmail: admin.email, inviteUrl, expiresAt, error: result.error ?? 'send failed' };
+  }
+
+  await logAudit(db, {
+    tenantId,
+    actorType: 'platform',
+    actorId: platformUserId,
+    eventType: 'admin.invite_emailed',
+    targetType: 'user',
+    targetId: admin.id,
+    payload: { recipient: admin.email },
+  });
+  return { sent: true, recipientEmail: admin.email, inviteUrl, expiresAt };
+}
+
 /**
  * Resend the billing-setup link from the tenant cockpit (Slice 6). Reuses issueBillingSetupToken
  * verbatim — the SAME issuer attachBilling calls. No status guard: unlike the credential invite,
@@ -350,6 +441,8 @@ export async function resendBillingSetupLink(
 export interface SendBillingLinkEmailResult {
   sent: boolean;
   recipientEmail: string;
+  billingSetupUrl: string;
+  expiresAt: string;
   error?: string;
 }
 
@@ -383,7 +476,7 @@ export async function sendBillingSetupLinkEmail(
     .executeTakeFirst();
   if (!admin) throw Object.assign(new Error('Tenant has no admin user to bill'), { status: 409 });
 
-  const { rawToken } = await issueBillingSetupToken(db, { tenantId, userId: admin.id });
+  const { rawToken, expiresAt } = await issueBillingSetupToken(db, { tenantId, userId: admin.id });
   const billingSetupUrl = `${env.app.baseUrl}/billing/setup?token=${rawToken}`;
   const from = resolveFrom('internal', null);
 
@@ -398,7 +491,7 @@ export async function sendBillingSetupLinkEmail(
   });
 
   if (!result.ok) {
-    return { sent: false, recipientEmail: admin.email, error: result.error ?? 'send failed' };
+    return { sent: false, recipientEmail: admin.email, billingSetupUrl, expiresAt, error: result.error ?? 'send failed' };
   }
 
   await logAudit(db, {
@@ -410,7 +503,7 @@ export async function sendBillingSetupLinkEmail(
     targetId: tenantId,
     payload: { recipient: admin.email },
   });
-  return { sent: true, recipientEmail: admin.email };
+  return { sent: true, recipientEmail: admin.email, billingSetupUrl, expiresAt };
 }
 
 export interface RateUpdateResult {

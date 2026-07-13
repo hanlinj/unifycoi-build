@@ -9,6 +9,7 @@ import Stripe from 'stripe';
 import { getDb } from '@/lib/db/client';
 import { env } from '@/lib/env';
 import { handleStripeEvent } from '@/lib/billing/stripe-webhook';
+import { defaultMailer } from '@/lib/notifications/mailer';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -36,7 +37,7 @@ export async function POST(request: Request): Promise<NextResponse> {
     return NextResponse.json({ error: 'invalid signature' }, { status: 400 });
   }
 
-  const result = await handleStripeEvent(getDb(), event);
+  const result = await handleStripeEvent(getDb(), event, defaultMailer);
   // Always 2xx once authenticated so Stripe doesn't retry-storm on an ignored/unknown event.
   return NextResponse.json(result, { status: 200 });
 }

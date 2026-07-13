@@ -1,10 +1,11 @@
-// POST /api/platform/tenants/:tenantId/resend-billing-link — tenant cockpit control (Slice 6),
-// closes the OPS-14 remainder. Reuses resendBillingSetupLink, which reuses
-// issueBillingSetupToken verbatim (same issuer attachBilling calls).
+// POST /api/platform/tenants/:tenantId/resend-billing-link — tenant cockpit control (Slice 6).
+// Reuses sendBillingSetupLinkEmail verbatim — the SAME function the provisioning wizard's
+// "Send via email" button calls — so this actually sends (not just mint-and-return).
 
 import { NextResponse } from 'next/server';
 import { getDb } from '@/lib/db/client';
-import { resendBillingSetupLink } from '@/lib/services/provisioning';
+import { sendBillingSetupLinkEmail } from '@/lib/services/provisioning';
+import { defaultMailer } from '@/lib/notifications/mailer';
 import { requirePlatformAuth, isResponse, ok, apiError } from '@/lib/api';
 import { captureError } from '@/lib/observability';
 
@@ -19,12 +20,12 @@ export async function POST(
   if (isResponse(auth)) return auth;
 
   try {
-    const result = await resendBillingSetupLink(getDb(), params.tenantId, auth.sub);
+    const result = await sendBillingSetupLinkEmail(getDb(), params.tenantId, defaultMailer, auth.sub);
     return ok(result);
   } catch (err) {
     const status = (err as { status?: number }).status ?? 500;
     if (status >= 400 && status < 500) return apiError((err as Error).message, status);
-    captureError(err, { where: 'resendBillingSetupLink' });
+    captureError(err, { where: 'sendBillingSetupLinkEmail' });
     return apiError('Could not resend the billing-setup link', 500);
   }
 }
