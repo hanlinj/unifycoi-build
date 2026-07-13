@@ -6,6 +6,7 @@
 import { cookies, headers } from 'next/headers';
 import { redirect } from 'next/navigation';
 import { requestBaseUrl } from '@/lib/http/base-url';
+import { Card, CardHeader, CardTitle, CardBody, Badge, type BadgeTone } from '@/components/ui';
 import { Workbench } from './Workbench';
 
 export const dynamic = 'force-dynamic';
@@ -57,6 +58,16 @@ interface DocumentRow {
   uploaded_at: string;
 }
 
+interface ActivityEvent {
+  id: string;
+  created_at: string;
+  actor_type: string;
+  actor_id: string | null;
+  actor_name: string | null;
+  event_type: string;
+  payload: Record<string, unknown> | null;
+}
+
 interface VendorData {
   vendor: {
     id: string;
@@ -69,6 +80,7 @@ interface VendorData {
   locations: VendorLocation[];
   verificationRun?: VerificationRun | null;
   documents: DocumentRow[];
+  activity?: ActivityEvent[];
   role: string;
 }
 
@@ -108,6 +120,86 @@ function statusColor(s: string): string {
   return '#57606a';
 }
 
+// ── Activity (Zone 5) helpers ────────────────────────────────────────────────
+
+function actorLabel(ev: ActivityEvent): string {
+  switch (ev.actor_type) {
+    case 'user': return ev.actor_name ?? 'Admin';
+    case 'system': return 'System';
+    case 'ai': return 'AI engine';
+    case 'vendor': return 'Vendor';
+    case 'platform': return 'Platform';
+    default: return ev.actor_type;
+  }
+}
+
+function actorTone(actorType: string): BadgeTone {
+  switch (actorType) {
+    case 'user': return 'info';
+    case 'ai': return 'attention';
+    case 'vendor': return 'success';
+    default: return 'neutral'; // system, platform
+  }
+}
+
+function titleCaseEventType(eventType: string): string {
+  return eventType.replace(/[._]/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
+}
+
+/** event_type -> human sentence. Falls back to a title-cased event_type for anything unmapped
+ *  (new event types stay visible in the timeline without a code change here). */
+function describeAuditEvent(ev: ActivityEvent, locationNameById: Record<string, string>): string {
+  const p = ev.payload ?? {};
+  const loc = (key: string): string => {
+    const id = p[key];
+    return typeof id === 'string' ? (locationNameById[id] ?? id) : '';
+  };
+  const str = (key: string): string | undefined => (typeof p[key] === 'string' ? (p[key] as string) : undefined);
+
+  switch (ev.event_type) {
+    case 'vendor.invited':
+      return `Vendor invited${str('trade') ? ` (${str('trade')})` : ''}`;
+    case 'vendor.invite_resent':
+      return 'Invite resent';
+    case 'vendor.onboarding_started':
+      return 'Vendor opened the onboarding link';
+    case 'vendor.submitted':
+      return `Documents submitted for review${str('recommendation') ? ` — engine recommended ${str('recommendation')}` : ''}`;
+    case 'vendor.approved':
+      return `Approved for ${loc('location_id') || 'a location'}`;
+    case 'vendor.declined':
+      return `Declined for ${loc('location_id') || 'a location'}${str('reason') ? ` — "${str('reason')}"` : ''}`;
+    case 'vendor.correction_requested': {
+      const count = typeof p.location_count === 'number' ? p.location_count : null;
+      return `Correction requested${count !== null ? ` (${count} location${count === 1 ? '' : 's'})` : ''}${str('reason') ? ` — "${str('reason')}"` : ''}`;
+    }
+    case 'vendor.location_added': {
+      const ids = Array.isArray(p.location_ids) ? p.location_ids.length : null;
+      return `Added to ${ids ?? 'a'} new location${ids === 1 ? '' : 's'}`;
+    }
+    case 'vendor.non_compliant_rule_change':
+      return 'Flagged Non-Compliant after a requirement change';
+    case 'vendor.expired':
+      return 'Coverage expired — pulled from hireable';
+    case 'vendor.renewal_reminder_sent':
+      return `Manual renewal reminder sent${loc('location_id') ? ` for ${loc('location_id')}` : ''}`;
+    case 'evaluation.uncertain_accepted':
+      return `Uncertain finding accepted (${str('requirement_key') ?? 'requirement'})${str('reasoning') ? ` — "${str('reasoning')}"` : ''}`;
+    case 'ai.recommendation':
+      return `Verification run recommended ${str('recommendation') ?? '—'}`;
+    case 'ai.advisory':
+      return `Advisory: ${str('message') ?? str('key') ?? ''}`;
+    default:
+      return titleCaseEventType(ev.event_type);
+  }
+}
+
+function formatTimestamp(iso: string): string {
+  return new Date(iso).toLocaleString('en-US', {
+    month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit',
+  });
+}
+
 // ── Page ──────────────────────────────────────────────────────────────────────
 
 export default async function VendorRecordPage({ params }: { params: { vendorId: string } }) {
@@ -135,8 +227,11 @@ export default async function VendorRecordPage({ params }: { params: { vendorId:
   }
 
   const json = await res.json() as { data: VendorData };
-  const { vendor, locations, verificationRun, documents, role } = json.data;
+  const { vendor, locations, verificationRun, documents, activity, role } = json.data;
   const isAdmin = role === 'admin';
+  const locationNameById: Record<string, string> = Object.fromEntries(
+    locations.map((l) => [l.location_id, l.location_name])
+  );
   const overallStatus = deriveOverallStatus(locations);
 
   return (
@@ -270,6 +365,37 @@ export default async function VendorRecordPage({ params }: { params: { vendorId:
             status: l.status,
           }))}
         />
+      )}
+
+      {/* Zone 5: Activity — the vendor's audit trail, read-only, newest first. Admin-only
+          (activity is present on VendorData only when the API's admin branch ran). */}
+      {isAdmin && activity && (
+        <section className="font-sans" style={{ marginTop: 32 }}>
+          <Card>
+            <CardHeader>
+              <CardTitle>Activity</CardTitle>
+            </CardHeader>
+            <CardBody className="p-0">
+              {activity.length === 0 ? (
+                <p className="px-5 py-6 text-sm text-fg-muted">No activity yet.</p>
+              ) : (
+                <ul className="divide-y divide-border">
+                  {activity.map((ev) => (
+                    <li key={ev.id} className="flex items-start gap-3 px-5 py-3">
+                      <Badge tone={actorTone(ev.actor_type)} className="mt-0.5 shrink-0">
+                        {actorLabel(ev)}
+                      </Badge>
+                      <div className="min-w-0 flex-1">
+                        <p className="text-sm text-fg">{describeAuditEvent(ev, locationNameById)}</p>
+                        <p className="mt-0.5 text-xs text-fg-muted">{formatTimestamp(ev.created_at)}</p>
+                      </div>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </CardBody>
+          </Card>
+        </section>
       )}
     </main>
   );

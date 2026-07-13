@@ -14,6 +14,16 @@ import { logAudit } from '@/lib/audit';
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 
+// Event types excluded from the in-page Activity timeline (Zone 5) only — passive reads/internal
+// signals that would otherwise flood the timeline (a page open logs vendor.viewed every time;
+// scope_violation is a blocked-access record, not vendor activity). Nothing else reads this
+// list: the write path (src/lib/audit.ts) and the audit export (scopeAuditEvents() in
+// src/lib/exports/audit-export.ts) are untouched and still record/emit every event type,
+// unfiltered. Every other vendor-targeted event type (approvals, declines, corrections, invites,
+// uploads, verifications, reminders, renewals, expirations) stays visible — when in doubt this
+// list stays narrow, not broad.
+const TIMELINE_EXCLUDED_EVENT_TYPES = ['vendor.viewed', 'security.scope_violation'];
+
 interface VendorRow {
   id: string;
   business_name: string;
@@ -68,6 +78,16 @@ interface DocumentRow {
   doc_type: string;
   original_filename: string | null;
   uploaded_at: string;
+}
+
+interface AuditEventRow {
+  id: string;
+  created_at: string;
+  actor_type: string;
+  actor_id: string | null;
+  actor_name: string | null;
+  event_type: string;
+  payload_json: Record<string, unknown> | null; // jsonb — already parsed (invariant 2)
 }
 
 export async function GET(
@@ -211,6 +231,27 @@ export async function GET(
     };
   }
 
+  // Activity (Zone 5) — the vendor's audit trail, newest first. Read-only; reuses the same
+  // audit_events shape scopeAuditEvents() (src/lib/exports/audit-export.ts) queries for exports,
+  // scoped here to this vendor's target_id under this route's existing tenant/role clamp.
+  // actor_name resolves user-authored events to a display name; system/ai/vendor actors have
+  // no users row so actor_name stays null and the UI falls back to a role label.
+  //
+  // TIMELINE_EXCLUDED_EVENT_TYPES filters passive-read noise (a page open logs vendor.viewed
+  // every time) OUT of this in-page view only — the write path and the audit export both still
+  // record/emit it. scopeAuditEvents() is untouched, so a full audit export for this vendor
+  // still contains every vendor.viewed row.
+  const activity = await tdb.all<AuditEventRow>(
+    `SELECT ae.id, ae.created_at, ae.actor_type, ae.actor_id, u.name AS actor_name,
+            ae.event_type, ae.payload_json
+     FROM audit_events ae
+     LEFT JOIN users u ON u.id = ae.actor_id AND u.tenant_id = ae.tenant_id
+     WHERE ae.tenant_id = $1 AND ae.target_id = $2
+       AND ae.event_type <> ALL($3::text[])
+     ORDER BY ae.created_at DESC`,
+    [vendorId, TIMELINE_EXCLUDED_EVENT_TYPES]
+  );
+
   return NextResponse.json({
     data: {
       vendor: {
@@ -236,6 +277,15 @@ export async function GET(
         doc_type: d.doc_type,
         original_filename: d.original_filename,
         uploaded_at: d.uploaded_at,
+      })),
+      activity: activity.map((a) => ({
+        id: a.id,
+        created_at: a.created_at,
+        actor_type: a.actor_type,
+        actor_id: a.actor_id,
+        actor_name: a.actor_name,
+        event_type: a.event_type,
+        payload: a.payload_json,
       })),
       role: auth.role,
     },
