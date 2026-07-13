@@ -2,16 +2,21 @@
 // Vendor document upload (tokenized — no login required).
 // Token lookup is always by SHA-256 hash of the raw bearer token.
 //
-// Flow:
+// Flow (store only, fast — the vendor never waits on Vision):
 //   1. Validate invite token (hash lookup, uniform 401 on failure)
 //   2. Parse multipart/form-data (fields: file, doc_type)
-//   3. Enforce size cap (25 MB); detect file type by magic bytes
+//   3. Enforce size cap (25 MB); detect file type by magic bytes — cheap, synchronous, so a
+//      bad file still gets instant feedback
 //   4. If image (JPEG/PNG/HEIC): convert to single-page PDF via sharp + pdf-lib
 //   5. Envelope-encrypt PDF → BlobStore.put (ciphertext only; plaintext never at rest)
 //   6. Write documents row
-//   7. Run Vision extraction → write extractions row → audit document.extracted
-//   8. Expiration gate (COI only) — expired policy bounced here, never reaches Admin
-//   9. Return 201 with document_id
+//   7. Return 201 with document_id
+//
+// Vision extraction (extractDocument), the expiration gate, and renewal-chase scheduling all
+// moved to the background verification worker (src/lib/verification/worker.ts) — they used to
+// run inline here (await extractDocument(...), 20-40s per file) and now run once per submit,
+// after the vendor has already moved on. See that file's module doc for the expiration-gate
+// bounce-back behavior this relocation required.
 
 import { NextResponse } from 'next/server';
 import { randomUUID } from 'crypto';
@@ -19,10 +24,6 @@ import { getDb } from '@/lib/db/client';
 import { TenantDB } from '@/lib/db/tenant';
 import { getBlobStore, documentKey } from '@/lib/blob';
 import { encryptForStorage } from '@/lib/crypto/envelope';
-import { logAudit } from '@/lib/audit';
-import { queueNotification } from '@/lib/notifications/queue';
-import { earliestExpiration, handleCoiUploadChase } from '@/lib/notifications/renewal';
-import { extractDocument, checkExpirationGate } from '@/lib/extraction/extractor';
 import { validateInviteToken, INVALID_TOKEN_MESSAGE } from '@/lib/services/vendor-token';
 import {
   detectFileType,
@@ -32,9 +33,7 @@ import {
   ERR_FILE_TYPE,
 } from '@/lib/upload/validate';
 import { convertImageToPdf } from '@/lib/upload/convert';
-import { env } from '@/lib/env';
 import type { DocType } from '@/lib/extraction/types';
-import type { ProcessedCOIExtraction } from '@/lib/extraction/types';
 
 const ALLOWED_DOC_TYPES: DocType[] = ['coi', 'w9', 'ach'];
 
@@ -130,112 +129,11 @@ export async function POST(
     uploaded_at: new Date(),
   });
 
-  // Vision extraction (operates on PDF bytes)
-  let extraction;
-  try {
-    extraction = await extractDocument(pdfBytes, docType);
-  } catch (err) {
-    return NextResponse.json(
-      { error: 'Document extraction failed', detail: (err as Error).message },
-      { status: 422 }
-    );
-  }
-
-  const extractionId = randomUUID();
-  await tdb.insert('extractions', {
-    id: extractionId,
-    document_id: documentId,
-    doc_type: docType,
-    model_id: extraction.modelId,
-    extraction_version: env.anthropic.extractionSchemaVersion,
-    payload_json: JSON.stringify(extraction.payload),
-    created_at: new Date(),
-  });
-
-  await logAudit(db, {
-    tenantId,
-    actorType: 'ai',
-    actorId: `engine/${extraction.modelId}`,
-    eventType: 'document.extracted',
-    targetType: 'document',
-    targetId: documentId,
-    payload: {
-      doc_type: docType,
-      extraction_id: extractionId,
-      model_id: extraction.modelId,
-      escalated: extraction.escalated,
-      converted_from: fileType !== 'pdf' ? fileType : undefined,
-    },
-  });
-
-  // Expiration gate — COI only; fires after extraction, before any verification run (invariant #6)
-  if (docType === 'coi') {
-    const gate = checkExpirationGate(extraction.payload as ProcessedCOIExtraction);
-    if (!gate.passed) {
-      await tdb.update('documents', { state: 'bounced_expired' }, { id: documentId });
-
-      await logAudit(db, {
-        tenantId,
-        actorType: 'system',
-        actorId: 'expiration-gate',
-        eventType: 'document.bounced_expired',
-        targetType: 'document',
-        targetId: documentId,
-        payload: { vendor_id: vendorId, expired_policies: gate.expiredPolicies },
-      });
-
-      // Vendor-facing exception (immediate): the expired upload bounces back to the vendor,
-      // never to the Admin (invariant #6). They see the 422 in-session; the email is the
-      // durable nudge if they close the tab. Recipient is the vendor's contact email.
-      const vrow = await tdb.get<{ contact_email: string | null }>(
-        'SELECT contact_email FROM vendors WHERE tenant_id = $1 AND id = $2',
-        [vendorId]
-      );
-      if (vrow?.contact_email) {
-        await queueNotification(db, tenantId, {
-          recipientType: 'vendor',
-          recipientRef: vrow.contact_email,
-          kind: 'exception',
-          payload: {
-            type: 'document_bounced_expired',
-            vendor_id: vendorId,
-            doc_type: docType,
-            expired_policies: gate.expiredPolicies,
-          },
-        });
-      }
-
-      return NextResponse.json(
-        {
-          error: 'Document rejected: one or more policies are expired',
-          expired_policies: gate.expiredPolicies,
-          document_id: documentId,
-        },
-        { status: 422 }
-      );
-    }
-
-    // Gate passed → eager-schedule the renewal ladder against this COI's earliest
-    // expiration, and (renewal upload) supersede any prior COI's unfired reminders.
-    const coiPayload = extraction.payload as ProcessedCOIExtraction;
-    const expDate = earliestExpiration(coiPayload);
-    if (expDate) {
-      await handleCoiUploadChase(db, {
-        tenantId,
-        vendorId,
-        newDocumentId: documentId,
-        expirationDate: expDate,
-      });
-    }
-  }
-
   return NextResponse.json(
     {
       data: {
         document_id: documentId,
         doc_type: docType,
-        extraction_id: extractionId,
-        escalated: extraction.escalated,
         converted_from: fileType !== 'pdf' ? fileType : undefined,
       },
     },

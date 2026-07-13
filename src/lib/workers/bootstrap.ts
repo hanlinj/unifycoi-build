@@ -6,6 +6,9 @@
 //   • retention worker     — daily 7-year purge-eligibility sweep
 //   • billing sync worker  — pushes location-count changes to Stripe subscription quantities
 //                            (poll: BILLING_SYNC_WORKER_POLL_SECONDS; Slice 5a, ADR-012-05)
+//   • verification worker  — extracts uploaded documents + runs runVerification() in the
+//                            background after vendor submit (poll: NOTIFICATION_WORKER_POLL_SECONDS,
+//                            shared with the notification/audit-export workers' default)
 //
 // All timers are unref'd, so they never keep the process alive on their own.
 
@@ -17,6 +20,7 @@ import { startDigestWorker } from '@/lib/notifications/digest';
 import { startRetentionWorker } from '@/lib/retention/worker';
 import { startAuditExportWorker } from '@/lib/exports/worker';
 import { startBillingSyncWorker } from '@/lib/billing/worker';
+import { startVerificationWorker } from '@/lib/verification/worker';
 import { env } from '@/lib/env';
 
 export interface WorkerHandles {
@@ -25,6 +29,7 @@ export interface WorkerHandles {
   retention: { stop: () => void };
   auditExport: { stop: () => void };
   billingSync: { stop: () => void };
+  verification: { stop: () => void };
 }
 
 /**
@@ -43,6 +48,7 @@ export function startAllWorkers(mailer: Mailer, db: Db, billing: BillingProvider
     retention: startRetentionWorker(db),
     auditExport: startAuditExportWorker(db),
     billingSync: startBillingSyncWorker(db, billing),
+    verification: startVerificationWorker(db),
   };
 
   // Positive boot confirmation (not just silence-on-success): mirrors each start*Worker's own
@@ -54,12 +60,14 @@ export function startAllWorkers(mailer: Mailer, db: Db, billing: BillingProvider
   const retentionIntervalSeconds = 24 * 60 * 60;
   const auditExportIntervalSeconds = env.notifications.workerPollSeconds;
   const billingSyncIntervalSeconds = env.billing.syncWorkerPollSeconds;
+  const verificationIntervalSeconds = env.notifications.workerPollSeconds;
   console.log(
     `[workers] started: notification (interval ${notificationIntervalSeconds * 1000}ms), ` +
       `digest (interval ${digestIntervalSeconds * 1000}ms), ` +
       `retention (interval ${retentionIntervalSeconds * 1000}ms), ` +
       `auditExport (interval ${auditExportIntervalSeconds * 1000}ms), ` +
-      `billingSync (interval ${billingSyncIntervalSeconds * 1000}ms)`
+      `billingSync (interval ${billingSyncIntervalSeconds * 1000}ms), ` +
+      `verification (interval ${verificationIntervalSeconds * 1000}ms)`
   );
 
   return handles;
@@ -72,4 +80,5 @@ export function stopAllWorkers(handles: WorkerHandles): void {
   handles.retention.stop();
   handles.auditExport.stop();
   handles.billingSync.stop();
+  handles.verification.stop();
 }

@@ -1,6 +1,8 @@
 // POST /api/v/:token/submit
 // Vendor submit — validates all required docs are uploaded, transitions the FSM
-// (onboarding → under_review), then runs the verification engine.
+// (onboarding → under_review), then queues background verification (extraction + the
+// verification run) instead of running it inline. The vendor gets an immediate response and
+// never waits on Vision — see src/lib/verification/worker.ts for the background pipeline.
 // Token lookup is always by SHA-256 hash of the raw bearer token.
 
 import { NextResponse } from 'next/server';
@@ -10,7 +12,6 @@ import { TenantDB } from '@/lib/db/tenant';
 import { validateInviteToken, INVALID_TOKEN_MESSAGE } from '@/lib/services/vendor-token';
 import { fsmTransition, IllegalTransitionError } from '@/lib/services/vendor-fsm';
 import { logAudit } from '@/lib/audit';
-import { runVerification } from '@/lib/verification/run';
 
 interface VendorRow { id: string; business_name: string; trade: string }
 interface DocRow { doc_type: string }
@@ -75,19 +76,23 @@ export async function POST(
     : invite.purpose === 'correction' ? 'resubmission'
     : 'onboarding';
 
-  let result;
-  try {
-    result = await runVerification(db, { tenantId, vendorId, vendorTrade: vendor.trade, trigger });
-  } catch (err) {
-    return NextResponse.json(
-      { error: 'Verification run failed', detail: (err as Error).message },
-      { status: 500 }
-    );
-  }
+  // Queue background verification (src/lib/verification/worker.ts) instead of running inline —
+  // extraction + runVerification() happen after this request returns. The vendor profile shows
+  // "Verification in progress" until a verification_runs row exists (src/app/api/vendors/[id]/route.ts).
+  const jobId = randomUUID();
+  await tdb.insert('verification_jobs', {
+    id: jobId,
+    vendor_id: vendorId,
+    trigger,
+    status: 'queued',
+    created_at: new Date(),
+  });
 
   // Notify the Admin who sent the invite. Per Notifications_and_Communications.md catalog
   // ("Vendor ready for review → Admin → Digest"), this is ROUTINE throughput, batched into
-  // the daily digest — not an immediate exception. (Corrected from the Phase 5 deviation.)
+  // the daily digest — not an immediate exception. Fires at submit (not run-completion): the
+  // rendered copy ("submitted documents and is awaiting your review") is accurate the moment
+  // the vendor submits, regardless of whether the background run has finished yet.
   const now = new Date();
   await tdb.insert('notifications', {
     id: randomUUID(),
@@ -103,8 +108,6 @@ export async function POST(
       vendor_id: vendorId,
       vendor_name: vendor.business_name,
       trade: vendor.trade,
-      run_id: result.runId,
-      recommendation: result.recommendation,
     }),
     created_at: now,
   });
@@ -116,19 +119,8 @@ export async function POST(
     eventType: 'vendor.submitted',
     targetType: 'vendor',
     targetId: vendorId,
-    payload: {
-      invite_id: invite.id,
-      run_id: result.runId,
-      recommendation: result.recommendation,
-    },
+    payload: { invite_id: invite.id, verification_job_id: jobId },
   });
 
-  return NextResponse.json({
-    data: {
-      run_id: result.runId,
-      recommendation: result.recommendation,
-      evaluation_count: result.evaluationCount,
-      advisory_count: result.advisoryCount,
-    },
-  });
+  return NextResponse.json({ data: { status: 'received', job_id: jobId } }, { status: 202 });
 }

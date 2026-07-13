@@ -348,6 +348,20 @@ export default async function VendorRecordPage({ params }: { params: { vendorId:
         )}
       </section>
 
+      {/* In-progress state — the vendor has submitted (under_review) but the background
+          verification job (src/lib/verification/worker.ts) hasn't produced a run yet. No new
+          FSM state: this reuses the existing under_review status + the absence of a
+          verification_runs row as the signal, so the admin never opens a half-finished or
+          empty workbench mid-job. */}
+      {isAdmin && !verificationRun && locations.some((l) => l.status === 'under_review') && (
+        <section style={{ marginBottom: 32, padding: '16px 20px', borderRadius: 8, border: '1px solid #d0d7de', background: '#f6f8fa' }}>
+          <p style={{ margin: 0, fontSize: 14, color: '#57606a', display: 'flex', alignItems: 'center', gap: 8 }}>
+            <span style={{ width: 8, height: 8, borderRadius: '50%', background: '#9a6700', display: 'inline-block', flexShrink: 0 }} />
+            Verification in progress — documents are being reviewed by the AI engine. Refresh in a moment to see results.
+          </p>
+        </section>
+      )}
+
       {/* Zone 2 workbench + decision drawer — Admin only.
           Evaluations table (with per-row uncertainty actions) and the decision panel share
           client state so "Treat as deficient" pre-populates the correction scope. */}
