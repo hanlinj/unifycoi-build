@@ -11,6 +11,10 @@ out/
 dist/
 build/
 
+# Generated at postinstall (scripts/copy-pdf-worker.js) — regenerated from node_modules,
+# never committed, same treatment as node_modules itself.
+/public/pdf.worker.min.mjs
+
 # Local data (SQLite db + filesystem-adapter blobs — never commit vendor data)
 data/
 *.db

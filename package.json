@@ -3,6 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
+    "postinstall": "node scripts/copy-pdf-worker.js",
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
@@ -25,6 +26,7 @@
     "lucide-react": "^1.23.0",
     "next": "^14.2.0",
     "pdf-lib": "^1.17.1",
+    "pdfjs-dist": "^4.9.155",
     "pg": "^8.22.0",
     "pino": "^10.3.1",
     "react": "^18.3.0",

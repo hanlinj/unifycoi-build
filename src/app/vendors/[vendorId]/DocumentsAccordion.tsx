@@ -8,9 +8,15 @@
 // own audited event — previously missing entirely).
 
 import { useState } from 'react';
+import dynamic from 'next/dynamic';
 import { Copy, Check } from 'lucide-react';
 import { Badge } from '@/components/ui';
 import { docTypeStyle } from '@/lib/verification/doc-type-style';
+
+// Client-only: pdfjs-dist's worker is not SSR-safe. ssr: false keeps this component (and its
+// pdfjs-dist import) out of the server render entirely — the effect-scoped dynamic import
+// inside PdfViewer itself is the other half of that guarantee.
+const PdfViewer = dynamic(() => import('./PdfViewer').then((m) => m.PdfViewer), { ssr: false });
 
 export interface AccordionDocument {
   id: string;
@@ -85,13 +91,11 @@ export function DocumentsAccordion({ vendorId, documents }: Props) {
 
             {expanded && (
               <div style={{ borderTop: '1px solid #d0d7de' }}>
-                {/* Full document, no pager/slider — the browser's native PDF viewer renders every
-                    page continuously; the container is just tall enough to make that usable. */}
-                <iframe
-                  src={`/api/vendors/${vendorId}/documents/${doc.id}`}
-                  title={`${doc.doc_type} document`}
-                  style={{ width: '100%', height: 800, border: 'none', display: 'block' }}
-                />
+                {/* PDF.js renderer — same serve route, same auth, same document.viewed audit
+                    event (unchanged); this only replaces how the fetched bytes get displayed
+                    (was: native <iframe> embed, inconsistent thumbnail/page-rail rendering
+                    across browsers). See PdfViewer.tsx. */}
+                <PdfViewer src={`/api/vendors/${vendorId}/documents/${doc.id}`} />
               </div>
             )}
           </div>
