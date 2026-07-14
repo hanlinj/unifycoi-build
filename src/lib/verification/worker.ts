@@ -24,7 +24,7 @@ import { TenantDB } from '@/lib/db/tenant';
 import { getBlobStore } from '@/lib/blob';
 import { decryptFromStorage, type EncryptionMeta } from '@/lib/crypto/envelope';
 import { extractDocument, checkExpirationGate } from '@/lib/extraction/extractor';
-import { earliestExpiration, handleCoiUploadChase } from '@/lib/notifications/renewal';
+import { earliestExpiration, handleCoiUploadChase, supersedePriorDocument } from '@/lib/notifications/renewal';
 import { queueNotification } from '@/lib/notifications/queue';
 import { runVerification, type VerificationTrigger } from './run';
 import { logAudit } from '@/lib/audit';
@@ -109,6 +109,9 @@ async function extractPendingDocuments(db: Db, tenantId: string, vendorId: strin
     if (doc.doc_type === 'coi') {
       const gate = checkExpirationGate(extraction.payload as ProcessedCOIExtraction);
       if (!gate.passed) {
+        // Bounce-before-supersede: an expired replacement must NOT displace a still-valid
+        // prior COI, or the vendor would be left with zero active COIs until they upload
+        // again. supersedePriorDocument only ever runs once the gate has passed.
         await bounceExpiredCOI(db, tenantId, vendorId, doc.id, gate.expiredPolicies);
         bounced = true;
         continue; // other pending docs (w9/ach) still extract normally
@@ -123,7 +126,16 @@ async function extractPendingDocuments(db: Db, tenantId: string, vendorId: strin
           newDocumentId: doc.id,
           expirationDate: expDate,
         });
+      } else {
+        // No parseable expiration date — the reminder ladder can't be scheduled, but the
+        // document is still valid (gate passed) and must still supersede the prior COI so
+        // two active rows of the same type never coexist.
+        await supersedePriorDocument(db, { tenantId, vendorId, docType: 'coi', newDocumentId: doc.id });
       }
+    } else {
+      // w9/ach have no expiration gate — supersede the prior active row of the same type
+      // as soon as this upload has successfully extracted.
+      await supersedePriorDocument(db, { tenantId, vendorId, docType: doc.doc_type, newDocumentId: doc.id });
     }
   }
 

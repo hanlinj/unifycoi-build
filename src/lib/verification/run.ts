@@ -53,11 +53,15 @@ export async function loadExtractionBundle(
 ): Promise<ExtractionBundle> {
   const tdb = new TenantDB(db, tenantId);
 
-  // Get active documents for this vendor
+  // Get active documents for this vendor. Ordered oldest-first so the loop below (which
+  // unconditionally overwrites bundle[doc_type] on every match) always ends up holding the
+  // most-recent row per doc_type — deterministic even if supersession hasn't caught up yet
+  // and two active rows of the same type briefly coexist.
   const docs = await tdb.all<DocumentRow>(
     `SELECT d.id, d.doc_type, d.state
      FROM documents d
-     WHERE tenant_id = $1 AND vendor_id = $2 AND state = 'active' AND superseded_by IS NULL`,
+     WHERE tenant_id = $1 AND vendor_id = $2 AND state = 'active' AND superseded_by IS NULL
+     ORDER BY d.uploaded_at ASC`,
     [vendorId]
   );
 

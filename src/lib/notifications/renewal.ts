@@ -227,6 +227,52 @@ export async function supersedeReminders(db: Db, tenantId: string, documentId: s
   return Number(res.numUpdatedRows);
 }
 
+/**
+ * Mark the prior active, non-superseded document of `docType` for this vendor as superseded by
+ * `newDocumentId` — the single chokepoint every doc type (coi, w9, ach) routes through so at
+ * most one active row per (vendor, doc_type) ever survives. Returns the superseded document's
+ * id, or null if there was no prior active row (e.g. a first-time upload).
+ *
+ * `state` is left untouched (still 'active'): the codebase's established convention treats
+ * `superseded_by IS NULL`, not `state`, as the "still current" signal — see
+ * exports/content.ts's `state: d.superseded_by ? 'superseded' : d.state` display derivation.
+ * Setting `state` here too would be redundant and inconsistent with every other reader.
+ *
+ * Strictly-older `uploaded_at` guard: prevents a concurrency cycle if two uploads of the same
+ * type are ever in flight together (each could otherwise supersede the other, A↔B, leaving no
+ * active document of that type). Only superseding rows strictly older than the new upload means
+ * the newest always wins regardless of processing order.
+ */
+export async function supersedePriorDocument(
+  db: Db,
+  input: { tenantId: string; vendorId: string; docType: string; newDocumentId: string },
+  now: Date = new Date()
+): Promise<string | null> {
+  const { tenantId, vendorId, docType, newDocumentId } = input;
+  const tdb = new TenantDB(db, tenantId);
+
+  const prior = await tdb.get<{ id: string }>(
+    `SELECT id FROM documents
+     WHERE tenant_id = $1 AND vendor_id = $2 AND doc_type = $3
+       AND id != $4 AND superseded_by IS NULL AND state = 'active'
+       AND uploaded_at < (SELECT uploaded_at FROM documents WHERE id = $5)
+     ORDER BY uploaded_at DESC LIMIT 1`,
+    [vendorId, docType, newDocumentId, newDocumentId]
+  );
+
+  if (!prior) return null;
+
+  // superseded_at is the retention anchor for the old document (Slice D): the 7-year clock
+  // starts when a renewal/replacement makes it inactive.
+  await tdb.update(
+    'documents',
+    { superseded_by: newDocumentId, superseded_at: now },
+    { id: prior.id }
+  );
+
+  return prior.id;
+}
+
 export interface CoiUploadResult {
   supersededDocumentId: string | null;
   supersededReminders: number;
@@ -235,8 +281,9 @@ export interface CoiUploadResult {
 
 /**
  * Handle a COI upload's chase bookkeeping:
- *  1. If a prior active COI exists, mark it superseded by the new one and cancel its
- *     unfired reminders (the renewal upload is the supersession trigger).
+ *  1. If a prior active COI exists, mark it superseded by the new one (via the shared
+ *     supersedePriorDocument chokepoint) and cancel its unfired reminders (the renewal upload
+ *     is the supersession trigger).
  *  2. Eager-schedule the new COI's ladder.
  * No-op-safe: onboarding's first COI has no prior, so step 1 is skipped.
  */
@@ -246,36 +293,16 @@ export async function handleCoiUploadChase(
   now: Date = new Date()
 ): Promise<CoiUploadResult> {
   const { tenantId, vendorId, newDocumentId, expirationDate } = input;
-  const tdb = new TenantDB(db, tenantId);
 
-  // Prior active, non-superseded COI for this vendor — STRICTLY OLDER than the new doc. The
-  // uploaded_at guard prevents a concurrency cycle: COI upload does an async Vision extraction
-  // between the document insert and this supersession, so two overlapping COI uploads can both
-  // be present here. Without the guard each would supersede the other (A↔B), leaving NO active
-  // COI and bricking submit. Only superseding strictly-older COIs makes the newest always win.
-  const prior = await tdb.get<{ id: string }>(
-    `SELECT id FROM documents
-     WHERE tenant_id = $1 AND vendor_id = $2 AND doc_type = 'coi'
-       AND id != $3 AND superseded_by IS NULL AND state = 'active'
-       AND uploaded_at < (SELECT uploaded_at FROM documents WHERE id = $4)
-     ORDER BY uploaded_at DESC LIMIT 1`,
-    [vendorId, newDocumentId, newDocumentId]
+  const supersededDocumentId = await supersedePriorDocument(
+    db,
+    { tenantId, vendorId, docType: 'coi', newDocumentId },
+    now
   );
 
-  let supersededDocumentId: string | null = null;
-  let supersededReminders = 0;
-
-  if (prior) {
-    // superseded_at is the retention anchor for the old COI (Slice D): the 7-year clock
-    // starts when a renewal makes it inactive.
-    await tdb.update(
-      'documents',
-      { superseded_by: newDocumentId, superseded_at: now },
-      { id: prior.id }
-    );
-    supersededReminders = await supersedeReminders(db, tenantId, prior.id);
-    supersededDocumentId = prior.id;
-  }
+  const supersededReminders = supersededDocumentId
+    ? await supersedeReminders(db, tenantId, supersededDocumentId)
+    : 0;
 
   const schedule = await scheduleRenewalReminders(
     db,
