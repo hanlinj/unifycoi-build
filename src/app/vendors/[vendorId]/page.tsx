@@ -396,7 +396,7 @@ export default async function VendorRecordPage({ params }: { params: { vendorId:
                 fontSize: 11, fontWeight: 600, color: '#57606a', background: 'white',
                 border: '1px solid #d0d7de', borderRadius: 999, padding: '1px 8px',
               }}>
-                summary · you decide
+                Compliance Summary
               </span>
             </div>
             <p style={{ margin: 0, fontSize: 13.5, color: '#1F2328', lineHeight: 1.5 }}>
