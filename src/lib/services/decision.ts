@@ -199,34 +199,23 @@ export async function applyDecision(input: DecisionInput): Promise<DecisionResul
     return { action, updated, skipped };
   }
 
-  // request_correction: scoped to the passed-in locationIds only — same validation approach
-  // approve/reject already use (not-found → skipped, wrong status → throws CONFLICT). No
-  // longer an implicit "every under-review location" sweep; the caller must name them.
+  // request_correction: vendor-level sweep — every under_review location for this vendor
+  // flips together. Correction is vendor-level (documents are vendor-wide, not per-location);
+  // location_ids is ignored here (used only for approve/reject). Reverts stage one's per-location
+  // scoping (commit 5d4ac8e), which was both the wrong model and a live regression — the API
+  // required non-empty location_ids for every action while the decision panel always sends []
+  // for request_correction, so every correction click 400'd.
   interface VLRow { id: string; location_id: string; status: string; flags_json: Record<string, unknown> | null }
-  const scoped: VLRow[] = [];
-  const skipped: string[] = [];
+  const underReview = await tdb.all<VLRow>(
+    'SELECT id, location_id, status, flags_json FROM vendor_locations WHERE tenant_id = $1 AND vendor_id = $2 AND status = $3',
+    [vendorId, 'under_review']
+  );
 
-  for (const locId of locationIds) {
-    const vl = await tdb.get<VLRow>(
-      'SELECT id, location_id, status, flags_json FROM vendor_locations WHERE tenant_id = $1 AND vendor_id = $2 AND location_id = $3',
-      [vendorId, locId]
-    );
-    if (!vl) { skipped.push(locId); continue; }
-
-    if (vl.status !== 'under_review') {
-      throw new DecisionError(
-        `Location ${locId} is not in under_review status (current: ${vl.status})`,
-        'CONFLICT'
-      );
-    }
-    scoped.push(vl);
+  if (underReview.length === 0) {
+    throw new DecisionError('No locations in under_review status — cannot request correction', 'NO_UNDER_REVIEW');
   }
 
-  if (scoped.length === 0) {
-    throw new DecisionError('No locations in under_review status among the ones provided — cannot request correction', 'NO_UNDER_REVIEW');
-  }
-
-  for (const vl of scoped) {
+  for (const vl of underReview) {
     const flags = vl.flags_json ? { ...vl.flags_json } : {};
     flags.action_needed = true;
     await tdb.update(
@@ -236,22 +225,18 @@ export async function applyDecision(input: DecisionInput): Promise<DecisionResul
     );
   }
 
-  // Invite/notification: UNCHANGED this stage — still one vendor-level correction invite and
-  // one email, regardless of how many locations were scoped (stage three reworks the email
-  // itself). Routes through the shared revoke-on-issue choke point (ADR-013-01) — a correction
-  // request revokes ANY prior still-live invite for this vendor, regardless of purpose (e.g. a
-  // still-outstanding onboarding link becomes invalid the moment a correction is requested),
-  // not just prior correction tokens.
+  // Invite/notification: one vendor-level correction invite and one email, regardless of how
+  // many locations were under review. Routes through the shared revoke-on-issue choke point
+  // (ADR-013-01) — a correction request revokes ANY prior still-live invite for this vendor,
+  // regardless of purpose (e.g. a still-outstanding onboarding link becomes invalid the moment
+  // a correction is requested), not just prior correction tokens.
   //
-  // FLAGGED, NOT FIXED (out of this stage's scope): the vendor's next resubmission goes through
+  // FLAGGED, NOT FIXED: the vendor's next resubmission goes through
   // fsmTransition(db, tenantId, vendorId, 'submit') (src/lib/services/vendor-fsm.ts), which
   // requires EVERY vendor_locations row for the vendor to be 'onboarding' before allowing the
-  // transition — a location left in some other status (e.g. 'approved' from an earlier decision
-  // in the same session, or one never scoped into this correction) would make that resubmit
-  // throw IllegalTransitionError. This isn't new: today's all-sweep correction can already
-  // produce the same mixed approved/onboarding split via a prior partial approve — but scoping
-  // correction to a subset makes that the common case rather than an edge case. Left untouched
-  // here; needs its own deliberate fix before this feature is usable end-to-end.
+  // transition — a location left in some other status (e.g. 'approved' from an earlier partial
+  // approve in the same review) would make that resubmit throw IllegalTransitionError. Needs its
+  // own deliberate fix before mixed approved/corrected vendors can resubmit end-to-end.
   const { rawToken, inviteId, expiresAt } = await issueInviteToken(db, {
     tenantId,
     vendorId,
@@ -284,31 +269,27 @@ export async function applyDecision(input: DecisionInput): Promise<DecisionResul
     });
   }
 
-  // Per-location audit — one vendor.correction_requested event per affected location (same
-  // shape approve/reject already emit: location_id in the payload), replacing the single
-  // count-only event. deficient_requirements is a requirement_key list, not location-specific,
-  // so it rides identically on every event for this batch, same as reason.
-  for (const vl of scoped) {
-    await logAudit(db, {
-      tenantId,
-      actorType: 'user',
-      actorId: actorUserId,
-      eventType: 'vendor.correction_requested',
-      targetType: 'vendor',
-      targetId: vendorId,
-      payload: {
-        location_id: vl.location_id,
-        invite_id: inviteId,
-        ...(reason ? { reason } : {}),
-        ...(deficientRequirements?.length ? { deficient_requirements: deficientRequirements } : {}),
-      },
-    });
-  }
+  // Single vendor.correction_requested audit event — location_count summarizes how many
+  // locations were swept, matching what the activity feed (page.tsx) already renders.
+  await logAudit(db, {
+    tenantId,
+    actorType: 'user',
+    actorId: actorUserId,
+    eventType: 'vendor.correction_requested',
+    targetType: 'vendor',
+    targetId: vendorId,
+    payload: {
+      location_count: underReview.length,
+      invite_id: inviteId,
+      ...(reason ? { reason } : {}),
+      ...(deficientRequirements?.length ? { deficient_requirements: deficientRequirements } : {}),
+    },
+  });
 
   return {
     action: 'request_correction',
     inviteId,
-    locationsTransitioned: scoped.map((vl) => vl.location_id),
-    skipped,
+    locationsTransitioned: underReview.map((vl) => vl.location_id),
+    skipped: [],
   };
 }
