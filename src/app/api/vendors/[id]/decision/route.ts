@@ -40,8 +40,10 @@ export async function POST(
     return badRequest('action must be approve | reject | request_correction');
   }
 
-  if ((action === 'approve' || action === 'reject') && locationIds.length === 0) {
-    return badRequest('location_ids required for approve/reject');
+  // location_ids is now required for every action, including request_correction — it no
+  // longer means "every under-review location" implicitly; the caller must name them.
+  if (locationIds.length === 0) {
+    return badRequest('location_ids required');
   }
 
   try {
