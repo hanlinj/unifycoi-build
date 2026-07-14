@@ -5,10 +5,12 @@
 
 import { cookies, headers } from 'next/headers';
 import { redirect } from 'next/navigation';
+import { SearchCheck } from 'lucide-react';
 import { requestBaseUrl } from '@/lib/http/base-url';
-import { Card, CardHeader, CardTitle, CardBody, Badge, Table, THead, TBody, TR, TH, TD, type BadgeTone } from '@/components/ui';
+import { Card, CardHeader, CardTitle, CardBody, Badge, type BadgeTone } from '@/components/ui';
 import { buildUnifyReviewSummary } from '@/lib/verification/summary';
 import { DocumentsAccordion } from './DocumentsAccordion';
+import { ComplianceGridView } from './ComplianceGridView';
 import { Workbench } from './Workbench';
 
 export const dynamic = 'force-dynamic';
@@ -224,19 +226,6 @@ function formatTimestamp(iso: string): string {
   });
 }
 
-// ── Compliance grid (Gate 2, Stage 1) helpers ────────────────────────────────
-
-function gridStatusLabel(row: GridRow): string {
-  switch (row.comparisonResult) {
-    case 'meets': return 'Meets';
-    case 'fails': return 'Fails';
-    case 'missing': return 'Missing';
-    case 'indeterminate': return 'Indeterminate';
-    case 'not_evaluated': return 'Not evaluated';
-    default: return row.comparisonResult;
-  }
-}
-
 // ── Page ──────────────────────────────────────────────────────────────────────
 
 export default async function VendorRecordPage({ params }: { params: { vendorId: string } }) {
@@ -373,77 +362,53 @@ export default async function VendorRecordPage({ params }: { params: { vendorId:
       {/* Workbench, top to bottom in the order an Admin actually works it (Gate 2, Stage 4):
           Unify Review summary → compliance grid (per facility) → documents → decision panel. */}
 
-      {/* Unify Review summary (Gate 2, Stage 2) — Admin only. Generated FROM the grid's own
+      {/* Unify Review callout (Gate 2 restyle) — Admin only. Generated FROM the grid's own
           gap/pass counts (src/lib/verification/summary.ts), never a fresh AI call, so it can
-          never contradict the grid rendered directly below it. Recommends; does not decide. */}
+          never contradict the grid rendered directly below it. Recommends; does not decide.
+          Content is unchanged from Stage 2 — only the visual treatment (accent callout, icon,
+          tag) changed here. */}
       {isAdmin && grid && verificationRun && (
-        <section className="font-sans" style={{ marginBottom: 20 }}>
-          <Card>
-            <CardHeader>
-              <CardTitle>Unify Review</CardTitle>
-            </CardHeader>
-            <CardBody>
-              <p className="text-sm text-fg">
-                {buildUnifyReviewSummary(grid, verificationRun.recommendation, vendor.business_name)}
-              </p>
-            </CardBody>
-          </Card>
+        <section
+          className="font-sans"
+          style={{
+            marginBottom: 20,
+            padding: '16px 20px',
+            borderRadius: 12,
+            border: '1px solid #54AEFF',
+            background: '#DDF4FF',
+            display: 'flex',
+            gap: 14,
+            alignItems: 'flex-start',
+          }}
+        >
+          <span
+            style={{
+              display: 'flex', alignItems: 'center', justifyContent: 'center',
+              width: 34, height: 34, borderRadius: '50%', background: '#0969DA', flexShrink: 0,
+            }}
+          >
+            <SearchCheck size={18} color="white" strokeWidth={2.25} />
+          </span>
+          <div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4 }}>
+              <span style={{ fontSize: 14, fontWeight: 700, color: '#0969DA' }}>Unify Review</span>
+              <span style={{
+                fontSize: 11, fontWeight: 600, color: '#57606a', background: 'white',
+                border: '1px solid #d0d7de', borderRadius: 999, padding: '1px 8px',
+              }}>
+                summary · you decide
+              </span>
+            </div>
+            <p style={{ margin: 0, fontSize: 13.5, color: '#1F2328', lineHeight: 1.5 }}>
+              {buildUnifyReviewSummary(grid, verificationRun.recommendation, vendor.business_name)}
+            </p>
+          </div>
         </section>
       )}
 
-      {/* Compliance Grid (Gate 2, Stage 1) — Admin only. Read-time recompute over the stored
-          extraction bundle + resolved requirements matrix (src/lib/verification/grid.ts): shows
-          every requirement, including passes, which requirement_evaluations never persists.
-          Gated on a completed run existing (grid is null before that — the in-progress banner
-          above already covers that gap). Grouped per facility, per Stage 1's spec. */}
-      {isAdmin && grid && (
-        <section className="font-sans" style={{ marginBottom: 32 }}>
-          <Card>
-            <CardHeader>
-              <CardTitle>Compliance Grid</CardTitle>
-              <div className="flex items-center gap-2">
-                <Badge tone="success">{grid.countMeets} meets</Badge>
-                <Badge tone="danger">{grid.countBelowOrMissing} below or missing</Badge>
-              </div>
-            </CardHeader>
-            <CardBody className="p-0">
-              {grid.locations.map((loc) => (
-                <div key={loc.locationId} className="border-b border-border last:border-b-0">
-                  <div className="bg-surface-2 px-5 py-2.5 text-[13px] font-bold text-fg">{loc.locationName}</div>
-                  {loc.rows.length === 0 ? (
-                    <p className="px-5 py-4 text-sm text-fg-muted">No requirements resolved for this location.</p>
-                  ) : (
-                    <Table>
-                      <THead>
-                        <TR>
-                          <TH>Requirement</TH>
-                          <TH>Required</TH>
-                          <TH>On Certificate</TH>
-                          <TH>Status</TH>
-                        </TR>
-                      </THead>
-                      <TBody>
-                        {loc.rows.map((row, i) => (
-                          <TR key={`${row.requirementKey}-${i}`}>
-                            <TD><code className="text-xs">{row.requirementKey}</code></TD>
-                            <TD>{row.requiredValue ?? '—'}</TD>
-                            <TD>{row.extractedValue ?? '—'}</TD>
-                            <TD>
-                              <Badge tone={row.status === 'green' ? 'success' : 'danger'}>
-                                {gridStatusLabel(row)}
-                              </Badge>
-                            </TD>
-                          </TR>
-                        ))}
-                      </TBody>
-                    </Table>
-                  )}
-                </div>
-              ))}
-            </CardBody>
-          </Card>
-        </section>
-      )}
+      {/* Compliance Grid (Gate 2, Stage 1 + restyle) — Admin only. Collapsible per facility,
+          humanized labels, per-location count pills — see ComplianceGridView.tsx. */}
+      {isAdmin && grid && <ComplianceGridView grid={grid} />}
 
       {/* Zone 4: Documents on file. Admin gets the interactive accordion (Gate 2, Stage 3) —
           click a row to expand the real PDF, view/reveal audit events fire per action. Manager
@@ -483,8 +448,6 @@ export default async function VendorRecordPage({ params }: { params: { vendorId:
       {isAdmin && verificationRun && (
         <Workbench
           vendorId={vendor.id}
-          trigger={verificationRun.trigger}
-          recommendation={verificationRun.recommendation}
           evaluations={verificationRun.evaluations}
           advisories={verificationRun.advisories}
           locations={locations.map((l) => ({

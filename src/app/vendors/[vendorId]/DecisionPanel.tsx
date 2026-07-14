@@ -22,6 +22,16 @@ interface DecisionPanelProps {
 
 type DecisionAction = 'approve' | 'reject' | 'request_correction';
 
+// Color identity per action (styling only — Approve = success green, Reject = danger red,
+// Request Correction stays neutral gray, matching the design system's --success/--danger tokens).
+const ACTION_COLOR: Record<DecisionAction, { border: string; text: string; fill: string; fillText: string }> = {
+  approve: { border: '#1f883d', text: '#1f883d', fill: '#1f883d', fillText: 'white' },
+  reject: { border: '#cf222e', text: '#cf222e', fill: '#cf222e', fillText: 'white' },
+  // Neutral: border is a light hairline, but text needs real contrast against white — using the
+  // border color for both (as approve/reject do) would render nearly invisible gray-on-white.
+  request_correction: { border: '#d0d7de', text: '#57606a', fill: '#57606a', fillText: 'white' },
+};
+
 export function DecisionPanel({
   vendorId,
   locations,
@@ -105,24 +115,31 @@ export function DecisionPanel({
     <section style={{ border: '1px solid #d0d7de', borderRadius: 8, padding: 20, marginTop: 24 }}>
       <h3 style={{ margin: '0 0 16px', fontSize: 16, fontWeight: 600 }}>Decision</h3>
 
-      {/* Action selector */}
+      {/* Action selector — color only (wiring/behavior unchanged): Approve = green, Reject =
+          red, Request Correction stays neutral. Each button shows a colored outline as its
+          identity even before selection; selecting it fills solid in that color. */}
       <div style={{ display: 'flex', gap: 8, marginBottom: 16 }}>
-        {(['approve', 'reject', 'request_correction'] as DecisionAction[]).map((a) => (
-          <button
-            key={a}
-            onClick={() => setAction(a)}
-            style={{
-              padding: '6px 14px',
-              borderRadius: 6,
-              border: action === a ? '2px solid #0969da' : '1px solid #d0d7de',
-              background: action === a ? '#ddf4ff' : 'white',
-              cursor: 'pointer',
-              fontWeight: action === a ? 600 : 400,
-            }}
-          >
-            {actionLabel[a]}
-          </button>
-        ))}
+        {(['approve', 'reject', 'request_correction'] as DecisionAction[]).map((a) => {
+          const selected = action === a;
+          const c = ACTION_COLOR[a];
+          return (
+            <button
+              key={a}
+              onClick={() => setAction(a)}
+              style={{
+                padding: '6px 14px',
+                borderRadius: 6,
+                border: `2px solid ${c.border}`,
+                background: selected ? c.fill : 'white',
+                color: selected ? c.fillText : c.text,
+                cursor: 'pointer',
+                fontWeight: 600,
+              }}
+            >
+              {actionLabel[a]}
+            </button>
+          );
+        })}
       </div>
 
       {/* Location selector (approve / reject only) */}
@@ -193,7 +210,7 @@ export function DecisionPanel({
             padding: '8px 20px',
             borderRadius: 6,
             border: 'none',
-            background: action === 'approve' ? '#1f883d' : action === 'reject' ? '#cf222e' : '#9a6700',
+            background: ACTION_COLOR[action].fill,
             color: 'white',
             fontWeight: 600,
             cursor: submitting ? 'not-allowed' : 'pointer',

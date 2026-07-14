@@ -5,33 +5,7 @@
 // sentence is always advisory ("review", "decide"), never "approved"/"declined".
 
 import type { ComplianceGrid, GridRow } from './grid';
-
-function titleCase(s: string): string {
-  return s.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
-}
-
-const KNOWN_LABELS: Record<string, string> = {
-  named_insured_match: 'Named Insured Match',
-  ach_payee_matches_legal_name: 'ACH Payee Name Match',
-  certificate_holder_match: 'Certificate Holder Match',
-  entity_type: 'Entity Type',
-  workers_comp_exemption_claimed: 'Workers Comp Exemption',
-};
-
-/** Mirrors the requirement_key shapes engine.ts recognizes — same humanizing convention as
- *  the Activity zone's titleCaseEventType (page.tsx): light regex + title-case, no new system. */
-function humanizeRequirementKey(key: string): string {
-  if (KNOWN_LABELS[key]) return KNOWN_LABELS[key];
-  const coverage = key.match(/^coverage\.([^.]+)\.(.+)$/);
-  if (coverage) return `${titleCase(coverage[1])} — ${titleCase(coverage[2])}`;
-  const coverageRequired = key.match(/^coverage_required\.(.+)$/);
-  if (coverageRequired) return `${titleCase(coverageRequired[1])} Coverage`;
-  const endorsement = key.match(/^endorsement\.(.+)$/);
-  if (endorsement) return `${titleCase(endorsement[1])} Endorsement`;
-  const docRequired = key.match(/^doc_required\.(.+)$/);
-  if (docRequired) return `${docRequired[1].toUpperCase()} on File`;
-  return titleCase(key.replace(/[._]/g, ' '));
-}
+import { humanizeRequirementKey } from './requirement-labels';
 
 function listLabels(rows: GridRow[], max = 3): string {
   const labels = rows.map((r) => humanizeRequirementKey(r.requirementKey));
