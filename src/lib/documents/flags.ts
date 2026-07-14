@@ -28,7 +28,7 @@ export interface FlagDocumentsInput {
   tenantId: string;
   vendorId: string;
   docTypes: DocType[];
-  note: string;
+  note?: string | null; // optional — the admin panel encourages but doesn't require one
 }
 
 export interface FlagDocumentsResult {
@@ -49,10 +49,7 @@ export async function flagDocumentsForReplacement(
   now: Date = new Date()
 ): Promise<FlagDocumentsResult> {
   const { tenantId, vendorId, docTypes, note } = input;
-  const trimmedNote = note.trim();
-  if (!trimmedNote) {
-    throw new Error('A note is required to flag a document for replacement');
-  }
+  const trimmedNote = note?.trim() || null;
 
   const tdb = new TenantDB(db, tenantId);
   const flagged: DocType[] = [];

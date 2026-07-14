@@ -133,9 +133,13 @@ export function Workbench({
       <DecisionPanel
         vendorId={vendorId}
         locations={locations}
-        prefilledDeficientRequirements={[...deficientReqKeys]}
         acceptedUncertaintyIds={[...acceptedIds]}
       />
+      {/* deficientReqKeys still tracks "treat as deficient" for UncertaintyRow's own isMarkedDeficient
+          display (unchanged) — it no longer feeds DecisionPanel, since request_correction moved to
+          RequestMoreInfoPanel (document-targeted, not requirement-targeted) in Stage 2c. There's no
+          reliable requirement_key -> doc_type mapping to preserve the old auto-open/pre-populate
+          behavior, so it's not carried forward. */}
     </>
   );
 }

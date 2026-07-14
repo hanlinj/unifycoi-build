@@ -28,6 +28,8 @@ export async function POST(
     return badRequest('JSON body required');
   }
 
+  const ALLOWED_DOC_TYPES = ['coi', 'w9', 'ach'];
+
   const b = body as Record<string, unknown>;
   const action = typeof b.action === 'string' ? b.action : '';
   const locationIds: string[] = Array.isArray(b.location_ids) ? (b.location_ids as string[]) : [];
@@ -35,6 +37,7 @@ export async function POST(
   const acceptedUncertaintyIds: string[] = Array.isArray(b.accepted_uncertainty_ids)
     ? (b.accepted_uncertainty_ids as string[])
     : [];
+  const docTypes: string[] = Array.isArray(b.doc_types) ? (b.doc_types as string[]) : [];
 
   if (!['approve', 'reject', 'request_correction'].includes(action)) {
     return badRequest('action must be approve | reject | request_correction');
@@ -44,6 +47,14 @@ export async function POST(
   // is vendor-level — it sweeps every under_review location itself — so it doesn't need them.
   if ((action === 'approve' || action === 'reject') && locationIds.length === 0) {
     return badRequest('location_ids required');
+  }
+
+  // doc_types is required for request_correction — the "Request more info" panel always names
+  // at least one document (the admin picks which ones need replacement).
+  if (action === 'request_correction') {
+    if (docTypes.length === 0) return badRequest('doc_types required');
+    const invalid = docTypes.filter((t) => !ALLOWED_DOC_TYPES.includes(t));
+    if (invalid.length > 0) return badRequest(`invalid doc_types: ${invalid.join(', ')}`);
   }
 
   try {
@@ -56,6 +67,7 @@ export async function POST(
       locationIds,
       reason,
       acceptedUncertaintyIds,
+      docTypes,
     });
     return NextResponse.json({ data: result });
   } catch (err) {

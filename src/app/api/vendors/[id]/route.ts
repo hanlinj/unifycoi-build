@@ -159,11 +159,15 @@ export async function GET(
     payload: { role: auth.role },
   });
 
-  // Documents (metadata only — no storage_key, no encryption_json)
+  // Documents (metadata only — no storage_key, no encryption_json). state IN ('active',
+  // 'correction_requested') — not just 'active' — so a document an admin flagged for
+  // replacement (src/lib/documents/flags.ts) stays visible here instead of silently vanishing
+  // from the workbench the moment it's flagged; superseded_by IS NULL still means "the current
+  // document of this type" either way.
   const documents = await tdb.all<DocumentRow>(
     `SELECT id, doc_type, original_filename, uploaded_at
      FROM documents
-     WHERE tenant_id = $1 AND vendor_id = $2 AND state = 'active' AND superseded_by IS NULL
+     WHERE tenant_id = $1 AND vendor_id = $2 AND state IN ('active', 'correction_requested') AND superseded_by IS NULL
      ORDER BY uploaded_at DESC`,
     [vendorId]
   );

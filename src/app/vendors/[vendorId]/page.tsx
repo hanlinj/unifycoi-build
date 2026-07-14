@@ -12,6 +12,7 @@ import { buildUnifyReviewSummary } from '@/lib/verification/summary';
 import { DocumentsAccordion } from './DocumentsAccordion';
 import { ComplianceGridView } from './ComplianceGridView';
 import { Workbench } from './Workbench';
+import { RequestMoreInfoPanel } from './RequestMoreInfoPanel';
 
 export const dynamic = 'force-dynamic';
 
@@ -259,6 +260,9 @@ export default async function VendorRecordPage({ params }: { params: { vendorId:
     locations.map((l) => [l.location_id, l.location_name])
   );
   const overallStatus = deriveOverallStatus(locations);
+  // Same availability the old per-location Request Correction button had (DecisionPanel hid
+  // itself with no under_review locations) — request_correction still requires at least one.
+  const canRequestCorrection = locations.some((l) => l.status === 'under_review');
 
   return (
     <main style={{ maxWidth: 960, margin: '0 auto', padding: '32px 24px', fontFamily: 'system-ui, sans-serif' }}>
@@ -413,9 +417,22 @@ export default async function VendorRecordPage({ params }: { params: { vendorId:
       {/* Zone 4: Documents on file. Admin gets the interactive accordion (Gate 2, Stage 3) —
           click a row to expand the real PDF, view/reveal audit events fire per action. Manager
           keeps the plain read-only table (no viewer, no reveal — Sensitive stays server-masked
-          per invariant #8, and original_filename is never even sent to a non-admin). */}
+          per invariant #8, and original_filename is never even sent to a non-admin).
+          "Request more info" (Stage 2c) lives here — a single vendor-level action, not
+          per-location, so it belongs next to the documents it targets rather than inside the
+          per-location Decision panel below. */}
       <section style={{ marginBottom: 32 }}>
-        <h2 style={{ fontSize: 16, fontWeight: 600, margin: '0 0 12px' }}>Documents on File</h2>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12 }}>
+          <h2 style={{ fontSize: 16, fontWeight: 600, margin: 0 }}>Documents on File</h2>
+          {isAdmin && canRequestCorrection && (
+            // Explicit id/doc_type-only mapping — original_filename must never reach this
+            // component's props/client payload, not just stay unrendered in its JSX.
+            <RequestMoreInfoPanel
+              vendorId={vendor.id}
+              documents={documents.map((d) => ({ id: d.id, doc_type: d.doc_type }))}
+            />
+          )}
+        </div>
         {isAdmin ? (
           <DocumentsAccordion vendorId={vendor.id} documents={documents} />
         ) : documents.length === 0 ? (

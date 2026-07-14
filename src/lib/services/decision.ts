@@ -8,6 +8,8 @@ import { logAudit } from '@/lib/audit';
 import { issueInviteToken } from '@/lib/auth/invite-token';
 import { logDevInviteUrl } from '@/lib/dev/log-invite-url';
 import { notifyTenantAdmins } from '@/lib/notifications/queue';
+import { flagDocumentsForReplacement } from '@/lib/documents/flags';
+import type { DocType } from '@/lib/extraction/types';
 
 const CORRECTION_INVITE_LIFETIME_MS = 14 * 24 * 60 * 60 * 1000;
 const MIN_REASONING_LENGTH = 10;
@@ -24,6 +26,7 @@ export interface DecisionInput {
   reason?: string | null;
   acceptedUncertaintyIds?: string[];
   deficientRequirements?: string[];  // requirement_keys pre-scoped for request_correction
+  docTypes?: string[];  // request_correction only — which documents to flag for replacement
 }
 
 // ── Accept uncertain evaluation ───────────────────────────────────────────────
@@ -94,6 +97,7 @@ export interface DecisionResult {
   skipped?: string[];
   inviteId?: string;
   locationsTransitioned?: string[];
+  flaggedDocTypes?: string[];  // request_correction only — which documents actually got flagged
 }
 
 export class DecisionError extends Error {
@@ -106,7 +110,7 @@ export class DecisionError extends Error {
 }
 
 export async function applyDecision(input: DecisionInput): Promise<DecisionResult> {
-  const { db, tenantId, vendorId, actorUserId, action, locationIds, reason, acceptedUncertaintyIds, deficientRequirements } = input;
+  const { db, tenantId, vendorId, actorUserId, action, locationIds, reason, acceptedUncertaintyIds, deficientRequirements, docTypes } = input;
   const tdb = new TenantDB(db, tenantId);
   const now = new Date();
 
@@ -225,6 +229,21 @@ export async function applyDecision(input: DecisionInput): Promise<DecisionResul
     );
   }
 
+  // Document-targeted flag (Stage 2c "Request more info" panel): mark the selected doc_types
+  // as needing replacement, carrying the same shared note as the correction reason. Optional —
+  // older/other callers of request_correction can omit docTypes and get the pre-existing
+  // vendor-location-only behavior.
+  let flaggedDocTypes: string[] = [];
+  if (docTypes && docTypes.length > 0) {
+    const flagResult = await flagDocumentsForReplacement(db, {
+      tenantId,
+      vendorId,
+      docTypes: docTypes as DocType[],
+      note: reason,
+    });
+    flaggedDocTypes = flagResult.flagged;
+  }
+
   // Invite/notification: one vendor-level correction invite and one email, regardless of how
   // many locations were under review. Routes through the shared revoke-on-issue choke point
   // (ADR-013-01) — a correction request revokes ANY prior still-live invite for this vendor,
@@ -264,6 +283,7 @@ export async function applyDecision(input: DecisionInput): Promise<DecisionResul
         expires_at: expiresAt.toISOString(),
         ...(reason ? { reason } : {}),
         ...(deficientRequirements?.length ? { deficient_requirements: deficientRequirements } : {}),
+        ...(flaggedDocTypes.length ? { doc_types: flaggedDocTypes } : {}),
       }),
       created_at: now,
     });
@@ -283,6 +303,7 @@ export async function applyDecision(input: DecisionInput): Promise<DecisionResul
       invite_id: inviteId,
       ...(reason ? { reason } : {}),
       ...(deficientRequirements?.length ? { deficient_requirements: deficientRequirements } : {}),
+      ...(flaggedDocTypes.length ? { doc_types: flaggedDocTypes } : {}),
     },
   });
 
@@ -291,5 +312,6 @@ export async function applyDecision(input: DecisionInput): Promise<DecisionResul
     inviteId,
     locationsTransitioned: underReview.map((vl) => vl.location_id),
     skipped: [],
+    ...(flaggedDocTypes.length ? { flaggedDocTypes } : {}),
   };
 }

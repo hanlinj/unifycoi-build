@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState } from 'react';
 
 interface VendorLocation {
   id: string;
@@ -12,32 +12,31 @@ interface VendorLocation {
 interface DecisionPanelProps {
   vendorId: string;
   locations: VendorLocation[];
-  // Requirement keys routed here by "Treat as deficient" on an uncertain finding.
-  // When non-empty, the correction drawer auto-opens with this scope pre-populated.
-  prefilledDeficientRequirements?: string[];
   // Uncertain evaluation ids the Admin accepted via the per-row buttons. Bundled into
   // the approve action body for backwards-compat / bulk-approve flows.
   acceptedUncertaintyIds?: string[];
 }
 
-type DecisionAction = 'approve' | 'reject' | 'request_correction';
+type DecisionAction = 'approve' | 'reject';
 
 // Color identity per action (styling only — Approve = success green, Reject = danger red,
-// Request Correction stays neutral gray, matching the design system's --success/--danger tokens).
-// Soft pastel fill — same tone family as the document-type pills (Badge's success/danger/
-// attention soft tones: src/components/ui/Badge.tsx), not a strong solid fill. `ring` is the
-// border shown only on the SELECTED button, so selection state doesn't depend on a background
-// change — background stays the soft fill in every state, consistent as a set.
+// matching the design system's --success/--danger tokens). Soft pastel fill — same tone
+// family as the document-type pills (Badge's success/danger/attention soft tones:
+// src/components/ui/Badge.tsx), not a strong solid fill. `ring` is the border shown only on
+// the SELECTED button, so selection state doesn't depend on a background change — background
+// stays the soft fill in every state, consistent as a set.
+//
+// request_correction moved OUT of this panel (Stage 2c) — correction is vendor-level and now
+// document-targeted, not a per-location decision action. See RequestMoreInfoPanel.tsx, rendered
+// next to the Documents section on the vendor page instead of here.
 const ACTION_COLOR: Record<DecisionAction, { bg: string; text: string; ring: string }> = {
   approve: { bg: '#DAFBE1', text: '#1F883D', ring: '#1F883D' },
   reject: { bg: '#FFEBE9', text: '#C0392E', ring: '#C0392E' },
-  request_correction: { bg: '#FFF8C5', text: '#A6791A', ring: '#A6791A' },
 };
 
 export function DecisionPanel({
   vendorId,
   locations,
-  prefilledDeficientRequirements = [],
   acceptedUncertaintyIds = [],
 }: DecisionPanelProps) {
   const underReview = locations.filter((l) => l.status === 'under_review');
@@ -48,14 +47,6 @@ export function DecisionPanel({
   const [reason, setReason] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
-
-  // When the Admin routes an uncertain finding to correction, auto-open the
-  // correction drawer so the pre-populated scope is immediately visible.
-  useEffect(() => {
-    if (prefilledDeficientRequirements.length > 0) {
-      setAction('request_correction');
-    }
-  }, [prefilledDeficientRequirements.length]);
 
   if (underReview.length === 0) return null;
 
@@ -70,7 +61,7 @@ export function DecisionPanel({
 
   async function submit() {
     if (!action) return;
-    if (action !== 'request_correction' && selectedLocIds.size === 0) {
+    if (selectedLocIds.size === 0) {
       setError('Select at least one location');
       return;
     }
@@ -82,13 +73,10 @@ export function DecisionPanel({
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           action,
-          location_ids: action === 'request_correction' ? [] : [...selectedLocIds],
+          location_ids: [...selectedLocIds],
           ...(reason && { reason }),
           ...(action === 'approve' && acceptedUncertaintyIds.length > 0
             ? { accepted_uncertainty_ids: acceptedUncertaintyIds }
-            : {}),
-          ...(action === 'request_correction' && prefilledDeficientRequirements.length > 0
-            ? { deficient_requirements: prefilledDeficientRequirements }
             : {}),
         }),
       });
@@ -110,7 +98,6 @@ export function DecisionPanel({
   const actionLabel: Record<DecisionAction, string> = {
     approve: 'Approve',
     reject: 'Reject',
-    request_correction: 'Request Correction',
   };
 
   return (
@@ -118,12 +105,10 @@ export function DecisionPanel({
       <h3 style={{ margin: '0 0 16px', fontSize: 16, fontWeight: 600 }}>Decision</h3>
 
       {/* Action selector — color only (wiring/behavior unchanged): Approve = green soft-fill,
-          Reject = red soft-fill, Request Correction = amber soft-fill — same pastel family as
-          the document-type pills, all three consistent as a set. Background stays the soft
-          fill in every state; selection is shown by a matching-color ring instead of a
-          background swap. */}
+          Reject = red soft-fill. Background stays the soft fill in every state; selection is
+          shown by a matching-color ring instead of a background swap. */}
       <div style={{ display: 'flex', gap: 8, marginBottom: 16 }}>
-        {(['approve', 'reject', 'request_correction'] as DecisionAction[]).map((a) => {
+        {(['approve', 'reject'] as DecisionAction[]).map((a) => {
           const selected = action === a;
           const c = ACTION_COLOR[a];
           return (
@@ -146,8 +131,8 @@ export function DecisionPanel({
         })}
       </div>
 
-      {/* Location selector (approve / reject only) */}
-      {action && action !== 'request_correction' && (
+      {/* Location selector */}
+      {action && (
         <div style={{ marginBottom: 16 }}>
           <p style={{ margin: '0 0 8px', fontSize: 13, color: '#57606a' }}>
             Select locations to {action}:
@@ -162,27 +147,6 @@ export function DecisionPanel({
               {loc.location_name}
             </label>
           ))}
-        </div>
-      )}
-
-      {/* request_correction info + pre-populated scope */}
-      {action === 'request_correction' && (
-        <div style={{ marginBottom: 12 }}>
-          <p style={{ margin: '0 0 8px', fontSize: 13, color: '#57606a' }}>
-            All under-review locations will return to Onboarding. A correction invite will be sent to the vendor.
-          </p>
-          {prefilledDeficientRequirements.length > 0 && (
-            <div style={{ marginBottom: 8 }}>
-              <p style={{ margin: '0 0 4px', fontSize: 12, fontWeight: 600 }}>
-                Correction scope (from uncertain findings you routed here):
-              </p>
-              <ul style={{ margin: 0, paddingLeft: 18 }}>
-                {prefilledDeficientRequirements.map((rk) => (
-                  <li key={rk} style={{ fontSize: 12 }}><code>{rk}</code></li>
-                ))}
-              </ul>
-            </div>
-          )}
         </div>
       )}
 
