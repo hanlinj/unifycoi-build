@@ -37,19 +37,25 @@ const inDays = (d: number) => new Date(now + d * 86_400_000);
 const dateInDays = (d: number) => inDays(d).toISOString().slice(0, 10); // YYYY-MM-DD (COI expiry)
 
 // ── Idempotent wipe — children before parents (Postgres FKs are RESTRICT, not CASCADE) ──
+// Wrapped in one transaction: a failure partway through (e.g. a table added later whose FK
+// isn't yet listed here) must roll back entirely, not leave a half-wiped tenant — each
+// deleteFrom() below commits independently otherwise, so a mid-wipe error previously left
+// child tables (documents, vendor_locations, ...) empty while `vendors` itself survived.
 async function wipeExisting(db: Db, tenantIds: string[]): Promise<void> {
   if (tenantIds.length === 0) return;
   const CHILD_TO_PARENT_ORDER = [
-    'engine_advisories', 'requirement_evaluations', 'verification_runs', 'extractions',
-    'notifications', 'audit_exports', 'invites', 'documents', 'vendor_locations', 'vendors',
-    'requirement_rules', 'requirement_settings', 'user_locations', 'user_regions',
-    'audit_events', 'billing_snapshots', 'users', 'locations', 'regions',
+    'verification_jobs', 'engine_advisories', 'requirement_evaluations', 'verification_runs',
+    'extractions', 'notifications', 'audit_exports', 'invites', 'documents', 'vendor_locations',
+    'vendors', 'requirement_rules', 'requirement_settings', 'user_locations', 'user_regions',
+    'audit_events', 'billing_snapshots', 'password_reset_tokens', 'users', 'locations', 'regions',
   ] as const;
-  for (const table of CHILD_TO_PARENT_ORDER) {
-    await db.deleteFrom(table).where('tenant_id', 'in', tenantIds).execute();
-  }
-  await db.deleteFrom('tenants').where('id', 'in', tenantIds).execute();
-  await db.deleteFrom('platform_users').where('email', '=', 'platform@cascade.test').execute();
+  await withTransaction(db, async (trx) => {
+    for (const table of CHILD_TO_PARENT_ORDER) {
+      await trx.deleteFrom(table).where('tenant_id', 'in', tenantIds).execute();
+    }
+    await trx.deleteFrom('tenants').where('id', 'in', tenantIds).execute();
+    await trx.deleteFrom('platform_users').where('email', '=', 'platform@cascade.test').execute();
+  });
   console.log(`  wiped existing "${TENANT_NAME}" (${tenantIds.length} tenant row(s))`);
 }
 
