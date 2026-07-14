@@ -20,6 +20,7 @@ import { logAudit } from '@/lib/audit';
 import { expiryBoundaryMs } from '@/lib/time/zone';
 import { toIsoDateStr } from '@/lib/extraction/extractor';
 import type { ProcessedCOIExtraction } from '@/lib/extraction/types';
+import { FLAGGED_STATE } from '@/lib/documents/flags';
 
 export const LADDER_DAYS = [60, 30, 14, 7, 1] as const;
 const IMMINENT_RUNGS = new Set([7, 1]); // rungs that also alert Admins internally
@@ -233,7 +234,15 @@ export async function supersedeReminders(db: Db, tenantId: string, documentId: s
  * most one active row per (vendor, doc_type) ever survives. Returns the superseded document's
  * id, or null if there was no prior active row (e.g. a first-time upload).
  *
- * `state` is left untouched (still 'active'): the codebase's established convention treats
+ * The prior-document match includes FLAGGED_STATE ('correction_requested') alongside 'active':
+ * a document an admin flagged as needing replacement (src/lib/documents/flags.ts) is still the
+ * vendor's current document of that type until a replacement lands, so it must remain a valid
+ * supersession target — this is how the flag auto-clears. getFlaggedDocuments() only returns
+ * rows with superseded_by IS NULL, so once superseded here, a flagged row silently stops
+ * counting as "needs replacement" without this function ever touching its state/flag_note.
+ * (bounced_expired is deliberately NOT included — unrelated to this task, unchanged.)
+ *
+ * `state` is left untouched on the SUPERSEDED row: the codebase's established convention treats
  * `superseded_by IS NULL`, not `state`, as the "still current" signal — see
  * exports/content.ts's `state: d.superseded_by ? 'superseded' : d.state` display derivation.
  * Setting `state` here too would be redundant and inconsistent with every other reader.
@@ -254,7 +263,7 @@ export async function supersedePriorDocument(
   const prior = await tdb.get<{ id: string }>(
     `SELECT id FROM documents
      WHERE tenant_id = $1 AND vendor_id = $2 AND doc_type = $3
-       AND id != $4 AND superseded_by IS NULL AND state = 'active'
+       AND id != $4 AND superseded_by IS NULL AND state IN ('active', '${FLAGGED_STATE}')
        AND uploaded_at < (SELECT uploaded_at FROM documents WHERE id = $5)
      ORDER BY uploaded_at DESC LIMIT 1`,
     [vendorId, docType, newDocumentId, newDocumentId]
