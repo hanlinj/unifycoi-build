@@ -60,10 +60,13 @@ export async function POST(
     );
   }
 
-  // FSM: onboarding → under_review
-  // IllegalTransitionError means vendor already submitted (or wrong state) — return 409
+  // FSM: onboarding → under_review, partial mode — only 'onboarding' rows advance.
+  // 'approved'/'declined' rows (from an earlier partial decision, before a correction request
+  // reset just the still-under-review locations back to 'onboarding') are left untouched, not
+  // re-evaluated. IllegalTransitionError here means zero rows were 'onboarding' — nothing to
+  // submit — return 409.
   try {
-    await fsmTransition(db, tenantId, vendorId, 'submit');
+    await fsmTransition(db, tenantId, vendorId, 'submit', { partial: true });
   } catch (err) {
     if (err instanceof IllegalTransitionError) {
       return NextResponse.json({ error: 'Already submitted' }, { status: 409 });

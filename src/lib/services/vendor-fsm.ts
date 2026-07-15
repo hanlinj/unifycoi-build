@@ -26,16 +26,25 @@ export class IllegalTransitionError extends Error {
 }
 
 /**
- * Atomically transition ALL vendor_locations for this vendor+tenant.
- * Throws IllegalTransitionError if any location is not in the expected 'from' state.
+ * Atomically transition vendor_locations for this vendor+tenant.
+ * Default mode (opts.partial unset/false): ALL rows must already be in the expected 'from'
+ * state, or this throws IllegalTransitionError — unchanged from pre-partial-mode behavior.
  * Status is per-location (invariant #5); events move all locations together because
  * onboarding and submit apply to the vendor as a whole, not to individual locations.
+ *
+ * Partial mode (opts.partial: true) — opt-in, 'submit' only: only rows currently in the
+ * event's 'from' state are advanced; rows already elsewhere (e.g. 'approved'/'declined' after
+ * a correction request reset just the under-review locations back to 'onboarding') are left
+ * untouched. Still throws IllegalTransitionError if zero rows are eligible — "nothing to
+ * submit" stays a real error, it just isn't triggered by unrelated already-decided locations
+ * anymore.
  */
 export async function fsmTransition(
   db: Db,
   tenantId: string,
   vendorId: string,
-  event: FSMEvent
+  event: FSMEvent,
+  opts: { partial?: boolean } = {}
 ): Promise<{ locationIds: string[] }> {
   const rule = ALLOWED[event];
   if (!rule) throw new IllegalTransitionError('(unknown)', event);
@@ -52,13 +61,20 @@ export async function fsmTransition(
       throw new Error(`No vendor_locations found for vendor=${vendorId} in tenant=${tenantId}`);
     }
 
-    for (const row of rows) {
-      if (row.status !== rule.from) {
-        throw new IllegalTransitionError(row.status, event);
+    if (!opts.partial) {
+      for (const row of rows) {
+        if (row.status !== rule.from) {
+          throw new IllegalTransitionError(row.status, event);
+        }
       }
     }
 
-    for (const row of rows) {
+    const eligible = opts.partial ? rows.filter((row) => row.status === rule.from) : rows;
+    if (eligible.length === 0) {
+      throw new IllegalTransitionError(rows[0].status, event);
+    }
+
+    for (const row of eligible) {
       await txTdb.update(
         'vendor_locations',
         { status: rule.to },
@@ -66,6 +82,6 @@ export async function fsmTransition(
       );
     }
 
-    return { locationIds: rows.map((r) => r.location_id) };
+    return { locationIds: eligible.map((r) => r.location_id) };
   });
 }
