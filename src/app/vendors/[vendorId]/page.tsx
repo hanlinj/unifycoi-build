@@ -8,6 +8,7 @@ import { redirect } from 'next/navigation';
 import { SearchCheck } from 'lucide-react';
 import { requestBaseUrl } from '@/lib/http/base-url';
 import { Card, CardHeader, CardTitle, CardBody, Badge, type BadgeTone } from '@/components/ui';
+import { deriveOverallStatus, statusLabel } from '@/lib/vendors/status';
 import { buildUnifyReviewSummary } from '@/lib/verification/summary';
 import { humanizeRequirementKey } from '@/lib/verification/requirement-labels';
 import { DocumentsAccordion } from './DocumentsAccordion';
@@ -115,32 +116,19 @@ interface VendorData {
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-function deriveOverallStatus(locations: VendorLocation[]): string {
-  if (locations.length === 0) return 'Unknown';
-  const statuses = locations.map((l) => l.status);
-  const approvedCount = statuses.filter((s) => s === 'approved').length;
-  if (approvedCount === locations.length) return 'Approved';
-  if (approvedCount > 0) return `Approved · ${approvedCount} of ${locations.length} locations`;
-  // In-pipeline: pick the leading status
-  const priority = ['under_review', 'onboarding', 'invited_pending', 'declined', 'expired', 'non_compliant'];
-  for (const s of priority) {
-    if (statuses.includes(s)) return statusLabel(s);
-  }
-  return statusLabel(statuses[0]);
-}
-
-function statusLabel(s: string): string {
-  const map: Record<string, string> = {
-    invited_pending: 'Invited / Pending',
-    onboarding: 'Onboarding',
-    under_review: 'Under Review',
-    approved: 'Approved',
-    expired: 'Expired',
-    non_compliant: 'Non-Compliant',
-    declined: 'Declined',
-  };
-  return map[s] ?? s;
-}
+// Header-pill color per OverallStatus.tone — this page's own long-standing hex palette,
+// preserved as-is for every non-decline case (in particular 'info'/under_review stays the
+// pre-existing amber, not Badge's blue, so this refactor introduces zero unrelated visual
+// change). 'danger' is new here in the sense that it now actually gets used whenever
+// deriveOverallStatus reports a decline, instead of the old code's color coming from
+// locations[0]'s raw status (which could show green/amber even when a decline existed).
+const HEADER_PILL_HEX: Record<BadgeTone, string> = {
+  success: '#1f883d',
+  danger: '#cf222e',
+  info: '#9a6700',
+  attention: '#9a6700',
+  neutral: '#57606a',
+};
 
 function statusColor(s: string): string {
   if (s === 'approved') return '#1f883d';
@@ -308,12 +296,12 @@ export default async function VendorRecordPage({ params }: { params: { vendorId:
               padding: '4px 12px',
               borderRadius: 12,
               background: '#f6f8fa',
-              border: `1px solid ${statusColor(locations[0]?.status ?? '')}`,
-              color: statusColor(locations[0]?.status ?? ''),
+              border: `1px solid ${HEADER_PILL_HEX[overallStatus.tone]}`,
+              color: HEADER_PILL_HEX[overallStatus.tone],
               fontWeight: 600,
               fontSize: 14,
             }}>
-              {overallStatus}
+              {overallStatus.label}
             </span>
           </div>
         </div>

@@ -1,4 +1,5 @@
 import React from 'react';
+import Link from 'next/link';
 import { ArrowUpRight } from 'lucide-react';
 import { cn } from './cn';
 
@@ -52,6 +53,9 @@ export interface StatCardProps {
    *  strips with no delta (e.g. Command Center's stat strip). 'default' is unchanged from
    *  this component's original look (used by /gallery). */
   size?: 'default' | 'lg';
+  /** Makes the whole card a link (e.g. "Total vendors" → /vendors). Adds a hover wash in the
+   *  existing accent tint token — unlinked cards (no href) get no hover affordance at all. */
+  href?: string;
   className?: string;
 }
 
@@ -77,13 +81,15 @@ export function StatCard({
   feature,
   valueTone = 'neutral',
   size = 'default',
+  href,
   className,
 }: StatCardProps) {
-  return (
+  const card = (
     <div
       className={cn(
-        'relative flex min-h-[130px] flex-col justify-between rounded-card border bg-surface p-[18px]',
+        'relative flex min-h-[130px] flex-col justify-between rounded-card border bg-surface p-[18px] transition-colors',
         feature ? 'border-accent' : 'border-border',
+        href && 'hover:bg-accent-soft',
         className
       )}
     >
@@ -115,5 +121,13 @@ export function StatCard({
         </div>
       )}
     </div>
+  );
+
+  return href ? (
+    <Link href={href} className="block no-underline">
+      {card}
+    </Link>
+  ) : (
+    card
   );
 }

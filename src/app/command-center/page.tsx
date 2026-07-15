@@ -65,7 +65,7 @@ export default async function CommandCenterPage() {
       </header>
 
       <div className="mb-7 grid grid-cols-2 gap-4 sm:grid-cols-4">
-        <StatCard size="lg" label="Total vendors" value={stats.totalVendors} />
+        <StatCard size="lg" label="Total vendors" value={stats.totalVendors} href="/vendors" />
         <StatCard size="lg" label="Total locations" value={stats.totalLocations} />
         <StatCard size="lg" label="New vendors (mo)" value={stats.newVendorsThisMonth} />
         <StatCard

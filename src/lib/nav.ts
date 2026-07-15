@@ -11,6 +11,7 @@ export function navForRole(role: string): NavSection[] {
       return [
         { title: 'Monitor', items: [
           { label: 'Home', href: '/command-center' },
+          { label: 'Vendors', href: '/vendors' },
           { label: 'Reports', href: '/reports' },
         ] },
         { title: 'Configure', items: [
@@ -22,6 +23,7 @@ export function navForRole(role: string): NavSection[] {
     case 'district_manager':
       return [{ items: [
         { label: 'Home', href: '/command-center' },
+        { label: 'Vendors', href: '/vendors' },
         { label: 'Operations', href: '/dashboard' },
         { label: 'Reports', href: '/reports' },
         { label: 'Locations', href: '/locations' },

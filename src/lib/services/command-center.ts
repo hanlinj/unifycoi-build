@@ -71,10 +71,12 @@ interface VendorAgg {
  * every branch and is never pushed to tier1/tier2 or counted in tier3 ("declined-only vendors
  * are terminal → not surfaced"). Total vendors / New vendors (mo) apply this same predicate
  * explicitly, rather than re-deriving "who got skipped" from the loop's side effects.
+ * Exported so /api/vendors (the Vendors list, GET route.ts) can apply the identical exclusion —
+ * the list must contain exactly the vendors "Total vendors" counts, not a second definition.
  * Empty input is NOT declined-only (no data to judge) — callers only call this for vendors
  * known to have ≥1 in-scope location, so this only guards against a theoretical empty array.
  */
-function isDeclinedOnly(statuses: string[]): boolean {
+export function isDeclinedOnly(statuses: string[]): boolean {
   return statuses.length > 0 && statuses.every((s) => s === 'declined');
 }
 
