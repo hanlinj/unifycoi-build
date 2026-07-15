@@ -5,12 +5,17 @@
 // and deep links (e.g. a future Expired-vendors stat card -> /vendors?status=expired) just
 // work without any local state getting stale. A filter with zero values selected ("Select…")
 // carries no filtering information, so it's never written to the URL — it's tracked in a small
-// local `pendingAttributes` list purely so its chip keeps rendering while the user picks values.
+// local `pending` list purely so its chip keeps rendering while the user picks values.
+//
+// `pending` stores the FULL filter (attribute + operator), not just the attribute key — an
+// earlier version tracked attribute keys only and always reconstructed a pending chip with the
+// type's default operator, which silently discarded an operator change made before any value
+// was picked (choosing "is none of" then immediately re-rendered as "is any of"). Caught live
+// via Playwright, not by inspection.
 
 import { useState } from 'react';
 import { useRouter, usePathname, useSearchParams } from 'next/navigation';
 import { Plus } from 'lucide-react';
-import { Menu, MenuItem } from '@/components/ui';
 import {
   FILTER_ATTRIBUTES,
   DEFAULT_OPERATOR_BY_TYPE,
@@ -21,6 +26,7 @@ import {
 } from '@/lib/vendors/filters';
 import type { VendorFilterOptions } from '@/app/api/vendors/route';
 import { FilterChip } from './FilterChip';
+import { PopoverPanel, PopoverRow, useOutsideClose } from './Popover';
 
 interface Props {
   filterOptions: VendorFilterOptions;
@@ -32,17 +38,14 @@ export function FilterBar({ filterOptions }: Props) {
   const searchParams = useSearchParams();
   const committed = filtersFromSearchParams(searchParams);
 
-  const [pendingAttributes, setPendingAttributes] = useState<string[]>([]);
+  const [pending, setPending] = useState<VendorFilter[]>([]);
   const [newestAttribute, setNewestAttribute] = useState<string | null>(null);
+  const [addOpen, setAddOpen] = useState(false);
+  const addRef = useOutsideClose(addOpen, () => setAddOpen(false));
 
   const filters: VendorFilter[] = [
     ...committed,
-    ...pendingAttributes
-      .filter((a) => !committed.some((f) => f.attribute === a))
-      .map((a) => {
-        const def = FILTER_ATTRIBUTES.find((d) => d.key === a)!;
-        return { attribute: a, operator: DEFAULT_OPERATOR_BY_TYPE[def.type], values: [] as string[] };
-      }),
+    ...pending.filter((f) => !committed.some((c) => c.attribute === f.attribute)),
   ];
 
   function pushUrl(next: VendorFilter[]) {
@@ -51,32 +54,36 @@ export function FilterBar({ filterOptions }: Props) {
   }
 
   function addFilter(attributeKey: string) {
+    const def = FILTER_ATTRIBUTES.find((d) => d.key === attributeKey);
+    if (!def) return;
+    setAddOpen(false);
     setNewestAttribute(attributeKey);
-    setPendingAttributes((p) => [...p, attributeKey]);
+    setPending((p) => [...p, { attribute: attributeKey, operator: DEFAULT_OPERATOR_BY_TYPE[def.type], values: [] }]);
   }
 
   function updateFilter(oldAttribute: string, next: VendorFilter) {
     if (next.attribute !== oldAttribute) setNewestAttribute(next.attribute);
-    setPendingAttributes((p) => p.filter((a) => a !== oldAttribute && a !== next.attribute));
+    setPending((p) => p.filter((f) => f.attribute !== oldAttribute && f.attribute !== next.attribute));
     const withoutThis = committed.filter((f) => f.attribute !== oldAttribute && f.attribute !== next.attribute);
     if (next.values.length > 0) {
       pushUrl([...withoutThis, next]);
     } else {
-      // Zero values — not written to the URL; kept as a pending chip so it doesn't vanish.
-      setPendingAttributes((p) => [...p, next.attribute]);
+      // Zero values — not written to the URL; kept pending (full filter, including whatever
+      // operator was just picked) so the chip neither vanishes nor forgets the operator choice.
+      setPending((p) => [...p, next]);
       pushUrl(withoutThis);
     }
   }
 
   function removeFilter(attribute: string) {
-    setPendingAttributes((p) => p.filter((a) => a !== attribute));
+    setPending((p) => p.filter((f) => f.attribute !== attribute));
     if (committed.some((f) => f.attribute === attribute)) {
       pushUrl(committed.filter((f) => f.attribute !== attribute));
     }
   }
 
   function clearAll() {
-    setPendingAttributes([]);
+    setPending([]);
     router.push(pathname);
   }
 
@@ -100,22 +107,23 @@ export function FilterBar({ filterOptions }: Props) {
           right here, before the [+] button, is the whole change when that stage lands. */}
 
       {availableAttributes.length > 0 && (
-        <Menu
-          align="left"
-          trigger={
-            <button
-              type="button"
-              aria-label="Add filter"
-              className="flex h-8 w-8 items-center justify-center rounded-ctl border border-border text-fg-muted hover:bg-surface-2 hover:text-fg"
-            >
-              <Plus size={15} strokeWidth={2.5} />
-            </button>
-          }
-        >
-          {availableAttributes.map((a) => (
-            <MenuItem key={a.key} onClick={() => addFilter(a.key)}>{a.label}</MenuItem>
-          ))}
-        </Menu>
+        <div ref={addRef} className="relative inline-flex">
+          <button
+            type="button"
+            aria-label="Add filter"
+            onClick={() => setAddOpen((o) => !o)}
+            className="flex h-8 w-8 appearance-none items-center justify-center rounded-ctl border border-border bg-surface text-fg-muted outline-none hover:bg-surface-2 hover:text-fg"
+          >
+            <Plus size={15} strokeWidth={2.5} />
+          </button>
+          {addOpen && (
+            <PopoverPanel className="min-w-[160px] py-1">
+              {availableAttributes.map((a) => (
+                <PopoverRow key={a.key} onClick={() => addFilter(a.key)}>{a.label}</PopoverRow>
+              ))}
+            </PopoverPanel>
+          )}
+        </div>
       )}
 
       {filters.map((f) => (
@@ -134,7 +142,7 @@ export function FilterBar({ filterOptions }: Props) {
         <button
           type="button"
           onClick={clearAll}
-          className="text-[13px] font-semibold text-fg-muted hover:text-danger"
+          className="appearance-none border-0 bg-transparent text-[13px] font-semibold text-accent outline-none hover:underline"
         >
           Clear filters
         </button>
