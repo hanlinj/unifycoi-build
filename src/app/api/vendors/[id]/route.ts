@@ -25,6 +25,14 @@ export const dynamic = 'force-dynamic';
 // list stays narrow, not broad.
 const TIMELINE_EXCLUDED_EVENT_TYPES = ['vendor.viewed', 'security.scope_violation'];
 
+/** "Decided by" — never a raw user id. Approved/declined but the resolving users-table join
+ *  came back empty (a deleted/orphaned user record) still gets a readable label, not a UUID. */
+function decidedByName(vl: VendorLocationRow): string | null {
+  if (vl.status === 'approved') return vl.approved_by_name ?? 'Unknown user';
+  if (vl.status === 'declined') return vl.declined_by_name ?? 'Unknown user';
+  return null;
+}
+
 interface VendorRow {
   id: string;
   business_name: string;
@@ -43,8 +51,13 @@ interface VendorLocationRow {
   // to preserve the existing wire contract (src/app/vendors/[vendorId]/page.tsx still does its
   // own JSON.parse() on this field — not part of this stage's scope to touch).
   flags_json: Record<string, unknown> | null;
-  approved_by: string | null;
   approved_at: string | null;
+  approved_by_name: string | null;
+  // Decline never wrote approved_by/approved_at (decision.ts's reject branch only sets
+  // status), so who/when a decline happened is sourced from that location's own
+  // vendor.declined audit event instead — a read-time join, no schema change.
+  declined_at: string | null;
+  declined_by_name: string | null;
 }
 
 interface VerificationRunRow {
@@ -113,12 +126,28 @@ export async function GET(
   );
   if (!vendor) return notFound('Vendor not found');
 
-  // Load per-location statuses with location names
+  // Load per-location statuses with location names. "Decided by/at" resolves for BOTH
+  // approve (vendor_locations.approved_by/approved_at, already stored) and decline (never
+  // stored there — decision.ts's reject branch only writes status — so sourced instead from
+  // that location's own vendor.declined audit event via a LATERAL join). No schema change:
+  // the decline actor/timestamp already exists in audit_events, just not in vendor_locations.
   const allLocations = await tdb.all<VendorLocationRow>(
     `SELECT vl.id, vl.location_id, l.name AS location_name, vl.status, vl.flags_json,
-            vl.approved_by, vl.approved_at
+            vl.approved_at, approver.name AS approved_by_name,
+            decline_evt.created_at AS declined_at, decliner.name AS declined_by_name
      FROM vendor_locations vl
      JOIN locations l ON l.id = vl.location_id AND l.tenant_id = vl.tenant_id
+     LEFT JOIN users approver ON approver.id = vl.approved_by AND approver.tenant_id = vl.tenant_id
+     LEFT JOIN LATERAL (
+       SELECT ae.actor_id, ae.created_at
+       FROM audit_events ae
+       WHERE ae.tenant_id = vl.tenant_id AND ae.target_id = vl.vendor_id
+         AND ae.event_type = 'vendor.declined'
+         AND ae.payload_json->>'location_id' = vl.location_id
+       ORDER BY ae.created_at DESC
+       LIMIT 1
+     ) decline_evt ON vl.status = 'declined'
+     LEFT JOIN users decliner ON decliner.id = decline_evt.actor_id AND decliner.tenant_id = vl.tenant_id
      WHERE vl.tenant_id = $1 AND vl.vendor_id = $2
      ORDER BY l.name`,
     [vendorId]
@@ -289,8 +318,8 @@ export async function GET(
         location_name: vl.location_name,
         status: vl.status,
         flags_json: vl.flags_json ? JSON.stringify(vl.flags_json) : null,
-        approved_by: vl.approved_by,
-        approved_at: vl.approved_at,
+        decided_by: decidedByName(vl),
+        decided_at: vl.status === 'approved' ? vl.approved_at : vl.status === 'declined' ? vl.declined_at : null,
       })),
       verificationRun,
       grid,

@@ -42,7 +42,10 @@ export default async function RequirementsPage() {
   const locations = (Array.isArray(locsRes.data) ? locsRes.data : []) as Loc[];
   const usersRes = await fetchJson(base, '/api/users', h);
   const users = (Array.isArray(usersRes.data) ? usersRes.data : []) as { id: string; name: string }[];
-  const nameOf = (id: string) => users.find((u) => u.id === id)?.name ?? id;
+  // Never a raw user id — same principle as the vendor profile's "Decided by" fix (Stage 5):
+  // usersForManagement returns every tenant user (any status) for an Admin caller, so this
+  // should always resolve; the fallback only matters if a referenced user is ever hard-deleted.
+  const nameOf = (id: string) => users.find((u) => u.id === id)?.name ?? 'Unknown user';
   const locName = (id: string | null) => (id ? locations.find((l) => l.id === id)?.name ?? id : '');
 
   const floorKeys = Object.keys(data.floor).sort();

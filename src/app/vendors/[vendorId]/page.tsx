@@ -24,8 +24,10 @@ interface VendorLocation {
   location_name: string;
   status: string;
   flags_json: string | null;
-  approved_by?: string | null;
-  approved_at?: string | null;
+  // Resolved display name (never a raw user id) — populated for approved AND declined
+  // locations; null while undecided. See route.ts's decidedByName().
+  decided_by?: string | null;
+  decided_at?: string | null;
 }
 
 interface EvaluationRow {
@@ -325,8 +327,7 @@ export default async function VendorRecordPage({ params }: { params: { vendorId:
             <tr style={{ background: '#f6f8fa' }}>
               <th style={th}>Location</th>
               <th style={th}>Status</th>
-              {isAdmin && <th style={th}>Approved by</th>}
-              {isAdmin && <th style={th}>Approved at</th>}
+              {isAdmin && <th style={th}>Decided by</th>}
             </tr>
           </thead>
           <tbody>
@@ -350,8 +351,13 @@ export default async function VendorRecordPage({ params }: { params: { vendorId:
                       </span>
                     )}
                   </td>
-                  {isAdmin && <td style={td}>{loc.approved_by ?? '—'}</td>}
-                  {isAdmin && <td style={td}>{loc.approved_at ? new Date(loc.approved_at).toLocaleDateString() : '—'}</td>}
+                  {isAdmin && (
+                    <td style={td}>
+                      {loc.decided_by
+                        ? `${loc.decided_by}${loc.decided_at ? ` · ${new Date(loc.decided_at).toLocaleDateString()}` : ''}`
+                        : '—'}
+                    </td>
+                  )}
                 </tr>
               );
             })}
