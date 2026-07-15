@@ -45,11 +45,10 @@ export interface CommandCenterResult {
   tier2: CommandCenterRow[];
   tier3: { onboarding: number; pending: number; onTrack: number };
   facilitiesInScope: number;
-  // Distinct vendors with at least one in-scope vendor_locations row — same scoped join the
-  // taxonomy itself aggregates over (byVendor below), so it agrees by construction with what
-  // the rest of this page considers "in scope." Includes declined-only vendors (the risk
-  // queue's own exclusion of them happens later, in classification, not in this base count) —
-  // "Total vendors" is a portfolio count, not a queue.
+  // Distinct in-scope vendors, EXCLUDING declined-only ones (every in-scope location declined
+  // — a rejected applicant, not a vendor the operator works with; see isDeclinedOnly). Same
+  // scoped vendor_locations join the taxonomy itself aggregates over (byVendor below), so it
+  // agrees by construction with what the rest of this page considers "in scope."
   totalVendorsInScope: number;
 }
 
@@ -62,6 +61,21 @@ interface VendorAgg {
   vendorId: string; name: string; trade: string;
   statuses: string[];
   inScopeLocations: number;
+}
+
+/**
+ * True when every in-scope vendor_locations status for a vendor is 'declined' — a rejected
+ * applicant, not a vendor the operator works with. This is the same condition that already
+ * silently drops a vendor from the risk queue: none of the classify loop's `statuses.has(...)`
+ * branches below match 'declined', so a vendor whose statuses are ALL 'declined' falls through
+ * every branch and is never pushed to tier1/tier2 or counted in tier3 ("declined-only vendors
+ * are terminal → not surfaced"). Total vendors / New vendors (mo) apply this same predicate
+ * explicitly, rather than re-deriving "who got skipped" from the loop's side effects.
+ * Empty input is NOT declined-only (no data to judge) — callers only call this for vendors
+ * known to have ≥1 in-scope location, so this only guards against a theoretical empty array.
+ */
+function isDeclinedOnly(statuses: string[]): boolean {
+  return statuses.length > 0 && statuses.every((s) => s === 'declined');
 }
 
 function humanizeReq(key: string): string {
@@ -228,12 +242,19 @@ export async function buildCommandCenter(
   const t2order: Tier2Condition[] = ['expiring_soon', 'correction_aging', 'invite_failed'];
   tier2.sort((a, b) => t2order.indexOf(a.condition as Tier2Condition) - t2order.indexOf(b.condition as Tier2Condition));
 
-  return { tier1, tier2, tier3: { onboarding, pending, onTrack }, facilitiesInScope, totalVendorsInScope: byVendor.size };
+  let totalVendorsInScope = 0;
+  for (const agg of byVendor.values()) {
+    if (!isDeclinedOnly(agg.statuses)) totalVendorsInScope++;
+  }
+
+  return { tier1, tier2, tier3: { onboarding, pending, onTrack }, facilitiesInScope, totalVendorsInScope };
 }
 
 /**
  * Count of vendors newly created this tenant-local calendar month, scope-clamped identically
- * to buildCommandCenter (same vendor_locations join + IN-list pattern). Defined by
+ * to buildCommandCenter (same vendor_locations join + IN-list pattern), EXCLUDING declined-only
+ * vendors via the same isDeclinedOnly predicate Total vendors uses — so a month where a vendor
+ * was created and then declined everywhere can't render New vendors > Total vendors. Defined by
  * vendors.created_at — a vendor has exactly one creation event but can receive multiple
  * invites over time (onboarding/renewal/correction), so created_at is the unambiguous "new to
  * the tenant" signal, not invite timestamp. Month boundary is tenant-local (monthStartMs,
@@ -260,12 +281,27 @@ export async function countNewVendorsThisMonth(
   const locPlaceholders = locParams.map((_, i) => `$${i + 3}`).join(', ');
   const locFilter = scoped ? ` AND vl.location_id IN (${locPlaceholders})` : '';
 
-  const row = await tdb.get<{ n: string }>(
-    `SELECT COUNT(DISTINCT v.id) AS n
+  // Per-(vendor, in-scope location) status rows, not a plain COUNT — declined-only exclusion
+  // needs every in-scope location's status for each vendor created this month, same as
+  // byVendor's aggregation in buildCommandCenter.
+  const rows = await tdb.all<{ vendor_id: string; status: string }>(
+    `SELECT v.id AS vendor_id, vl.status
      FROM vendors v
      JOIN vendor_locations vl ON vl.vendor_id = v.id AND vl.tenant_id = v.tenant_id
      WHERE v.tenant_id = $1 AND v.created_at >= $2${locFilter}`,
     [new Date(monthStart), ...locParams]
   );
-  return Number(row!.n);
+
+  const statusesByVendor = new Map<string, string[]>();
+  for (const r of rows) {
+    const arr = statusesByVendor.get(r.vendor_id);
+    if (arr) arr.push(r.status);
+    else statusesByVendor.set(r.vendor_id, [r.status]);
+  }
+
+  let count = 0;
+  for (const statuses of statusesByVendor.values()) {
+    if (!isDeclinedOnly(statuses)) count++;
+  }
+  return count;
 }
