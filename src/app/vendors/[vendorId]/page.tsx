@@ -9,9 +9,9 @@ import { SearchCheck } from 'lucide-react';
 import { requestBaseUrl } from '@/lib/http/base-url';
 import { Card, CardHeader, CardTitle, CardBody, Badge, type BadgeTone } from '@/components/ui';
 import { buildUnifyReviewSummary } from '@/lib/verification/summary';
+import { humanizeRequirementKey } from '@/lib/verification/requirement-labels';
 import { DocumentsAccordion } from './DocumentsAccordion';
 import { ComplianceGridView } from './ComplianceGridView';
-import { Workbench } from './Workbench';
 import { RequestMoreInfoPanel } from './RequestMoreInfoPanel';
 
 export const dynamic = 'force-dynamic';
@@ -210,8 +210,13 @@ function describeAuditEvent(ev: ActivityEvent, locationNameById: Record<string, 
       return 'Coverage expired — pulled from hireable';
     case 'vendor.renewal_reminder_sent':
       return `Manual renewal reminder sent${loc('location_id') ? ` for ${loc('location_id')}` : ''}`;
-    case 'evaluation.uncertain_accepted':
-      return `Uncertain finding accepted (${str('requirement_key') ?? 'requirement'})${str('reasoning') ? ` — "${str('reasoning')}"` : ''}`;
+    case 'evaluation.uncertain_accepted': {
+      // Historical event type — the "Needs Your Review" UI that produced these is gone
+      // (Stage 3), but past audit rows still render here. humanizeRequirementKey() keeps this
+      // consistent with the grid: never a raw dotted key like coverage_required.workers_comp.
+      const rk = str('requirement_key');
+      return `Uncertain finding accepted (${rk ? humanizeRequirementKey(rk) : 'requirement'})${str('reasoning') ? ` — "${str('reasoning')}"` : ''}`;
+    }
     case 'ai.recommendation':
       return `Verification run recommended ${str('recommendation') ?? '—'}`;
     case 'ai.advisory':
@@ -258,6 +263,13 @@ export default async function VendorRecordPage({ params }: { params: { vendorId:
   const isAdmin = role === 'admin';
   const locationNameById: Record<string, string> = Object.fromEntries(
     locations.map((l) => [l.location_id, l.location_name])
+  );
+  // The grid is purely evaluation-derived (computeComplianceGrid never touches vendor_locations)
+  // — status is threaded in separately here so ComplianceGridView can show per-location
+  // Approve/Reject and the approved/declined header icon without the grid recompute knowing
+  // anything about decision status.
+  const statusByLocationId: Record<string, string> = Object.fromEntries(
+    locations.map((l) => [l.location_id, l.status])
   );
   const overallStatus = deriveOverallStatus(locations);
   // Same availability the old per-location Request Correction button had (DecisionPanel hid
@@ -363,8 +375,9 @@ export default async function VendorRecordPage({ params }: { params: { vendorId:
         </section>
       )}
 
-      {/* Workbench, top to bottom in the order an Admin actually works it (Gate 2, Stage 4):
-          Unify Review summary → compliance grid (per facility) → documents → decision panel. */}
+      {/* Top to bottom in the order an Admin actually works it: Unify Review summary →
+          compliance grid (per facility, with per-location Approve/Reject) → documents →
+          advisories → activity. */}
 
       {/* Unify Review callout (Gate 2 restyle) — Admin only. Generated FROM the grid's own
           gap/pass counts (src/lib/verification/summary.ts), never a fresh AI call, so it can
@@ -410,9 +423,13 @@ export default async function VendorRecordPage({ params }: { params: { vendorId:
         </section>
       )}
 
-      {/* Compliance Grid (Gate 2, Stage 1 + restyle) — Admin only. Collapsible per facility,
-          humanized labels, per-location count pills — see ComplianceGridView.tsx. */}
-      {isAdmin && grid && <ComplianceGridView grid={grid} />}
+      {/* Compliance Grid (Gate 2, Stage 1 + restyle; per-location decisions Stage 3) — Admin
+          only. Collapsible per facility, humanized labels, per-location count pills, and now
+          per-location Approve/Reject + the "Approve all passing" shortcut — see
+          ComplianceGridView.tsx. */}
+      {isAdmin && grid && (
+        <ComplianceGridView vendorId={vendor.id} grid={grid} statusByLocationId={statusByLocationId} />
+      )}
 
       {/* Zone 4: Documents on file. Admin gets the interactive accordion (Gate 2, Stage 3) —
           click a row to expand the real PDF, view/reveal audit events fire per action. Manager
@@ -457,23 +474,26 @@ export default async function VendorRecordPage({ params }: { params: { vendorId:
         )}
       </section>
 
-      {/* Decision panel (Gate 2, Stage 4 — last in reading order). Evaluations table (with
-          per-row uncertainty actions) and the decision panel share client state so "Treat as
-          deficient" pre-populates the correction scope. Component itself untouched — Approve /
-          Reject / Request Correction still call the same applyDecision()-backed API exactly as
-          before; only this block's position on the page moved. */}
-      {isAdmin && verificationRun && (
-        <Workbench
-          vendorId={vendor.id}
-          evaluations={verificationRun.evaluations}
-          advisories={verificationRun.advisories}
-          locations={locations.map((l) => ({
-            id: l.id,
-            location_id: l.location_id,
-            location_name: l.location_name,
-            status: l.status,
-          }))}
-        />
+      {/* Advisories — informational only, no actions. Not shown by Unify Review or the grid.
+          (Stage 3: the old vendor-level Decision panel and the "Needs Your Review" per-line-item
+          Accept/Treat-as-deficient block are both gone — per-location Approve/Reject in the
+          Compliance Grid above replaces them. Uncertain findings still surface there as
+          Indeterminate/Missing rows, and in the Unify Review summary — no separate adjudication
+          step anymore.) */}
+      {isAdmin && verificationRun && verificationRun.advisories.length > 0 && (
+        <section style={{ marginBottom: 32 }}>
+          <h3 style={{ fontSize: 14, fontWeight: 600, margin: '0 0 8px' }}>Advisories</h3>
+          {verificationRun.advisories.map((adv) => (
+            <div key={adv.id} style={{
+              padding: '8px 12px', marginBottom: 6, borderRadius: 6,
+              background: adv.severity === 'warn' ? '#fff8c5' : '#f6f8fa',
+              border: `1px solid ${adv.severity === 'warn' ? '#d4a72c' : '#d0d7de'}`,
+              fontSize: 13,
+            }}>
+              <strong>{adv.key}</strong>: {adv.message}
+            </div>
+          ))}
+        </section>
       )}
 
       {/* Zone 5: Activity — the vendor's audit trail, read-only, newest first. Admin-only
