@@ -5,6 +5,7 @@
 import { cookies, headers } from 'next/headers';
 import { redirect } from 'next/navigation';
 import { requestBaseUrl } from '@/lib/http/base-url';
+import { StatCard } from '@/components/ui';
 import { ResendButton } from './ResendButton';
 
 export const dynamic = 'force-dynamic';
@@ -20,11 +21,18 @@ interface Row {
   daysToExpiry: number | null;
   action: 'vendor_record' | 'resend_invite';
 }
+interface Stats {
+  totalVendors: number;
+  totalLocations: number;
+  newVendorsThisMonth: number;
+  expiredVendors: number;
+}
 interface CCData {
   tier1: Row[];
   tier2: Row[];
   tier3: { onboarding: number; pending: number; onTrack: number };
   facilitiesInScope: number;
+  stats: Stats;
 }
 
 function ago(iso: string | null): string {
@@ -45,7 +53,7 @@ export default async function CommandCenterPage() {
   if (!res.ok) return <p style={{ padding: 32, fontFamily: 'system-ui' }}>Failed to load the Command Center.</p>;
 
   const { data } = (await res.json()) as { data: CCData };
-  const { tier1, tier2, tier3, facilitiesInScope } = data;
+  const { tier1, tier2, tier3, facilitiesInScope, stats } = data;
 
   return (
     <main style={{ maxWidth: 1040, margin: '0 auto', padding: '32px 24px', fontFamily: 'system-ui, sans-serif', color: '#24292f' }}>
@@ -55,6 +63,18 @@ export default async function CommandCenterPage() {
           Compliance risk across {facilitiesInScope} {facilitiesInScope === 1 ? 'facility' : 'facilities'} in your scope.
         </p>
       </header>
+
+      <div className="mb-7 grid grid-cols-2 gap-4 sm:grid-cols-4">
+        <StatCard size="lg" label="Total vendors" value={stats.totalVendors} />
+        <StatCard size="lg" label="Total locations" value={stats.totalLocations} />
+        <StatCard size="lg" label="New vendors (mo)" value={stats.newVendorsThisMonth} />
+        <StatCard
+          size="lg"
+          label="Expired vendors"
+          value={stats.expiredVendors}
+          valueTone={stats.expiredVendors > 0 ? 'danger' : 'neutral'}
+        />
+      </div>
 
       <Zone
         title="Needs action now"

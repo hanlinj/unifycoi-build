@@ -12,7 +12,7 @@
 import type { Db } from '@/lib/db/client';
 import { TenantDB } from '@/lib/db/tenant';
 import { chaseExpiryByVendor } from '@/lib/notifications/chase';
-import { expiryBoundaryMs } from '@/lib/time/zone';
+import { expiryBoundaryMs, monthStartMs } from '@/lib/time/zone';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const IMMINENT_DAYS = 7;        // ≤7d to expiry → Tier 1 imminent lapse
@@ -45,6 +45,12 @@ export interface CommandCenterResult {
   tier2: CommandCenterRow[];
   tier3: { onboarding: number; pending: number; onTrack: number };
   facilitiesInScope: number;
+  // Distinct vendors with at least one in-scope vendor_locations row — same scoped join the
+  // taxonomy itself aggregates over (byVendor below), so it agrees by construction with what
+  // the rest of this page considers "in scope." Includes declined-only vendors (the risk
+  // queue's own exclusion of them happens later, in classification, not in this base count) —
+  // "Total vendors" is a portfolio count, not a queue.
+  totalVendorsInScope: number;
 }
 
 export interface CCScope {
@@ -74,7 +80,7 @@ export async function buildCommandCenter(
   scope: CCScope,
   nowMs: number = Date.now()
 ): Promise<CommandCenterResult> {
-  const empty: CommandCenterResult = { tier1: [], tier2: [], tier3: { onboarding: 0, pending: 0, onTrack: 0 }, facilitiesInScope: 0 };
+  const empty: CommandCenterResult = { tier1: [], tier2: [], tier3: { onboarding: 0, pending: 0, onTrack: 0 }, facilitiesInScope: 0, totalVendorsInScope: 0 };
 
   // District/store with no in-scope locations → nothing.
   if (scope.locationIds !== null && scope.locationIds.length === 0) return empty;
@@ -222,5 +228,44 @@ export async function buildCommandCenter(
   const t2order: Tier2Condition[] = ['expiring_soon', 'correction_aging', 'invite_failed'];
   tier2.sort((a, b) => t2order.indexOf(a.condition as Tier2Condition) - t2order.indexOf(b.condition as Tier2Condition));
 
-  return { tier1, tier2, tier3: { onboarding, pending, onTrack }, facilitiesInScope };
+  return { tier1, tier2, tier3: { onboarding, pending, onTrack }, facilitiesInScope, totalVendorsInScope: byVendor.size };
+}
+
+/**
+ * Count of vendors newly created this tenant-local calendar month, scope-clamped identically
+ * to buildCommandCenter (same vendor_locations join + IN-list pattern). Defined by
+ * vendors.created_at — a vendor has exactly one creation event but can receive multiple
+ * invites over time (onboarding/renewal/correction), so created_at is the unambiguous "new to
+ * the tenant" signal, not invite timestamp. Month boundary is tenant-local (monthStartMs,
+ * OPS-7's Intl-based day-boundary treatment extended to month grain) — never a naive UTC
+ * month cutoff.
+ */
+export async function countNewVendorsThisMonth(
+  db: Db,
+  tenantId: string,
+  scope: CCScope,
+  nowMs: number = Date.now()
+): Promise<number> {
+  if (scope.locationIds !== null && scope.locationIds.length === 0) return 0;
+
+  const tdb = new TenantDB(db, tenantId);
+  const scoped = scope.locationIds !== null;
+  const locParams = scoped ? scope.locationIds! : [];
+
+  const tenantRow = await db.selectFrom('tenants').select('timezone').where('id', '=', tenantId).executeTakeFirst();
+  const monthStart = monthStartMs(nowMs, tenantRow?.timezone ?? null);
+
+  // tenant_id is $1 (TenantDB's contract); created_at cutoff is $2; the location IN-list (if
+  // scoped) starts at $3.
+  const locPlaceholders = locParams.map((_, i) => `$${i + 3}`).join(', ');
+  const locFilter = scoped ? ` AND vl.location_id IN (${locPlaceholders})` : '';
+
+  const row = await tdb.get<{ n: string }>(
+    `SELECT COUNT(DISTINCT v.id) AS n
+     FROM vendors v
+     JOIN vendor_locations vl ON vl.vendor_id = v.id AND vl.tenant_id = v.tenant_id
+     WHERE v.tenant_id = $1 AND v.created_at >= $2${locFilter}`,
+    [new Date(monthStart), ...locParams]
+  );
+  return Number(row!.n);
 }

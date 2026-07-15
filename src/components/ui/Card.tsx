@@ -44,6 +44,14 @@ export interface StatCardProps {
   deltaTone?: 'muted' | 'success' | 'danger';
   /** Selected/highlighted card (one per row) — blue border + blue value, not a filled block. */
   feature?: boolean;
+  /** Value emphasis independent of `feature` — 'danger' colors just the number red (e.g. a
+   *  count that's only bad when non-zero); default is neutral. Ignored when `feature` is set
+   *  (feature's blue takes precedence, same as before this prop existed). */
+  valueTone?: 'neutral' | 'danger';
+  /** Number size/weight. 'lg' is a bigger, blacker, tighter-leading number for plain KPI
+   *  strips with no delta (e.g. Command Center's stat strip). 'default' is unchanged from
+   *  this component's original look (used by /gallery). */
+  size?: 'default' | 'lg';
   className?: string;
 }
 
@@ -53,8 +61,24 @@ const DELTA: Record<NonNullable<StatCardProps['deltaTone']>, string> = {
   danger: 'text-danger',
 };
 
-/** KPI stat card. `feature` = the selected metric (blue border + blue value); others are neutral. */
-export function StatCard({ label, value, delta, deltaTone = 'muted', feature, className }: StatCardProps) {
+const VALUE_SIZE: Record<NonNullable<StatCardProps['size']>, string> = {
+  default: 'text-[34px] font-extrabold',
+  lg: 'text-[32px] font-black',
+};
+
+/** KPI stat card. `feature` = the selected metric (blue border + blue value); others are neutral.
+ *  The trend-arrow badge only renders alongside a `delta` — a plain count with no delta gets a
+ *  plain card, no decorative icon. */
+export function StatCard({
+  label,
+  value,
+  delta,
+  deltaTone = 'muted',
+  feature,
+  valueTone = 'neutral',
+  size = 'default',
+  className,
+}: StatCardProps) {
   return (
     <div
       className={cn(
@@ -63,18 +87,26 @@ export function StatCard({ label, value, delta, deltaTone = 'muted', feature, cl
         className
       )}
     >
-      <span
-        className={cn(
-          'absolute right-4 top-4 grid h-[34px] w-[34px] place-items-center rounded-full border',
-          feature ? 'border-transparent bg-accent-soft' : 'border-border bg-surface-2'
-        )}
-      >
-        <ArrowUpRight size={15} strokeWidth={2.5} className={feature ? 'text-accent' : 'text-fg-muted'} />
-      </span>
-      <div className="text-[11px] font-bold uppercase tracking-[0.09em] text-fg-muted">
+      {delta != null && (
+        <span
+          className={cn(
+            'absolute right-4 top-4 grid h-[34px] w-[34px] place-items-center rounded-full border',
+            feature ? 'border-transparent bg-accent-soft' : 'border-border bg-surface-2'
+          )}
+        >
+          <ArrowUpRight size={15} strokeWidth={2.5} className={feature ? 'text-accent' : 'text-fg-muted'} />
+        </span>
+      )}
+      <div className="whitespace-nowrap text-[11px] font-bold uppercase tracking-[0.09em] text-fg-muted">
         {label}
       </div>
-      <div className={cn('text-[34px] font-extrabold leading-none tracking-[-0.03em] tabular-nums', feature ? 'text-accent' : 'text-fg')}>
+      <div
+        className={cn(
+          VALUE_SIZE[size],
+          'leading-none tracking-[-0.03em] tabular-nums',
+          feature ? 'text-accent' : valueTone === 'danger' ? 'text-danger' : 'text-fg'
+        )}
+      >
         {value}
       </div>
       {delta != null && (

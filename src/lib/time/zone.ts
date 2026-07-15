@@ -74,3 +74,27 @@ export function expiryBoundaryMs(expirationDate: string, tz: string | null): num
   // Explicit time/offset present → the instant is unambiguous; honor it (no reinterpretation).
   return Date.parse(expirationDate);
 }
+
+/**
+ * UTC ms of 00:00 tenant-local on day 1 of the tenant-local calendar month containing `nowMs`
+ * (OPS-7 sibling for month-grain boundaries — e.g. Command Center's "new this month" stat).
+ * Same Intl-derived, two-step DST-safe resolution as expiryBoundaryMs/zonedDayStartMs — never
+ * casts a stored value to timestamptz and reformats it back to text (the trap documented in
+ * docs/decisions.md); this only ever computes a boundary from the current instant.
+ * Null/invalid tz → UTC.
+ */
+export function monthStartMs(nowMs: number, tz: string | null): number {
+  const zone = tz && tz.trim() ? tz : 'UTC';
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: zone,
+    year: 'numeric',
+    month: '2-digit',
+  }).formatToParts(new Date(nowMs));
+  const m: Record<string, number> = {};
+  for (const p of parts) if (p.type !== 'literal') m[p.type] = parseInt(p.value, 10);
+  try {
+    return zonedDayStartMs(m.year, m.month, 1, zone);
+  } catch {
+    return zonedDayStartMs(m.year, m.month, 1, 'UTC'); // invalid IANA zone → UTC
+  }
+}
