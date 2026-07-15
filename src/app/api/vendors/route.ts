@@ -3,9 +3,10 @@
 // /dashboard and get 403 here, not just a hidden nav entry).
 //
 // Scope-clamped identically to Command Center's stat cards: same resolveScope() clamp, same
-// isDeclinedOnly() exclusion (imported from command-center.ts, not re-derived) — so this list
-// contains exactly the vendors "Total vendors" counts. No filters, no pagination (out of scope
-// for this slice — see the handoff note).
+// isDeclinedOnly() exclusion (imported from command-center.ts, not re-derived) — so the
+// UNFILTERED list contains exactly the vendors "Total vendors" counts. Filters (?status=,
+// ?location=, ?trade=, ?invitedBy= — src/lib/vendors/filters.ts) narrow within that same scoped,
+// declined-excluded set; they can never widen it. No pagination yet (see the handoff note).
 
 import { NextResponse } from 'next/server';
 import { getDb } from '@/lib/db/client';
@@ -14,12 +15,20 @@ import { requireTenantAuth, isResponse, forbidden } from '@/lib/api';
 import { resolveScope } from '@/lib/scope';
 import { isDeclinedOnly } from '@/lib/services/command-center';
 import { deriveOverallStatus, type OverallStatus } from '@/lib/vendors/status';
+import {
+  STATUS_OPTIONS,
+  TRADE_OPTIONS,
+  evaluateFilter,
+  filtersFromSearchParams,
+  type FilterOption,
+} from '@/lib/vendors/filters';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 
 interface VLocRow {
   vendor_id: string;
+  location_id: string;
   status: string;
 }
 
@@ -42,6 +51,11 @@ interface UserLocRow {
   location_name: string;
 }
 
+interface LocationRow {
+  id: string;
+  name: string;
+}
+
 export interface VendorListRow {
   id: string;
   businessName: string;
@@ -50,6 +64,20 @@ export interface VendorListRow {
   invitedBy: string;
   invitedAt: string;
   status: OverallStatus;
+}
+
+export interface VendorFilterOptions {
+  status: FilterOption[];
+  location: FilterOption[];
+  trade: FilterOption[];
+  invitedBy: FilterOption[];
+}
+
+export interface VendorsApiData {
+  vendors: VendorListRow[];
+  total: number;
+  unfilteredTotal: number;
+  filterOptions: VendorFilterOptions;
 }
 
 export async function GET(request: Request): Promise<NextResponse> {
@@ -64,8 +92,10 @@ export async function GET(request: Request): Promise<NextResponse> {
   const tenantId = auth.tenantId;
   const tdb = new TenantDB(db, tenantId);
   const scope = await resolveScope(db, tenantId, auth.sub, auth.role);
+  const filters = filtersFromSearchParams(new URL(request.url).searchParams);
 
-  const empty = { vendors: [] as VendorListRow[], total: 0 };
+  const emptyOptions: VendorFilterOptions = { status: STATUS_OPTIONS, location: [], trade: TRADE_OPTIONS, invitedBy: [] };
+  const empty = { vendors: [] as VendorListRow[], total: 0, unfilteredTotal: 0, filterOptions: emptyOptions };
   if (scope.locationIds !== null && scope.locationIds.length === 0) {
     return NextResponse.json({ data: empty });
   }
@@ -77,25 +107,45 @@ export async function GET(request: Request): Promise<NextResponse> {
   const locPlaceholders = locParams.map((_, i) => `$${i + 2}`).join(', ');
   const locFilter = scoped ? ` AND vl.location_id IN (${locPlaceholders})` : '';
 
-  // 1. Scoped vendor_locations statuses — the same base aggregation Command Center's
-  // totalVendorsInScope is built from, used here for both the declined-only exclusion and the
-  // per-vendor status derivation.
+  // 1. Scoped vendor_locations (status AND location_id) — the same base aggregation Command
+  // Center's totalVendorsInScope is built from, used here for the declined-only exclusion and
+  // for both the Status and Location filter attributes' per-vendor match sets.
   const vlocs = await tdb.all<VLocRow>(
-    `SELECT vl.vendor_id, vl.status FROM vendor_locations vl WHERE vl.tenant_id = $1${locFilter}`,
+    `SELECT vl.vendor_id, vl.location_id, vl.status FROM vendor_locations vl WHERE vl.tenant_id = $1${locFilter}`,
     locParams
   );
   const statusesByVendor = new Map<string, string[]>();
+  const locationIdsByVendor = new Map<string, string[]>();
   for (const r of vlocs) {
-    const arr = statusesByVendor.get(r.vendor_id);
-    if (arr) arr.push(r.status);
-    else statusesByVendor.set(r.vendor_id, [r.status]);
+    const s = statusesByVendor.get(r.vendor_id);
+    if (s) s.push(r.status); else statusesByVendor.set(r.vendor_id, [r.status]);
+    const l = locationIdsByVendor.get(r.vendor_id);
+    if (l) l.push(r.location_id); else locationIdsByVendor.set(r.vendor_id, [r.location_id]);
   }
 
   const inScopeVendorIds = [...statusesByVendor.keys()].filter(
     (id) => !isDeclinedOnly(statusesByVendor.get(id)!)
   );
+
+  // Scoped, active locations — the Location filter's option list. Fetched even when zero
+  // vendors are in scope: the option list is still meaningful (a district's facilities exist
+  // whether or not a vendor happens to be assigned to one yet). A district manager sees only
+  // their region's facilities (same query shape as facilitiesInScope in command-center.ts) —
+  // independent of which locations vendors actually happen to be at, and independent of any
+  // currently-applied filter (options are always the full scoped universe, never narrowed by
+  // sibling filters — so picking one filter never makes another's options disappear).
+  const locationRows = await tdb.all<LocationRow>(
+    scoped
+      ? `SELECT id, name FROM locations WHERE tenant_id = $1 AND status = 'active' AND id IN (${locPlaceholders}) ORDER BY name`
+      : `SELECT id, name FROM locations WHERE tenant_id = $1 AND status = 'active' ORDER BY name`,
+    locParams
+  );
+  const locationOptions: FilterOption[] = locationRows.map((l) => ({ value: l.id, label: l.name }));
+
   if (inScopeVendorIds.length === 0) {
-    return NextResponse.json({ data: empty });
+    return NextResponse.json({
+      data: { ...empty, filterOptions: { status: STATUS_OPTIONS, location: locationOptions, trade: TRADE_OPTIONS, invitedBy: [] } },
+    });
   }
 
   // 2. Vendor identity.
@@ -121,6 +171,14 @@ export async function GET(request: Request): Promise<NextResponse> {
     inScopeVendorIds
   );
   const inviteByVendor = new Map(invites.map((i) => [i.vendor_id, i]));
+
+  // Invited-by filter options — the distinct inviters actually present among THIS scoped
+  // vendor set, not a broader "all users in my region" query. This is deliberate: it can never
+  // leak an out-of-scope user's existence (it's a strict subset of data this response already
+  // returns per-row), and it never offers an option that's guaranteed to return zero results.
+  const invitedByOptions: FilterOption[] = [
+    ...new Map(invites.map((i) => [i.inviter_user_id, i.inviter_name ?? 'Unknown user'])),
+  ].map(([value, label]) => ({ value, label })).sort((a, b) => a.label.localeCompare(b.label));
 
   // 4. Inviter's CURRENT assigned locations — only matters for store_manager inviters (admin
   // is org-wide, district_manager is region-not-facility; both always render "Corporate").
@@ -154,23 +212,17 @@ export async function GET(request: Request): Promise<NextResponse> {
     // Primary facility — three explicit, mutually exclusive cases. No default: each branch
     // assigns its own value so a future missed case fails loudly (undefined) instead of
     // silently inheriting a meaningful-looking one. 'Corporate' must only ever mean "the
-    // inviter has no single facility" — never "we don't know" (that was the bug: this used to
-    // start at 'Corporate' and only get overwritten inside the store_manager branch, so a
-    // vendor with no invite on record rendered identically to a real admin/district invite).
+    // inviter has no single facility" — never "we don't know".
     let primaryFacility: string;
     if (!invite) {
-      // No invite on record at all — unknown, not a classification.
       primaryFacility = '—';
     } else if (invite.inviter_role === 'store_manager') {
       const locs = locNamesByUser.get(invite.inviter_user_id) ?? [];
-      // Exactly one assigned location -> that facility; zero or multiple -> no single facility.
       primaryFacility = locs.length === 1 ? locs[0] : 'Corporate';
     } else {
-      // admin or district_manager — org-wide / region-scoped, never a single facility.
       primaryFacility = 'Corporate';
     }
 
-    const statuses = statusesByVendor.get(v.id) ?? [];
     return {
       id: v.id,
       businessName: v.business_name,
@@ -178,9 +230,45 @@ export async function GET(request: Request): Promise<NextResponse> {
       primaryFacility,
       invitedBy,
       invitedAt: v.created_at,
-      status: deriveOverallStatus(statuses.map((status) => ({ status }))),
+      status: deriveOverallStatus((statusesByVendor.get(v.id) ?? []).map((status) => ({ status }))),
     };
   });
 
-  return NextResponse.json({ data: { vendors: rows, total: rows.length } });
+  // Per-vendor match set for each filter attribute — Status/Location are per-location (a
+  // vendor can have several), Trade/Invited by are vendor-level (wrapped as 0-or-1 element so
+  // evaluateFilter's any-of/none-of logic is identical across all four).
+  function matchSet(vendorId: string, attribute: string): string[] {
+    switch (attribute) {
+      case 'status': return statusesByVendor.get(vendorId) ?? [];
+      case 'location': return locationIdsByVendor.get(vendorId) ?? [];
+      case 'trade': {
+        const v = vendors.find((x) => x.id === vendorId);
+        return v ? [v.trade] : [];
+      }
+      case 'invitedBy': {
+        const invite = inviteByVendor.get(vendorId);
+        return invite ? [invite.inviter_user_id] : [];
+      }
+      default: return [];
+    }
+  }
+
+  const filteredRows = filters.length === 0
+    ? rows
+    : rows.filter((r) => filters.every((f) => evaluateFilter(matchSet(r.id, f.attribute), f.operator, f.values)));
+
+  const filterOptions: VendorFilterOptions = {
+    status: STATUS_OPTIONS,
+    location: locationOptions,
+    trade: TRADE_OPTIONS,
+    invitedBy: invitedByOptions,
+  };
+
+  const data: VendorsApiData = {
+    vendors: filteredRows,
+    total: filteredRows.length,
+    unfilteredTotal: rows.length,
+    filterOptions,
+  };
+  return NextResponse.json({ data });
 }
