@@ -151,10 +151,23 @@ export async function GET(request: Request): Promise<NextResponse> {
     // fallback decidedByName() already uses in /api/vendors/[id]/route.ts.
     const invitedBy = invite?.inviter_name ?? 'Unknown user';
 
-    let primaryFacility = 'Corporate';
-    if (invite?.inviter_role === 'store_manager') {
+    // Primary facility — three explicit, mutually exclusive cases. No default: each branch
+    // assigns its own value so a future missed case fails loudly (undefined) instead of
+    // silently inheriting a meaningful-looking one. 'Corporate' must only ever mean "the
+    // inviter has no single facility" — never "we don't know" (that was the bug: this used to
+    // start at 'Corporate' and only get overwritten inside the store_manager branch, so a
+    // vendor with no invite on record rendered identically to a real admin/district invite).
+    let primaryFacility: string;
+    if (!invite) {
+      // No invite on record at all — unknown, not a classification.
+      primaryFacility = '—';
+    } else if (invite.inviter_role === 'store_manager') {
       const locs = locNamesByUser.get(invite.inviter_user_id) ?? [];
-      if (locs.length === 1) primaryFacility = locs[0];
+      // Exactly one assigned location -> that facility; zero or multiple -> no single facility.
+      primaryFacility = locs.length === 1 ? locs[0] : 'Corporate';
+    } else {
+      // admin or district_manager — org-wide / region-scoped, never a single facility.
+      primaryFacility = 'Corporate';
     }
 
     const statuses = statusesByVendor.get(v.id) ?? [];

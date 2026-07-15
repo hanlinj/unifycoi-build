@@ -102,13 +102,23 @@ async function rule(db: Db, scope: string, scopeRef: string | null, key: string,
   }).execute();
 }
 
-async function vendor(db: Db, name: string, trade: string, email: string): Promise<string> {
+// Every real vendor is created with exactly one purpose='onboarding' invite, atomically, by
+// createVendorInvite() (src/lib/services/vendors.ts) — that's the only application code path
+// that inserts a vendors row. This helper used to skip the invite half of that shape entirely,
+// which is why 7 of 9 seed vendors rendered "Unknown user" on the Vendors list: dev data didn't
+// match what prod guarantees. Now mirrors it — inviterId is required, not optional, so a future
+// call site can't silently reintroduce the gap. Returns the invite's raw token too (needed for
+// Ridgeline's printed vendor-flow link below).
+async function vendor(
+  db: Db, name: string, trade: string, email: string, inviterId: string, deliveryState: string = 'sent'
+): Promise<{ id: string; token: string }> {
   const id = randomUUID();
   await db.insertInto('vendors').values({
     id, tenant_id: TENANT, business_name: name, contact_name: 'Pat Vendor', contact_email: email,
     contact_phone: '208-555-0100', trade, created_at: nowDate(),
   }).execute();
-  return id;
+  const token = await invite(db, id, inviterId, deliveryState);
+  return { id, token };
 }
 async function vloc(db: Db, vendorId: string, locationId: string, status: string): Promise<void> {
   await db.insertInto('vendor_locations').values({
@@ -198,9 +208,18 @@ async function seed(db: Db): Promise<{ summary: string[]; pendingToken: string }
   const allLocs = [cda, postFalls, spokaneValley, libertyLake];
   const summary: string[] = [];
 
+  // Inviter mix — deliberate, not incidental. store is scoped to exactly one location (cda),
+  // so vendors it invites resolve to that real facility on the Vendors list; admin/district
+  // always resolve to "Corporate" (org-wide / region, never a single facility). Picked per
+  // vendor by which locations they actually touch, so the fixture stays internally plausible:
+  // store only invites vendors that include cda; district only invites vendors within North
+  // Idaho (cda/postFalls, its own region); admin (org-wide) covers the rest. 3 store / 2
+  // district / 4 admin — both Primary facility branches are well represented for the upcoming
+  // "Invited by" filter.
+
   // 1 — clean approved everywhere (Tier 3 · on track)
   {
-    const v = await vendor(db, 'Summit Mechanical Services', 'hvac', 'dispatch@summitmech.test');
+    const { id: v } = await vendor(db, 'Summit Mechanical Services', 'hvac', 'dispatch@summitmech.test', store);
     for (const l of allLocs) await vloc(db, v, l, 'approved');
     await run(db, v, 'approve'); await doc(db, v, 'coi'); await doc(db, v, 'w9');
     await chase(db, v, 'dispatch@summitmech.test', dateInDays(280)); // far out → on track
@@ -208,7 +227,7 @@ async function seed(db: Db): Promise<{ summary: string[]; pendingToken: string }
   }
   // 2 — under_review, uncertain (Tier 1 · uncertain) — Clearwater WC-exemption canonical case
   {
-    const v = await vendor(db, 'Clearwater Plumbing & Drain', 'plumbing', 'office@clearwaterplumbing.test');
+    const { id: v } = await vendor(db, 'Clearwater Plumbing & Drain', 'plumbing', 'office@clearwaterplumbing.test', store);
     await vloc(db, v, cda, 'under_review'); await vloc(db, v, postFalls, 'under_review');
     const r = await run(db, v, 'uncertain'); await doc(db, v, 'coi'); await doc(db, v, 'w9');
     await evalRow(db, r, v, cda, 'workers_comp_exemption_claimed', 'true', 'uncertain', 'indeterminate', 'low',
@@ -217,7 +236,7 @@ async function seed(db: Db): Promise<{ summary: string[]; pendingToken: string }
   }
   // 3 — under_review, deficiencies (Tier 1 · deficiencies, 2 failed)
   {
-    const v = await vendor(db, 'Apex Electric Co.', 'electrical', 'billing@apexelectric.test');
+    const { id: v } = await vendor(db, 'Apex Electric Co.', 'electrical', 'billing@apexelectric.test', admin);
     await vloc(db, v, spokaneValley, 'under_review'); await vloc(db, v, libertyLake, 'under_review');
     const r = await run(db, v, 'deficiencies'); await doc(db, v, 'coi'); await doc(db, v, 'w9');
     await evalRow(db, r, v, spokaneValley, 'coverage.general_liability.each_occurrence', '2000000', 'deficient', 'fails', 'high',
@@ -228,7 +247,7 @@ async function seed(db: Db): Promise<{ summary: string[]; pendingToken: string }
   }
   // 4 — approved, COI imminent (≤7d) (Tier 1 · imminent lapse)
   {
-    const v = await vendor(db, 'Liberty Lake Landscaping', 'landscaping', 'crew@lllandscaping.test');
+    const { id: v } = await vendor(db, 'Liberty Lake Landscaping', 'landscaping', 'crew@lllandscaping.test', admin);
     await vloc(db, v, spokaneValley, 'approved'); await vloc(db, v, libertyLake, 'approved');
     await run(db, v, 'approve'); await doc(db, v, 'coi'); await doc(db, v, 'w9');
     await chase(db, v, 'crew@lllandscaping.test', dateInDays(6));
@@ -236,7 +255,7 @@ async function seed(db: Db): Promise<{ summary: string[]; pendingToken: string }
   }
   // 5 — approved, COI expiring soon (8–60d) (Tier 2 · expiring soon)
   {
-    const v = await vendor(db, 'Five-Star Cleaning Crew', 'cleaning', 'ops@fivestarclean.test');
+    const { id: v } = await vendor(db, 'Five-Star Cleaning Crew', 'cleaning', 'ops@fivestarclean.test', admin);
     for (const l of allLocs) await vloc(db, v, l, 'approved');
     await run(db, v, 'approve'); await doc(db, v, 'coi'); await doc(db, v, 'w9');
     await chase(db, v, 'ops@fivestarclean.test', dateInDays(21));
@@ -245,27 +264,26 @@ async function seed(db: Db): Promise<{ summary: string[]; pendingToken: string }
   // 6 — open invite, delivered, not opened (Tier 3 · pending) — click-through vendor flow
   let pendingToken = '';
   {
-    const v = await vendor(db, 'Ridgeline Tree & Pest', 'pest_control', 'hello@ridgelinepest.test');
+    const { id: v, token } = await vendor(db, 'Ridgeline Tree & Pest', 'pest_control', 'hello@ridgelinepest.test', store);
     await vloc(db, v, cda, 'invited_pending');
-    pendingToken = await invite(db, v, admin, 'sent');
+    pendingToken = token;
     summary.push('Ridgeline Tree & Pest (pest_control) — open invite (not opened) → Tier 3 · Pending  [vendor link below]');
   }
   // 7 — bounced invite (Tier 2 · invite failed / Resend)
   {
-    const v = await vendor(db, 'Gate Guard Systems', 'gate_door', 'bademail@gateguard.test');
+    const { id: v } = await vendor(db, 'Gate Guard Systems', 'gate_door', 'bademail@gateguard.test', district, 'bounced');
     await vloc(db, v, postFalls, 'invited_pending');
-    await invite(db, v, district, 'bounced');
     summary.push('Gate Guard Systems (gate_door) — invite bounced → Tier 2 · Invite failed (Resend)');
   }
   // 8 — expired coverage (Tier 1 · expired)
   {
-    const v = await vendor(db, 'Northwest Paving', 'paving_asphalt', 'jobs@nwpaving.test');
+    const { id: v } = await vendor(db, 'Northwest Paving', 'paving_asphalt', 'jobs@nwpaving.test', district);
     await vloc(db, v, postFalls, 'expired'); await doc(db, v, 'coi'); await doc(db, v, 'w9');
     summary.push('Northwest Paving (paving_asphalt) — coverage expired → Tier 1 · Expired');
   }
   // 9 — non-compliant after a rule change (Tier 1 · non-compliant)
   {
-    const v = await vendor(db, 'Iron Gate Security', 'security', 'admin@irongatesec.test');
+    const { id: v } = await vendor(db, 'Iron Gate Security', 'security', 'admin@irongatesec.test', admin);
     await vloc(db, v, spokaneValley, 'non_compliant'); await doc(db, v, 'coi'); await doc(db, v, 'w9');
     const r = await run(db, v, 'deficiencies', 'rule_change');
     await evalRow(db, r, v, spokaneValley, 'coverage.general_liability.each_occurrence', '1000000', 'deficient', 'fails', 'high',
